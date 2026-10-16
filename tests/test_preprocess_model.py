@@ -58,6 +58,16 @@ class PreprocessTest(unittest.TestCase):
         out = welch_psd(filtered, SRATE)
         self.assertAlmostEqual(band_power(out.freqs, out.psd, 8, 13) / band_power(raw.freqs, raw.psd, 8, 13), 1.0, delta=0.2)
 
+    def test_forward_backward_filter_has_no_interior_phase_shift(self):
+        from ningsi.signal.preprocess import _biquad, filtfilt
+        time = np.arange(int(40 * SRATE)) / SRATE
+        signal = np.sin(2 * np.pi * time)
+        filtered = filtfilt(signal, *_biquad("highpass", 0.5, SRATE), pad=750)
+        region = slice(int(10 * SRATE), int(30 * SRATE))
+        basis = np.column_stack((np.sin(2 * np.pi * time[region]), np.cos(2 * np.pi * time[region])))
+        coefficients = np.linalg.lstsq(basis, filtered[region], rcond=None)[0]
+        self.assertLess(abs(np.degrees(np.arctan2(coefficients[1], coefficients[0]))), 0.1)
+
     def test_chain_log_records_parameters(self):
         _, log = preprocess(np.zeros(int(2 * SRATE)), SRATE)
         stages = log.as_dict()["stages"]

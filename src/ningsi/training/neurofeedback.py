@@ -18,9 +18,14 @@ def clamp(value: float, low: float, high: float) -> float:
 
 
 def initial_target(baseline: Baseline | None = None) -> tuple[float, str]:
-    """初始目标取自基线分布中位数：中位数对应 z=0、评分 0.5，再做区间裁剪。"""
+    """以专注比值的基线中位数，经过同一标准化和评分函数确定目标。"""
     settings = config.TRAINING
     base_score = score_from_z(0.0)
+    stat = baseline.index_stat("focus") if baseline is not None and baseline.valid else None
+    if stat is not None:
+        z = baseline.z_index("focus", stat["median"])
+        if z is not None:
+            base_score = score_from_z(z)
     target = clamp(base_score, settings["target_min"], settings["target_max"])
     rationale = f"基线中位数对应评分 {base_score:.2f}，裁剪到 [{settings['target_min']:.2f}, {settings['target_max']:.2f}] 后取 {target:.2f}"
     if baseline is not None and not baseline.valid:
@@ -40,19 +45,36 @@ class Segment:
     def stats(self) -> dict:
         values = [value for _, value in self.samples]
         if not values:
-            return {"mean": 0.0, "on_target_ratio": 0.0, "volatility": 0.0, "n": 0, "achieved": False}
+            return {"mean": 0.0, "on_target_ratio": 0.0, "volatility": 0.0, "n": 0,
+                    "achieved": False, "max_hold_sec": 0.0, "current_hold_sec": 0.0}
         mean = sum(values) / len(values)
         if len(values) > 1:
             volatility = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** 0.5
         else:
             volatility = 0.0
         on_target = sum(1 for v in values if v >= self.target)
+        current_hold = max_hold = 0.0
+        previous = None
+        previous_on_target = False
+        for timestamp, value in self.samples:
+            if value >= self.target:
+                delta = timestamp - previous if previous is not None else 0.0
+                if previous_on_target and 0 < delta <= config.STEP_SEC * 1.5:
+                    current_hold += delta
+                else:
+                    current_hold = 0.0
+                max_hold = max(max_hold, current_hold)
+            else:
+                current_hold = 0.0
+            previous, previous_on_target = timestamp, value >= self.target
         return {
             "mean": round(mean, 4),
             "on_target_ratio": round(on_target / len(values), 4),
             "volatility": round(volatility, 4),
             "n": len(values),
-            "achieved": (on_target / len(values)) >= 0.5,
+            "max_hold_sec": round(max_hold, 4),
+            "current_hold_sec": round(current_hold, 4),
+            "achieved": max_hold >= self.hold_sec,
         }
 
     def as_dict(self) -> dict:
@@ -78,7 +100,7 @@ class NeurofeedbackSession:
     rationale: str = ""
     baseline_before: dict = field(default_factory=dict)
     baseline_after: dict = field(default_factory=dict)
-    spec: str = "neurofeedback-v1"
+    spec: str = "neurofeedback-v2"
 
     def plan(self) -> dict:
         return dict(config.TRAINING[self.mode])
@@ -95,7 +117,7 @@ class NeurofeedbackSession:
             self.hold_sec = min(self.hold_sec + 2.0, 20.0)
         elif stats["on_target_ratio"] < settings["on_target_lower"] or stats["volatility"] > settings["volatility_high"]:
             target = clamp(target - step, settings["target_min"], settings["target_max"])
-            self.hold_sec = max(self.hold_sec - 2.0, 3.0)
+            self.hold_sec = max(self.hold_sec - 2.0, 6.0)
         return target
 
     def add_segment(self, samples, duration_sec: float, excluded_windows: int = 0) -> Segment:
@@ -118,6 +140,8 @@ class NeurofeedbackSession:
         comparable, reason = (True, "no_baseline")
         if baseline_before is not None and baseline_after is not None:
             comparable, reason = can_compare(baseline_before, baseline_after.srate, baseline_after.channels, baseline_after.device)
+            if not baseline_after.valid:
+                comparable, reason = False, "invalid_after_baseline"
         return {
             "spec": self.spec,
             "mode": self.mode,

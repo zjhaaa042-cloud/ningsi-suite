@@ -157,7 +157,9 @@ class TrainingTest(unittest.TestCase):
     def test_initial_target_comes_from_baseline_median(self):
         _, baseline = make_baseline()
         target, rationale = initial_target(baseline)
-        self.assertAlmostEqual(target, 0.5, places=6)
+        from ningsi.signal.indicators import score_from_z
+        expected = score_from_z(baseline.z_index("focus", baseline.index_stat("focus")["median"]))
+        self.assertAlmostEqual(target, max(0.25, min(0.85, expected)), places=6)
         self.assertIn("基线中位数", rationale)
 
     def test_adaptation_raises_and_lowers_target(self):
@@ -173,6 +175,16 @@ class TrainingTest(unittest.TestCase):
         stats = segment.stats()
         self.assertAlmostEqual(stats["mean"], 0.6, places=4)
         self.assertAlmostEqual(stats["on_target_ratio"], 2 / 3, places=4)
+
+    def test_continuous_hold_rejects_fragmented_and_missing_windows(self):
+        from ningsi.training.neurofeedback import Segment
+        fragmented = Segment(1, 120, 0.5, 6, [(i * 2, 0.9 if i % 2 == 0 else 0.1) for i in range(12)])
+        self.assertFalse(fragmented.stats()["achieved"])
+        uninterrupted = Segment(1, 120, 0.5, 6, [(0, 0.9), (2, 0.9), (4, 0.9), (6, 0.9)])
+        self.assertTrue(uninterrupted.stats()["achieved"])
+        gap = Segment(1, 120, 0.5, 6, [(0, 0.9), (2, 0.9), (6, 0.9), (8, 0.9)])
+        self.assertEqual(gap.stats()["max_hold_sec"], 2)
+        self.assertFalse(gap.stats()["achieved"])
 
     def test_summary_marks_comparability(self):
         _, baseline_before = make_baseline()

@@ -45,23 +45,23 @@ def apply_biquad(samples, b, a) -> np.ndarray:
 
 
 def filtfilt(samples, b, a, pad: int = 32) -> np.ndarray:
-    """零相位滤波：镜像填充 → 正向 → 反向 → 再正向。"""
+    """镜像填充后前后向各滤一次，避免多一次正向滤波引入相位偏移。"""
     x = np.asarray(samples, dtype=float)
-    if x.size <= pad * 3:
-        return apply_biquad(x, b, a)
-    head = x[:pad][::-1]
-    tail = x[-pad:][::-1]
+    if x.size < 2:
+        raise ValueError("零相位滤波至少需要两个样本")
+    pad = min(max(1, int(pad)), x.size - 1)
+    head = 2 * x[0] - x[1:pad + 1][::-1]
+    tail = 2 * x[-1] - x[-pad - 1:-1][::-1]
     padded = np.concatenate([head, x, tail])
     forward = apply_biquad(padded, b, a)
     backward = apply_biquad(forward[::-1], b, a)[::-1]
-    final = apply_biquad(backward, b, a)
-    return final[pad:-pad]
+    return backward[pad:-pad]
 
 
 @dataclass
 class ChainLog:
     stages: list = field(default_factory=list)
-    spec: str = "preprocess-v1"
+    spec: str = "preprocess-v2"
 
     def add(self, stage: str, **params) -> None:
         self.stages.append({"stage": stage, **params})

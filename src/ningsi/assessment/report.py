@@ -52,6 +52,8 @@ class SessionReport:
                 "indicator": config.INDICATOR_SPEC,
                 "baseline": config.BASELINE_SPEC,
                 "assessment": config.LABEL_SPEC,
+                "preprocess": "preprocess-v2",
+                "training": "neurofeedback-v2",
             },
             "indicators": self.indicators,
             "quality": self.quality,
@@ -70,7 +72,7 @@ class SessionReport:
             f"# 凝思状态评估报告（sub-{self.participant} / ses-{self.session} / run-{self.run}）",
             "",
             f"- 指标口径：{config.INDICATOR_SPEC}；基线口径：{config.BASELINE_SPEC}；处理链：{config.SPECTRUM_SPEC}",
-            f"- 软件版本：{config.VERSION}",
+            f"- 软件版本：{config.VERSION}；预处理协议：preprocess-v2；训练协议：neurofeedback-v2",
             "",
         ]
         # 真实设备专用：把采集调理口径写进报告表头（仿真源没有这一步，不出现这一行）

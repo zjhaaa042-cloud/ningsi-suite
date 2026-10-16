@@ -30,7 +30,7 @@ class Spectrum:
             "segment_sec": self.segment_sec,
             "taper": self.taper,
             "nfft": self.nfft,
-            "delta_f_hz": round(1.0 / (self.nfft / 250.0), 4) if self.nfft else None,
+            "delta_f_hz": round(float(self.freqs[1] - self.freqs[0]), 4) if self.freqs.size > 1 else None,
             "fmax": float(self.freqs[-1]) if self.freqs.size else 0.0,
         }
 
