@@ -222,13 +222,33 @@ def panel_trend() -> Path:
 
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# PowerShell 把子进程的 stderr 升级成异常时会在日志里插入一段报错堆栈，演示画面里必须滤掉
+PS_NOISE = re.compile(
+    r"^(powershell\s*:|At line:|FullyQualifiedErrorId|CategoryInfo|\s*\+|注意|.*NativeCommandError|"
+    r"-{5,}|={5,}|\.{5,}\s*$)")
+
+
+def read_log(path: Path) -> str:
+    """按 BOM / 编码特征读取日志：PowerShell 重定向默认写 UTF-16-LE，直接按 UTF-8 读会整屏乱码。"""
+    raw = path.read_bytes()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16")
+    if raw[:3] == b"\xef\xbb\xbf":
+        return raw.decode("utf-8-sig")
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def terminal_lines() -> list[str]:
     lines: list[str] = []
     if VERIFY_LOG.exists():
-        raw = ANSI.sub("", VERIFY_LOG.read_text(encoding="utf-8", errors="ignore"))
-        keep = [item.rstrip() for item in raw.splitlines() if item.strip()]
+        raw = ANSI.sub("", read_log(VERIFY_LOG))
+        keep = [item.rstrip() for item in raw.splitlines()
+                if item.strip() and not PS_NOISE.match(item)]
         lines.extend(keep)
     if not lines:
         raise SystemExit(f"缺少终端日志：{VERIFY_LOG}")
@@ -243,12 +263,27 @@ def panel_terminal_frames() -> int:
         TERMINAL.mkdir(parents=True, exist_ok=True)
     lines = terminal_lines()
     header = [
-        "PS D:\\Desktop\\ningsi\\ningsi> $env:PYTHONPATH=\"src\"",
-        "PS D:\\Desktop\\ningsi\\ningsi> python -m ningsi.app.cli demo --root var/video --participant p01",
+        "PS> cd ningsi",
+        "PS ningsi> $env:PYTHONPATH = \"src\"",
+        "PS ningsi> .\\scripts\\verify.ps1",
         "",
     ]
     payload = header + lines
     visible = 30
+    wrap_at = 138                     # 超长行按字符宽度折行，不截断内容
+    wrapped: list[str] = []
+    for line in payload:
+        if len(line) <= wrap_at:
+            wrapped.append(line)
+        else:
+            head = line
+            while len(head) > wrap_at:
+                cut = head.rfind(" ", 0, wrap_at)
+                cut = cut if cut > wrap_at * 0.6 else wrap_at
+                wrapped.append(head[:cut])
+                head = "    " + head[cut:].lstrip()
+            wrapped.append(head)
+    payload = wrapped
     total = max(visible + 8, len(payload) + 4)
     frame_font = mono(23)
     line_height = 30
@@ -258,13 +293,13 @@ def panel_terminal_frames() -> int:
         pen = ImageDraw.Draw(image)
         pen.rectangle((0, 0, W, 64), fill="#161B22")
         pen.text((26, 20), "凝思 · 一键复现（真实运行输出）", font=font(26, True), fill="#E6EDF3")
-        pen.text((W - 470, 24), "python -m ningsi.app.cli demo", font=mono(22), fill="#7D8590")
+        pen.text((W - 360, 24), "PowerShell · scripts/verify.ps1", font=mono(22), fill="#7D8590")
         y = 96
         for line in shown[-visible:]:
             color = "#7EE787" if line.startswith("PS ") else ("#FFA657" if "预警" in line else "#C9D1D9")
             # Consolas 无中文字形：含中文的行改用微软雅黑，避免出现方框
             line_font = font(22) if any(ord(ch) > 127 for ch in line) else frame_font
-            pen.text((26, y), line[:150], font=line_font, fill=color)
+            pen.text((26, y), line[:wrap_at], font=line_font, fill=color)
             y += line_height
         pen.text((26, H - 46), "51 个自动化用例 + 端到端演示：scripts/verify.ps1", font=font(22), fill="#7D8590")
         image.save(TERMINAL / f"term_{frame + 1:05d}.png")
