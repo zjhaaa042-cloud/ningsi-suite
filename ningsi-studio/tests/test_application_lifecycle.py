@@ -5,10 +5,12 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 from ningsi_studio.app import create_app
-from ningsi_studio.core.runtime import SessionManager
+from ningsi_studio.core.runtime import SessionManager, SessionRuntime, SessionCancelled
+from ningsi_studio.http.sse import EventBus
 from ningsi_studio.db.ownership import DataDirectoryLock
 from ningsi_studio.http.router import Conflict
 from ningsi_studio.http.server import AppServer
@@ -59,3 +61,30 @@ class ApplicationLifecycleTests(unittest.TestCase):
             manager.ensure_capacity()
         with self.assertRaises(Conflict):
             manager.start('0' * 32)
+
+    def test_start_failure_releases_loaded_source_and_closes_bus(self):
+        for failure in ('cancel', 'load', 'thread'):
+            with self.subTest(failure=failure):
+                engine = SimpleNamespace(stop=Mock())
+                bus = EventBus('startup-test')
+                subscriber, _ = bus.subscribe()
+                runtime = SessionRuntime('startup-test', settings=self.settings, bus=bus)
+                error = RuntimeError('startup failed')
+
+                def load():
+                    runtime.source = SimpleNamespace(engine=engine)
+                    if failure == 'cancel':
+                        runtime.cancel()
+                    elif failure == 'load':
+                        raise error
+
+                with patch.object(runtime, '_load', side_effect=load), \
+                     patch.object(threading.Thread, 'start', side_effect=error):
+                    with self.assertRaises(SessionCancelled if failure == 'cancel' else RuntimeError) as caught:
+                        runtime.start()
+                if failure != 'cancel':
+                    self.assertIs(caught.exception, error)
+                engine.stop.assert_called_once_with()
+                self.assertFalse(runtime.alive)
+                self.assertTrue(bus.closed)
+                self.assertEqual(bus.subscriber_count(), 0)

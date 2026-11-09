@@ -111,11 +111,17 @@ class SessionRuntime:
     # ------------------------------------------------------------------ 线程
     def start(self) -> None:
         """同步完成装载（含数据源选择），再起线程，保证创建接口能立刻读到 source。"""
-        self._load()
-        self._check_cancel()
-        self._thread = threading.Thread(target=self._guarded_run,
-                                        name=f"session-{self.uuid[:8]}", daemon=True)
-        self._thread.start()
+        try:
+            self._load()
+            self._check_cancel()
+            self._thread = threading.Thread(target=self._guarded_run,
+                                            name=f"session-{self.uuid[:8]}", daemon=True)
+            self._thread.start()
+        except BaseException:
+            # 工作线程尚未接管资源，启动方负责释放已创建的数据源。
+            self._release_source()
+            self.bus.close()
+            raise
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -984,7 +990,7 @@ class SessionRuntime:
             LOGGER.warning("产物入库失败：%s", exc)
 
     # ------------------------------------------------------------------ 收尾
-    def _finish(self, status: str, error, summary: dict | None = None) -> None:
+    def _release_source(self) -> None:
         # 释放常驻采集资源（LSL 线程/缓冲），否则会话结束还会占着一个采集线程
         engine = getattr(self.source, "engine", None) if self.source is not None else None
         if engine is not None and hasattr(engine, "stop"):
@@ -992,6 +998,9 @@ class SessionRuntime:
                 engine.stop()
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("释放采集资源失败：%s", exc)
+
+    def _finish(self, status: str, error, summary: dict | None = None) -> None:
+        self._release_source()
         try:
             with store.connect(self.db_path) as conn:
                 repo.update_session(conn, self.uuid, status=status,
