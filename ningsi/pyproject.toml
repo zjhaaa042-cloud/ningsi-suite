@@ -18,8 +18,8 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/zjhaaa042-cloud/ningsi"
-Issues = "https://github.com/zjhaaa042-cloud/ningsi/issues"
+Repository = "https://github.com/zjhaaa042-cloud/ningsi-suite/tree/main/ningsi"
+Issues = "https://github.com/zjhaaa042-cloud/ningsi-suite/issues"
 
 [project.optional-dependencies]
 lsl = ["pylsl==1.18.2"]

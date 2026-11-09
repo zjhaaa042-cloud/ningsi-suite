@@ -3,7 +3,7 @@
 **A09 赛题**「AI+便携脑电设备的专注力强化训练系统」的可运行 Web 工程：
 **前端（浏览器界面）+ 后端（HTTP API + 会话运行时）+ 数据保存（SQLite 权威库 + JSONL 审计台账）**。
 
-算法能力全部来自上游产品层仓库 [`ningsi`](https://github.com/zjhaaa042-cloud/ningsi)
+算法能力全部来自本 monorepo 的引擎包 [`ningsi`](../ningsi/README.md)
 （信号处理、量表、SART/PVT-B、联合评估、神经反馈训练、模型训练、报告），本仓库只做
 **服务、持久化与界面**，因此三端（CLI / 桌面版 / Web）口径完全一致。
 
@@ -27,23 +27,28 @@ HTTP 服务 (src/ningsi_studio/http/)  ──  静态资源同端口提供
 
 ## 一、快速开始
 
-### 0. 先装算法引擎（本仓库不含引擎）
+### 0. 算法引擎（源码就在同仓库，通常无需安装）
 
-引擎 `ningsi` **没有发布到 PyPI**，克隆本仓库后必须先装上它（任选一种）：
+引擎源码位于本 monorepo 的同级目录 `../ningsi/`，`run.bat` / `start.bat` 会自动从
+`..\ningsi\src` 定位并加载，**直接启动即可**。
+
+若希望在命令行里也能用 `ningsi` 命令，显式安装一次：
 
 ```powershell
-# ① 与本仓库并排放在同一父目录时（推荐开发用）
-cd <父目录>
-git clone https://github.com/zjhaaa042-cloud/ningsi.git
-cd ningsi-studio
-pip install -e ..\ningsi
-
-# ② 或者直接从 GitHub 安装
-pip install git+https://github.com/zjhaaa042-cloud/ningsi.git
+# 在 monorepo 根目录
+pip install -e ningsi
 ```
 
-`run.bat` 的依赖检查会告诉你 `ningsi` 是否已就绪；缺失时会引导你运行
-`scripts\bootstrap.ps1`，它同样会尝试上面两条路径。
+从远端克隆整个 monorepo（含引擎）：
+
+```powershell
+git clone https://github.com/zjhaaa042-cloud/ningsi-suite.git
+cd ningsi-suite\ningsi-studio
+.\run.bat
+```
+
+若引擎确实不可导入，`scripts\bootstrap.ps1` 会依次尝试 `..\ningsi`、`vendor\ningsi`
+或从 GitHub 安装（`git+https://github.com/zjhaaa042-cloud/ningsi-suite.git#subdirectory=ningsi`）。
 
 ### 1. 启动
 
@@ -98,7 +103,7 @@ python -m ningsi_studio export-ledger      # 从库重放 JSONL 台账
 
 | 地址 | 内容 |
 |---|---|
-| `http://127.0.0.1:8765/` | 前端界面（九个视图） |
+| `http://127.0.0.1:8765/` | 前端界面（十个视图） |
 | `http://127.0.0.1:8765/api/openapi.json` | 接口描述（机器可读） |
 | `http://127.0.0.1:8765/api/health` | 服务与口径版本自检 |
 | `http://127.0.0.1:8765/api/devices` | 可用数据源：仿真源 + 扫描到的真实 LSL 流 |
@@ -283,7 +288,7 @@ assessment / model / artifacts / cancelled / error / finished`。
 
 ```powershell
 .\run.ps1 -Action check       # 静态自检：语法、接口与事件文档、前端资源与接口调用一致性
-.\run.ps1 -Action test        # 105 个用例：单元 + 集成 + 端到端（无需浏览器与真实设备）
+.\run.ps1 -Action test        # 149 个用例：单元 + 集成 + 端到端（无需浏览器与真实设备）
 .\run.ps1 -Action smoke       # 对已启动服务做 HTTP 冒烟：建被试 → 建会话 → 校验报告/热力图/趋势/zip
 ```
 
@@ -325,7 +330,7 @@ SSE 事件与 `Last-Event-ID` 重放（含裸 `NaN/Infinity` 净化）、量表/
 
 | 仓库 | 版本/位置 | 本工程如何使用 |
 |---|---|---|
-| `ningsi`（本工作区同级目录） | 0.1.0 | **算法引擎**：`signal/ scales/ behavior/ assessment/ training/ monitoring/ models/ acquisition/` 全部复用 |
+| `ningsi`（本 monorepo 的 `../ningsi/`） | 0.1.0 | **算法引擎**：`signal/ scales/ behavior/ assessment/ training/ monitoring/ models/ acquisition/` 全部复用 |
 | `bsense-suite/bsense-lsl` | 0.8.0 | 只读参照：采集协议、实时监测、质量门控 |
 | `bsense-suite/bsense-dataset-studio` | 0.2.0 | 只读参照：试采产物格式（Studio 通过引擎适配器读取其 `records.csv`） |
 

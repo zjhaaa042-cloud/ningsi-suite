@@ -1,6 +1,6 @@
 # 凝思（Ningsi）
 
-仓库：`ningsi`（https://github.com/zjhaaa042-cloud/ningsi ）｜Python 包与命令：`ningsi`｜版本：`0.1.0`
+仓库：`ningsi`（https://github.com/zjhaaa042-cloud/ningsi-suite/tree/main/ningsi ）｜Python 包与命令：`ningsi`｜版本：`0.1.0`
 
 基于便携脑电设备的**专注力强化训练与心理状态评估系统**，对应 A09 赛题
 「AI+便携脑电设备的专注力强化训练系统」（杭州金扬智能科技有限公司）。
@@ -75,7 +75,7 @@ var/demo/
 ```
 ningsi/
 ├── src/ningsi/         38 个模块（signal / scales / behavior / assessment / training / monitoring / models / acquisition / adapters / app）
-├── tests/              52 个用例（信号、量表、行为、评估、预警、热力图、趋势、训练、模型、端到端）
+├── tests/              54 个用例（信号、量表、行为、评估、预警、热力图、趋势、训练、模型、端到端）
 ├── examples/sample_run/ 一次完整会话的示例产物（报告、热力图、趋势、量表、模型、历史）
 ├── tools/              revise_docs.py（docx 口径修订）、build_ppt.py（PPT 与配图）、relayout_figures.py（docx 插图版式优化）
 ├── docs/               产品使用说明、赛题覆盖对照、文档口径修订清单
@@ -119,20 +119,21 @@ python tools/build_ppt.py          # 3. 生成 PPT 骨架与 5 张配图
 - 本仓库不复制上游代码，以独立包形式追加产品层能力；上游的提交历史与远端配置保持不变。
 - 许可：本项目自研代码以 **MIT** 许可证发布（见 [LICENSE](LICENSE)）；上游 `bsense-lsl` / `bsense-dataset-studio` 未附带许可证，本项目未复制其代码，只通过公开接口读取其数据产物。
 - MIT 许可只覆盖代码本身，不构成对任何评估结论的医学背书；结论使用边界见第 6 节。
-- 复现：`scripts/verify.ps1` 可一键复跑 52 个用例与一次端到端演示；示例产物见 `examples/sample_run/`。
+- 复现：`scripts/verify.ps1` 可一键复跑 54 个用例与一次端到端演示；示例产物见 `examples/sample_run/`。
 
 ---
 
 ## 8. Web 应用（主界面）：ningsi-studio
 
-Web 应用独立成库：[`ningsi-studio`](https://github.com/zjhaaa042-cloud/ningsi-studio)（前端 + 后端 + 数据保存），以本仓库为算法引擎：
+Web 应用位于本 monorepo 的 [`ningsi-studio/`](../ningsi-studio/README.md) 目录（前端 + 后端 + 数据保存），以本仓库为算法引擎：
 
 ```powershell
-git clone https://github.com/zjhaaa042-cloud/ningsi-studio.git
 cd ningsi-studio
 .\run.bat                  # 双击也可：建环境 → 启动服务 → 打开浏览器
 .\run.ps1 -Action demo     # 无浏览器跑一次完整会话（快速模式）
 ```
+
+启动脚本会自动从同级 `..\ningsi\src` 定位引擎源码，无需单独安装；也可先 `pip install -e ningsi`。
 
 - 能力分工：本仓库负责算法与口径，`ningsi-studio` 负责服务、持久化与界面；
   两者共用同一份 `config.py` 与同一批领域模块，因此三端结论一致。

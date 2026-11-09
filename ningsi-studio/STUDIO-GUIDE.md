@@ -1,4 +1,4 @@
-﻿# 凝思 Studio 使用与演示说明
+# 凝思 Studio 使用与演示说明
 
 本文件是给使用者的中文说明。**黑窗口（启动器）与命令行输出的提示语现在都是中文**：
 
@@ -108,7 +108,7 @@ logs\
 
 | 现象 | 处理 |
 |---|---|
-| `未找到凝思引擎包 ningsi` | 执行 `.\run.ps1 -Action bootstrap`；或 `pip install git+https://github.com/zjhaaa042-cloud/ningsi.git` |
+| `未找到凝思引擎包 ningsi` | 执行 `.\run.ps1 -Action bootstrap`；或 `pip install git+https://github.com/zjhaaa042-cloud/ningsi-suite.git#subdirectory=ningsi` |
 | 提示"前端资源缺失 web/index.html" | 仓库不完整，确认 `web/` 目录存在 |
 | 端口被占用 | 启动日志会显示实际端口（自动 +1 探测），或 `-Port 8800` 指定 |
 | 只有仿真数据，没有真实脑电 | 正常：未安装 `pylsl` 或未启动采集端。装好后在"设备"接口能看到 `lsl:<流名>` 并可在新建会话时选择 |

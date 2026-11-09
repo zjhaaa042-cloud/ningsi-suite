@@ -44,7 +44,7 @@
 | 7.2.11 历史与趋势 | `src/ningsi/monitoring/history.py` | `HeatmapHistoryTest::test_history_aggregation_and_comparability` |
 | 7.2.12 / 7.2.17 预警 | `src/ningsi/monitoring/alerts.py` | `AlertTest` |
 | 8.6 自适应训练目标 | `src/ningsi/training/neurofeedback.py` | `TrainingTest` |
-| 9 系统测试 | `tests/`（52 个用例） | `ningsi self-test` 或 `scripts/verify.ps1` |
+| 9 系统测试 | `tests/`（54 个用例） | `ningsi self-test` 或 `scripts/verify.ps1` |
 
 ## 四、还需要补的交付材料
 

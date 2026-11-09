@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 #  凝思 Studio 环境准备：建虚拟环境并安装依赖
 #
 #  本文件必须保存为 UTF-8 BOM（PowerShell 5.1 默认按 GBK 读脚本，
@@ -111,15 +111,15 @@ if ($LASTEXITCODE -eq 0) {
 if (-not $engineInstalled) {
     # 引擎目前**没有发布到 PyPI**（pip install ningsi 会失败），所以回退到官方仓库。
     # 若你已把它放到别处，先 `pip install -e <路径>` 再运行本脚本即可跳过这一步。
-    Write-Step "从 GitHub 安装算法引擎：pip install git+https://github.com/zjhaaa042-cloud/ningsi.git"
-    & $Python -m pip install --quiet "git+https://github.com/zjhaaa042-cloud/ningsi.git"
+    Write-Step "从 GitHub 安装算法引擎：pip install git+https://github.com/zjhaaa042-cloud/ningsi-suite.git#subdirectory=ningsi"
+    & $Python -m pip install --quiet "git+https://github.com/zjhaaa042-cloud/ningsi-suite.git#subdirectory=ningsi"
     & $Python -c "import ningsi" 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { $engineInstalled = $true }
 }
 if (-not $engineInstalled) {
     Write-Warn "算法引擎 ningsi 仍不可导入。可以试试："
     Write-Warn "  pip install -e ..\ningsi    （与 studio 并排放在同一父目录时）"
-    Write-Warn "  pip install git+https://github.com/zjhaaa042-cloud/ningsi.git"
+    Write-Warn "  pip install git+https://github.com/zjhaaa042-cloud/ningsi-suite.git#subdirectory=ningsi"
 }
 
 Write-Step "安装本项目：pip install -e ."
