@@ -145,7 +145,7 @@ export function render(container, ctx) {
   const overviewHost = el('div', { class: 'flow-overview' });
   overviewHost.append(
     card('全部阶段', phaseHost, {
-      sub: '共 11 步：✓ 已完成 / 高亮 当前 / 灰 待开始；点任意一步，说明显示在下方',
+      sub: '选择阶段可查看记录。',
     }),
     scaleSummaryHost,
     tailHost,
@@ -420,7 +420,7 @@ export function render(container, ctx) {
     // 只按 label/模式做键会让细条早退、一直显示旧步数（实测踩到「第 1 / 11 步」）。
     const phaseKeyNow = currentPhaseKey();
     const indexNow = local.phaseOrder.findIndex((item) => item.key === phaseKeyNow);
-    const key = `${local.finished}|${label}|${local.forceOverview ? 'overview' : 'stage'}|${local.subjectMode ? 'subject' : 'op'}`
+    const key = `${local.finished}|${local.auto}|${label}|${local.forceOverview ? 'overview' : 'stage'}|${local.subjectMode ? 'subject' : 'op'}`
       + `|${indexNow + 1}/${local.phaseOrder.length}`;
     if (key === local.taskBarKey) return;                 // 幂等：观察者回调里重复调用不再改 DOM
     local.taskBarKey = key;
@@ -437,7 +437,7 @@ export function render(container, ctx) {
       ? button('退出被测者视图（Esc）', () => setSubjectMode(false), { small: true })
       : button('被测者视图（全屏）', () => setSubjectMode(true), { small: true });
     taskBarHost.append(
-      el('span', { class: 'badge badge--strong', text: local.finished ? '查看检测结果' : local.subjectMode ? '被测者请按提示操作'
+      el('span', { class: 'badge badge--strong', text: local.finished ? '查看检测结果' : local.auto ? '模拟演示' : local.subjectMode ? '被测者请按提示操作'
         : (label ? '任务进行中' : '本阶段') }),
       el('strong', { text: title }),
       el('span', { class: 'muted', text: stepText }),
@@ -566,7 +566,6 @@ export function render(container, ctx) {
     const reason = pick(session, 'error', null) || pick(local.detail, 'error', null);
     const protocolLabel = local.protocolLabel || pick(session, 'protocol_label', null)
       || pick(local.detail, 'protocol_label', null);
-    const protocolNote = local.protocolNote || pick(local.detail, 'protocol_note', null);
 
     const metric = (label, value, note) => el('div', { class: 'done__metric' }, [
       el('span', { class: 'done__metric-label', text: label }),
@@ -589,15 +588,7 @@ export function render(container, ctx) {
       body.push(el('p', { class: 'muted', text: '量表：' + scales.map((row) => `${row.code || DASH} 标准分 ${fmtInt(row.standard_score)}`
         + `（${row.level || DASH}）`).join('｜') }));
     }
-    if (protocolLabel && protocolLabel !== '完整协议') {
-      // 短协议的结果不能与完整协议直接比较：这一行必须在结果页出现，而不是只写在报告里
-      body.push(el('p', { class: 'wizard__warn', text: `本次为「${protocolLabel}」：`
-        + (protocolNote || '与完整协议的阶段/试次数不同，横向比较请用同一协议。') }));
-    } else if (protocolLabel) {
-      body.push(el('p', { class: 'muted', text: `检测协议：${protocolLabel}` }));
-    }
-    body.push(el('p', { class: 'muted', text: '结论、图表、证据与边界声明都在「评估报告」里；'
-      + '原始逐窗数据与产物可整包下载。' }));
+    if (protocolLabel) body.push(el('p', { class: 'muted', text: protocolLabel }));
     body.push(el('div', { class: 'row done__actions' }, [
       failed
         ? button('重新开始一次检测', () => ctx.navigate('#/start'), { primary: true })
@@ -662,12 +653,12 @@ export function render(container, ctx) {
     body.push(el('div', { class: 'row row--between step__head' }, [
       el('div', { class: 'row', style: 'gap:10px;align-items:baseline' }, [
         el('span', { class: 'step__label', text: pick(phase, 'label', key) }),
-        interactive ? el('span', { class: 'tag', text: INTERACTIVE_KEY[key] || '需交互' }) : null,
+        interactive && !local.auto ? el('span', { class: 'tag', text: INTERACTIVE_KEY[key] || '需交互' }) : null,
       ]),
       el('span', { class: 'badge' + (state === 'running' ? ' badge--strong' : ''), text: stateLabel }),
     ]));
 
-    body.push(el('p', { class: 'step__headline', text: headline }));
+    body.push(el('p', { class: 'step__headline', text: local.auto ? '正在模拟' + pick(phase, 'label', key) : headline }));
 
     const meta = [];
     const timing = describeTiming(phase, state);
@@ -675,7 +666,7 @@ export function render(container, ctx) {
     // 也会把正在点的按钮换成新节点 → "点了没反应"）
     const timingNode = el('span', { class: 'step__meta-item mono', text: timing || '' });
     meta.push(timingNode);
-    meta.push(el('span', { class: 'step__meta-item', text: ADVANCE_TEXT[advance] || ADVANCE_TEXT.auto }));
+    meta.push(el('span', { class: 'step__meta-item', text: local.auto ? '自动推进' : ADVANCE_TEXT[advance] || ADVANCE_TEXT.auto }));
     if (state === 'running' && typeof stageProgress === 'number' && stageProgress !== null) {
       meta.push(el('span', { class: 'step__meta-item mono', text: `本阶段 ${fmtPercent(stageProgress)}` }));
     }
@@ -711,20 +702,8 @@ export function render(container, ctx) {
         el('span', { class: 'muted', text: '波形与热力图在“实时监测”页' }),
       ]));
     }
-    if (local.auto && interactive) {
-      body.push(el('div', { class: 'row step__action' }, [
-        button('看实时进度', () => ctx.navigate(`#/live?session=${uuid}`), { small: true }),
-        el('span', { class: 'muted', text: '快速演示模式下不需要你作答' }),
-      ]));
-    }
-
     /* 次要信息一律进折叠区（渐进披露）：要点、为什么需要这一步、下一步、快速演示说明、会话与设备信息 */
     const more = [];
-    // 「为什么需要这一步」放在要点之前：用户问过"会话流程中的操作都是必要的吗"，
-    // 页面必须自己能答（每个阶段在后端 phases.py 里有 why 字段）。
-    if (pick(phase, 'why', null)) {
-      more.push(el('p', { class: 'step__why', text: `为什么需要这一步：${pick(phase, 'why')}` }));
-    }
     if (details.length) {
       more.push(el('ul', { class: 'step__details' }, details.map((item) => el('li', { text: item }))));
     }
@@ -741,14 +720,10 @@ export function render(container, ctx) {
     // 协议档：短协议要让操作者看到"这次少跑了两步、行为证据减半"
     const protocolLabel = local.protocolLabel || pick(session, 'protocol_label', null);
     if (protocolLabel) {
-      more.push(el('p', { class: 'muted', text: `检测协议：${protocolLabel}`
-        + (local.protocolNote ? `｜${local.protocolNote}` : '') }));
-    }
-    if (local.auto) {
-      more.push(el('p', { class: 'muted', text: '本次为快速演示模式（time_scale < 0.2）：量表与行为任务由服务端生成确定性作答。' }));
+      more.push(el('p', { class: 'muted', text: protocolLabel }));
     }
     if (local.offline) {
-      more.push(el('p', { class: 'muted', text: '实时事件流已断开，正在每 10 秒轮询 /api/sessions/{uuid}/live 兜底。' }));
+      more.push(el('p', { class: 'muted', text: '连接中断，正在重新连接。' }));
     }
     // 折叠区状态跨重建保留：SSE 事件与阶段切换都会重建这张卡，不记住 open 就会
     // "点开一秒后又自己合上"（用户反馈的"本阶段要做什么无法正常展开"）。
@@ -876,9 +851,7 @@ export function render(container, ctx) {
       if (pick(picked, 'description', null)) {
         body.push(el('div', { class: 'phase-item__desc', text: pick(picked, 'description') }));
       }
-      if (pick(picked, 'why', null)) {
-        body.push(el('div', { class: 'phase-item__why', text: `为什么需要这一步：${pick(picked, 'why')}` }));
-      }
+
       for (const item of list(pick(picked, 'details', []))) {
         body.push(el('div', { class: 'phase-item__bullet', text: `· ${item}` }));
       }
@@ -935,8 +908,7 @@ export function render(container, ctx) {
           row.answered === undefined ? null : `已答 ${fmtInt(row.answered)} 题`,
         ].filter(Boolean).join('｜'),
       })),
-      el('p', { class: 'muted', text: '量表结果仅用于研究与自我调节参考，不构成医学诊断。' }),
-    ]), { sub: '粗分 / 标准分 / 程度由后端计分' }));
+    ])));
   };
 
   /**
@@ -1837,7 +1809,6 @@ export function render(container, ctx) {
           el('p', { text: payload.conclusion || DASH }),
           el('p', { class: 'muted', text: `注意力维度：${pick(payload, 'dimension_states.attention.state', DASH)}｜压力维度：${pick(payload, 'dimension_states.stress.state', DASH)}` }),
           el('p', { class: 'muted', text: `一致性：脑电 vs 量表 ${pick(payload, 'consistency.eeg_vs_scale', DASH)}；脑电 vs 行为 ${pick(payload, 'consistency.eeg_vs_behavior', DASH)}` }),
-          payload.boundary ? el('p', { class: 'muted', text: `边界：${payload.boundary}` }) : null,
         ])));
         break;
       }
@@ -1854,7 +1825,7 @@ export function render(container, ctx) {
           ['验证 AUC', fmtNum(pick(payload, 'validation.auc'), 4)],
           ['测试 AUC', fmtNum(pick(payload, 'test.auc'), 4)],
           ['模型文件', pick(payload, 'model_path', DASH)],
-        ]), { sub: `数据来自内置仿真被试；不代表真实人群表现。训练/验证/测试被试数 = ${list(pick(payload, 'subject_split.train', [])).length}/${list(pick(payload, 'subject_split.validation', [])).length}/${list(pick(payload, 'subject_split.test', [])).length}` }));
+        ]), { sub: `模拟数据 · 训练/验证/测试人数 = ${list(pick(payload, 'subject_split.train', [])).length}/${list(pick(payload, 'subject_split.validation', [])).length}/${list(pick(payload, 'subject_split.test', [])).length}` }));
         break;
       }
       case 'artifacts': {

@@ -170,5 +170,4 @@ class SessionReport:
             for item in a.evidence:
                 state = "可用" if item.available else "不可用"
                 lines.append(f"- [{item.code}]（{item.source}/{state}）{item.summary}；引用 {json.dumps(item.ref, ensure_ascii=False)}")
-            lines += ["", f"> 边界说明：{a.boundary}"]
         return "\n".join(lines)

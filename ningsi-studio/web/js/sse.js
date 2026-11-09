@@ -92,9 +92,10 @@ export function connectSessionEvents(uuid, options = {}) {
     onError(error, { opened, state: source.readyState });
   };
 
-  // 后端在会话不是运行中时会先补发快照再关流，此时 readyState 会落到 CLOSED
+  // 后端在会话不是运行中时会先补发快照，再发送业务 closed 事件。
   source.addEventListener('closed', () => {
-    if (source.readyState === 2) source.close();
+    // 收到业务 closed 时 readyState 通常仍为 OPEN，必须主动停止自动重连。
+    source.close();
   });
 
   return {

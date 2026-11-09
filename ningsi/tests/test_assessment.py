@@ -63,7 +63,9 @@ class ReportTest(unittest.TestCase):
         markdown = report.to_markdown()
         for heading in ("一、状态评分", "二、采集质量", "三、量表结果", "四、行为任务", "五、联合评估结论", "六、改善建议", "七、证据回填"):
             self.assertIn(heading, markdown)
-        self.assertIn("边界说明", markdown)
+        self.assertNotIn("边界说明", markdown)
+        self.assertNotIn(assessment.boundary, assessment.advice)
+        self.assertNotIn(assessment.boundary, markdown)
         self.assertIn("sas_standard_score", markdown)
         self.assertEqual(json.loads(report.to_json())["participant"], "p01")
 

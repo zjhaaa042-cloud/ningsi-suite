@@ -11,7 +11,7 @@
 
 import { api } from './api.js';
 import { describeError, store, toast } from './store.js';
-import { button, el, fmtInt, list, pick, statusText } from './util.js';
+import { el, fmtInt, list, pick, statusText } from './util.js';
 
 import * as dashboard from './views/dashboard.js';
 import * as start from './views/start.js';
@@ -75,6 +75,7 @@ function highlightNav(path) {
   for (const link of app.navList.querySelectorAll('a')) {
     if (link.getAttribute('href') === path) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
+    if (link.getAttribute('href') === path && link.closest('details')) link.closest('details').open = true;
   }
 }
 
@@ -119,9 +120,9 @@ async function renderRoute() {
   try {
     await route.module.render(app.viewContainer, ctx);
   } catch (error) {
+    if (ctx.signal.aborted) return;
     console.error('[main] 视图渲染失败', error);
     app.viewContainer.textContent = '';
-  window.scrollTo({ top: 0, behavior: 'instant' });
     app.viewContainer.append(el('p', { class: 'empty', text: `视图渲染失败：${describeError(error)}` }));
     toast(describeError(error));
   }
@@ -150,11 +151,17 @@ function navIcon(index) {
 
 function renderNav() {
   app.navList.textContent = '';
+  const tools = el('details', { class: 'tools-nav' }, [el('summary', { text: '更多工具' })]);
+  const secondary = el('ul', { class: 'tools-nav__list' });
   for (const [index, route] of ROUTES.entries()) {
-    app.navList.append(el('li', {}, [
+    const primary = ['#/start', '#/history'].includes(route.path);
+    (primary ? app.navList : secondary).append(el('li', {}, [
       el('a', { class: 'sidenav__link', href: route.path }, [navIcon(index), el('span', { text: route.label })]),
     ]));
   }
+  secondary.append(el('li', {}, [el('a', { class: 'sidenav__link', href: './neurofocus/', text: '专注监测台' })]));
+  tools.append(secondary);
+  app.navList.append(el('li', {}, [tools]));
 }
 
 /* ------------------------------------------------------------------ 顶栏 */
@@ -198,7 +205,7 @@ function updateHeader() {
   // 数据来源：会话运行时的 source_kind 优先（更贴近当前会话），否则用 /api/health 的概览。
   // 检测不到实时源时概览里的 source/source_kind 都是 null —— 此时必须显示「无信号」，
   // **不能**回落成"仿真"（产品规则：没有脑机信号就不使用仿真，仿真只能被显式选择）。
-  const kind = runtime.source_kind || pick(health, 'overview.source_kind', null) || null;
+  const kind = runtime.source_kind || kindFromKey(session.device) || pick(health, 'overview.source_kind', null) || null;
   const note = runtime.source_note || pick(health, 'overview.source_note', null);
   const deviceKey = pick(session, 'device', null) || pick(health, 'overview.source', null);
   // 历史已结束会话的 runtime.source_kind 可能是空的：按设备键兜底判定类别，
@@ -324,7 +331,7 @@ function boot() {
   updateHeader();
 
   window.addEventListener('hashchange', renderRoute);
-  if (!window.location.hash) window.location.hash = DEFAULT_ROUTE;
+  if (!window.location.hash) window.history.replaceState(null, '', DEFAULT_ROUTE);
   renderRoute();
 
   loadConfig();
@@ -339,19 +346,7 @@ function boot() {
     if (!document.hidden) loadDeviceStatus();
   }, 5000);
 
-  const helpButton = button('接口自检', async () => {
-    try {
-      const response = await api.openapi();
-      const paths = Object.keys(pick(response.data, 'paths', {}) || {});
-      toast(`后端共有 ${paths.length} 个 /api 端点可用`, 'info');
-    } catch (error) {
-      toast(describeError(error));
-    }
-  }, { small: true });
-  document.querySelector('.sidenav__foot')?.prepend(el('div', { class: 'row', style: 'margin-bottom:8px' }, [
-    helpButton,
-    el('span', { class: 'muted', text: `${fmtInt(ROUTES.length)} 个视图` }),
-  ]));
+
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

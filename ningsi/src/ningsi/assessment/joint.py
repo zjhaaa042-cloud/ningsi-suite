@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from ningsi import config
 
-BOUNDARY_NOTE = "本结论仅用于研究与自我调节参考，不构成医疗诊断，也不得用于处罚或自动上岗决策。"
+BOUNDARY_NOTE = "专注力评估，不作医疗诊断。"
 
 
 @dataclass(frozen=True)
@@ -292,5 +292,4 @@ def _advice(states, consistency) -> list:
         advice.append("按个体基线中位数设置训练目标，先完成 2 段短时专注训练并记录达标时间占比。")
     if not advice or all(item.startswith("证据不足") for item in advice):
         advice.append("维持当前作息与训练频次，按周复评以观察趋势。")
-    advice.append(BOUNDARY_NOTE)
     return advice

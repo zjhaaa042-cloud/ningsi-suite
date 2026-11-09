@@ -88,9 +88,9 @@ class EventBus:
             self._backlog.append(event)
             if len(self._backlog) > self.backlog_size:
                 self._backlog = self._backlog[-self.backlog_size:]
-            subscribers = list(self._subscribers)
-        for subscriber in subscribers:
-            subscriber.put(event)
+            # put 为非阻塞操作；与计数器、订阅及关闭同锁，保持投递顺序。
+            for subscriber in self._subscribers:
+                subscriber.put(event)
         return event
 
     # ---------------------------------------------------------------- 订阅
@@ -108,13 +108,12 @@ class EventBus:
             else:
                 replay = [event for event in self._backlog if event["id"] > last_event_id]
             subscriber = _Subscriber()
-            self._subscribers.add(subscriber)
-            closed = self.closed
-            counter = self._counter
-        for event in replay:
-            subscriber.put(event)
-        if closed:
-            subscriber.put({"id": counter, "type": "closed", "session": self.session_uuid})
+            for event in replay:
+                subscriber.put(event)
+            if self.closed:
+                subscriber.put({"id": self._counter, "type": "closed", "session": self.session_uuid})
+            else:
+                self._subscribers.add(subscriber)
         return subscriber, len(replay)
 
     def unsubscribe(self, subscriber: _Subscriber) -> None:
@@ -124,11 +123,9 @@ class EventBus:
     def close(self) -> None:
         with self._lock:
             self.closed = True
-            subscribers = list(self._subscribers)
+            for subscriber in self._subscribers:
+                subscriber.put({"id": self._counter, "type": "closed", "session": self.session_uuid})
             self._subscribers.clear()
-            counter = self._counter
-        for subscriber in subscribers:
-            subscriber.put({"id": counter, "type": "closed", "session": self.session_uuid})
 
     # ---------------------------------------------------------------- 辅助
     def last_id(self) -> int:

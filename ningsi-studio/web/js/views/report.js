@@ -4,7 +4,6 @@
  * 数据来源：
  * - GET /api/sessions/{uuid}/report → 结构化报告 JSON；尚未生成时返回 202 且带 partial: true
  * - GET /api/sessions/{uuid}/artifacts → [{kind, path, bytes, sha256, exists, download}]
- * - 边界声明原文取自 GET /api/config 的 privacy.boundary
  *
  * 说明：接口返回的是结构化 JSON（不是 Markdown 字符串），因此这里先按接口字段拼出
  * Markdown 再由 util.renderMarkdown 渲染——只支持标题/列表/粗体/表格/引用/代码块。
@@ -27,7 +26,7 @@ function cell(value) {
 }
 
 /** 结构化报告 → Markdown 文本。 */
-function composeMarkdown(report, config) {
+function composeMarkdown(report) {
   const lines = [];
   const participant = pick(report, 'participant', null);
   const session = pick(report, 'session', null);
@@ -38,7 +37,7 @@ function composeMarkdown(report, config) {
   lines.push('');
   lines.push(`- 评估口径：${cell(pick(report, 'spec'))}；频谱 ${cell(versions.spectrum)}；指标 ${cell(versions.indicator)}；基线 ${cell(versions.baseline)}`);
   lines.push(`- 软件版本：${cell(versions.product)}`);
-  lines.push(`- 生成时间：${cell(fmtTime(pick(report, 'created_at') || new Date().toISOString()))}`);
+  if (report.created_at) lines.push(`- 生成时间：${cell(fmtTime(report.created_at))}`);
 
   // 采集调理：只有真实设备会话才有（仿真源不做这一步），与后端 report.to_markdown() 表头同一口径。
   // 实时链路的波形/指标都是调理后的数据，报告里必须写清口径，否则同一段数据无法复算。
@@ -129,7 +128,7 @@ function composeMarkdown(report, config) {
 
     lines.push('');
     lines.push('## 六、改善建议');
-    const advice = list(pick(assessment, 'advice', []));
+    const advice = list(pick(assessment, 'advice', [])).filter(item => item !== assessment.boundary);
     if (advice.length) for (const item of advice) lines.push(`- ${cell(item)}`);
     else lines.push('- 暂无建议。');
 
@@ -147,15 +146,6 @@ function composeMarkdown(report, config) {
       lines.push('- 无证据条目。');
     }
 
-    lines.push('');
-    lines.push(`> 边界说明：${cell(pick(assessment, 'boundary'))}`);
-  }
-
-  /* 边界声明：即使评估缺失也要写出来，避免结论被误读 */
-  const boundary = pick(config, 'privacy.boundary', null);
-  if (boundary) {
-    lines.push('');
-    lines.push(`> ${cell(boundary)}`);
   }
   return lines.join('\n');
 }
@@ -176,7 +166,7 @@ function renderPartial(host, data, ctx) {
     ]),
     bar,
     button('刷新报告', () => (ctx && ctx.reload ? ctx.reload() : window.location.reload())),
-  ]), { sub: '接口返回 202 + partial: true 属于正常状态，不是错误' }));
+  ])));
 
   const runs = list(pick(data, 'runs', []));
   if (runs.length) {
@@ -253,33 +243,26 @@ export async function render(container, ctx) {
     } else if (typeof data === 'string') {
       host.append(card('评估报告', renderMarkdown(data)));
     } else {
-      const markdown = composeMarkdown(data || {}, config);
+      const markdown = composeMarkdown(data || {});
+      const simulated = pick(data, 'extras.source_kind') === 'sim';
       const summary = el('div', { class: 'report-summary' }, [
-        el('span', { class: 'eyebrow', text: '本次检测结果' }),
-        el('h2', { text: pick(data, 'assessment.conclusion', '暂无可用结论') }),
-        el('p', { class: 'muted', text: `被试 sub-${pick(data, 'participant', DASH)} · ${pick(data, 'extras.protocol_label', '检测协议未记录')}` }),
-        el('p', { class: 'summary-note', text: pick(data, 'extras.source_kind') === 'sim' ? '本次使用仿真数据，结果用于演示流程。' : '结合下面的证据与数据质量解释结果。' }),
+        el('h2', { text: simulated ? '模拟演示结果' : pick(data, 'assessment.conclusion', '暂无可用结论') }),
+        el('p', { class: 'muted', text: `参与者 ${pick(data, 'participant', DASH)} · ${pick(data, 'extras.protocol_label', '检测协议未记录')}` }),
+        el('p', { text: Object.entries(INDICATOR_LABELS).map(([key, label]) =>
+          label + ' ' + fmtNum(pick(data, 'indicators.summary.' + key + '.mean'), 2)).join('　') }),
+        el('p', { class: 'summary-note', text: simulated ? '以上为模拟脑电的平均指标（0–1）。' : '指标为本次有效脑电窗口的均值（0–1）。' }),
       ]);
       host.append(card(null, summary));
       const details = el('details', { class: 'result-details' }, [
         el('summary', { text: '查看完整报告与评估证据' }),
         renderMarkdown(markdown),
       ]);
-      host.append(card('报告详情', details));
-
-      // 建议与边界单独拆出来，便于快速阅读（原文仍在 Markdown 里）
-      const advice = list(pick(data, 'assessment.advice', []));
-      if (advice.length) {
-        host.append(card('改善建议', el('ul', {}, advice.map((item) => el('li', { text: String(item) })))));
-      }
       const boundary = pick(data, 'assessment.boundary', null) || pick(config, 'privacy.boundary', null);
-      if (boundary) {
-        host.append(card('边界声明', [el('blockquote', { text: String(boundary) })], {
-          sub: '结论仅用于研究与自我调节训练，不构成医疗诊断',
-        }));
+      const advice = list(pick(data, 'assessment.advice', [])).filter(item => item !== boundary);
+      if (!simulated && advice.length) {
+        host.append(card('改善建议', el('ul', {}, advice.map(item => el('li', { text: String(item) })))));
       }
-      const privacySubject = pick(config, 'privacy.subject_id', null);
-      if (privacySubject) host.append(el('p', { class: 'muted', text: privacySubject }));
+      host.append(card(null, details));
     }
   } catch (error) {
     if (error && error.name === 'ApiError' && (error.status === 404 || error.status === 409)) {
@@ -292,7 +275,7 @@ export async function render(container, ctx) {
 
   /* --------------------------------------------------------- 产物列表 */
   const artifactHost = el('div');
-  host.append(card('产物下载', artifactHost));
+  host.append(el('details', { class: 'result-details' }, [el('summary', { text: '按文件下载' }), artifactHost]));
   try {
     const response = await api.artifacts(uuid);
     if (ctx.signal.aborted) return;
@@ -309,14 +292,12 @@ export async function render(container, ctx) {
         {
           title: '下载',
           render: (row) => (pick(row, 'exists')
-            ? el('a', { href: pick(row, 'download', api.artifactUrl(uuid, pick(row, 'kind'))), text: '下载' })
+            ? el('a', { href: api.artifactUrl(uuid, pick(row, 'kind')), text: '下载' })
             : DASH),
         },
       ], items));
     }
-    artifactHost.append(el('div', { class: 'row', style: 'margin-top:12px' }, [
-      el('a', { href: api.exportZipUrl(uuid), text: '打包下载全部产物 + manifest.json（含 sha256）' }),
-    ]));
+
   } catch (error) {
     artifactHost.textContent = '';
     artifactHost.append(empty(`产物列表加载失败：${describeError(error)}`));

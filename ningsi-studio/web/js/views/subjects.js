@@ -78,8 +78,8 @@ function renderSubjectForm(ctx, onCreated) {
 
   return card('新建被试', el('div', {}, [
     el('div', { class: 'form-grid' }, [
-      field('被试编号', idInput, '留空即自动生成 p01、p02…（也叫编号）；自定义请用「字母+数字」格式，如 p07 / sub-p07'),
-      field('别名', labelInput, '姓名等直接身份信息不进入报告'),
+      field('被试编号', idInput, '留空自动编号，或填写 p07 这样的编号。'),
+      field('别名', labelInput),
       field('年龄段', ageSelect),
       field('性别', sexSelect),
       field('利手', handSelect),
@@ -87,7 +87,7 @@ function renderSubjectForm(ctx, onCreated) {
       field('备注', noteInput),
     ]),
     el('div', { class: 'row row--end', style: 'margin-top:12px' }, [submit]),
-  ]), { sub: '编号留空时由后端按 p01、p02… 自动生成；重复编号会返回 409' });
+  ]));
 }
 
 /**
@@ -177,18 +177,16 @@ function renderSubjectEdit(ctx, subject, publicId) {
       ]),
     ]),
     el('div', { class: 'form-grid', style: 'margin-top:12px' }, [
-      field('别名', labelInput, '清空可移除别名；姓名等直接身份信息不进入报告'),
+      field('别名', labelInput),
       field('年龄段', ageSelect),
       field('性别', sexSelect),
       field('利手', handSelect),
-      field('同意版本', consentInput, '例如 consent-v1；改动会写进更新后的档案'),
+      field('同意版本', consentInput),
       field('备注', noteInput, '最多 500 字'),
     ]),
     errorHost,
     el('div', { class: 'row row--end', style: 'margin-top:12px' }, [cancel, save]),
-  ]), {
-    sub: `PATCH /api/subjects/${publicId}：只提交这张表单里的字段；编号、创建时间、会话计数为只读。按 Esc 或“取消”退出且不提交。`,
-  });
+  ]));
 
   // Esc 退出且不提交（任务书第 1 条要求）；视图卸载时移除监听，避免残留
   const onKeydown = (event) => {

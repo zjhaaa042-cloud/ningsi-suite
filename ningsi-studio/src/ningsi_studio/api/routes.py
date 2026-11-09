@@ -269,8 +269,8 @@ def build_router(settings: Settings) -> Router:
                 "scales": {"codes": ["SAS", "SDS"], "items_per_scale": 20},
             },
             "privacy": {
-                "subject_id": "被试编号匿名且跨会话一致，姓名等直接身份信息不进入文件名、报告与数据库。",
-                "boundary": "结论仅用于研究与自我调节训练，不构成医疗诊断，不得用于处罚或自动上岗决策。",
+                "subject_id": "参与者编号",
+                "boundary": "专注力评估，不作医疗诊断。",
             },
         })
 
@@ -679,7 +679,7 @@ def build_router(settings: Settings) -> Router:
             bus.close()
         subscriber, preload = bus.subscribe(last_id)
         return sse_response(preload, subscriber.events, heartbeat_sec=settings.sse_heartbeat_sec,
-                            keep_alive=None)
+                            keep_alive=None, on_close=lambda: bus.unsubscribe(subscriber))
 
     # ------------------------------------------------------------ 实时数据
     @router.get(r"/api/sessions/{uuid}/signal")
@@ -1127,15 +1127,20 @@ def build_router(settings: Settings) -> Router:
         if period not in ("week", "month"):
             raise ValidationError("period 仅支持 week / month", detail=period)
         public_id = request.query.get("participant")
+        public_id = schemas.normalize_public_id(public_id) if public_id else None
         with store.read_only(db_path) as conn:
-            records = repo.session_points(
-                conn, public_id=schemas.normalize_public_id(public_id) if public_id else None)
+            records = repo.session_points(conn, public_id=public_id)
         from ningsi.monitoring import history as history_module
         usable, rejected = _comparable(records, history_module)
         points = history_module.aggregate(usable, field, period)
         # 台账按会话分别写在 <runs_root>/<uuid>/history/sessions.jsonl，
         # 这里汇总全部会话的台账再聚合（旧实现读 <runs_root>/history 那个不存在的共享文件）。
-        ledger_points = _ledger_trend(_ledger_records(settings), field, period)
+        ledger_records = _ledger_records(settings)
+        if public_id:
+            ledger_records = [record for record in ledger_records
+                              if record.get("participant") == public_id]
+        ledger_points = _ledger_trend(ledger_records, field, period,
+                                      reference=records[0] if records else None)
         return Response.json({
             "field": field, "period": period,
             "points": jsonable(points),
@@ -1238,14 +1243,14 @@ def _ledger_records(settings: Settings) -> list:
     return records
 
 
-def _ledger_trend(records, field: str, period: str) -> list:
+def _ledger_trend(records, field: str, period: str, *, reference=None) -> list:
     """把台账记录聚合成趋势点（与 `paired_ledger.trend_points` 同一口径）。"""
     if not records:
         return []
     from ningsi.monitoring import history as history_module
 
     try:
-        reference = records[-1]
+        reference = reference or max(records, key=lambda record: record.get("recorded_at", ""))
         usable, rejected = history_module.comparable(
             records, reference.get("device"), reference.get("srate"), reference.get("channels"))
         points = history_module.aggregate(usable, field, period)

@@ -112,6 +112,7 @@ class SessionRuntime:
     def start(self) -> None:
         """同步完成装载（含数据源选择），再起线程，保证创建接口能立刻读到 source。"""
         self._load()
+        self._check_cancel()
         self._thread = threading.Thread(target=self._guarded_run,
                                         name=f"session-{self.uuid[:8]}", daemon=True)
         self._thread.start()
@@ -387,7 +388,7 @@ class SessionRuntime:
         if self.source.kind != "lsl":
             self.bus.publish("notice", {
                 "level": "warning",
-                "message": self.source.note or "当前使用仿真脑电源，数据来源已在界面与报告中标注。",
+                "message": self.source.note or "仿真脑电源",
                 "device_error": self.device_error,
             })
 
@@ -1017,6 +1018,11 @@ class SessionManager:
         self._runtimes: dict[str, SessionRuntime] = {}
         self._starting: set[str] = set()
         self._lock = threading.Lock()
+        self._closed = False
+
+    def idle(self) -> bool:
+        with self._lock:
+            return not self._starting and not any(item.alive for item in self._runtimes.values())
 
     def active_uuids(self) -> list[str]:
         with self._lock:
@@ -1025,6 +1031,9 @@ class SessionManager:
     def ensure_capacity(self) -> None:
         """并发上限预检：在落库之前调用，避免 429 留下"没有运行线程的幽灵会话"。"""
         with self._lock:
+            if self._closed:
+                from ningsi_studio.http.router import Conflict
+                raise Conflict("服务正在关闭，不能启动新会话")
             active = sum(1 for uuid, runtime in self._runtimes.items()
                          if uuid in self._starting or runtime.alive)
             limit = self.settings.max_active_sessions
@@ -1038,6 +1047,8 @@ class SessionManager:
         # Reserve a slot while holding the lock. Source loading can block before
         # the worker becomes alive, so checking alive alone admits extra starts.
         with self._lock:
+            if self._closed:
+                raise Conflict("服务正在关闭，不能启动新会话")
             existing = self._runtimes.get(session_uuid)
             if session_uuid in self._starting or (existing is not None and existing.alive):
                 raise Conflict("该会话已在启动或运行中")
@@ -1095,6 +1106,7 @@ class SessionManager:
     def shutdown(self, timeout: float = 5.0) -> None:
         """取消所有会话并等待运行线程退出（等待有上限，避免进程无法结束）。"""
         with self._lock:
+            self._closed = True
             runtimes = list(self._runtimes.values())
         for runtime in runtimes:
             runtime.cancel()

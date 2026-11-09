@@ -54,7 +54,7 @@ function renderModelResult(result) {
   if (!result || typeof result !== 'object') {
     return card('训练结果', [
       empty('接口没有返回训练结果（响应为空）。'),
-    ], { sub: '模型训练由后端完成；返回为空时这里只显示空态，不会伪造指标。' });
+    ]);
   }
   const features = list(pick(result, 'features', []));
   const split = pick(result, 'subject_split', {}) || {};
@@ -85,7 +85,7 @@ function renderModelResult(result) {
     metricTable('test', pick(result, 'test', null)),
   ];
   return card('训练结果', body, {
-    sub: '指标来自后端返回原文；validation 为 null 表示该划分没有足够被试（不是 0）。',
+    sub: '缺少验证样本时，验证指标显示为 —。',
   });
 }
 
@@ -146,13 +146,13 @@ export const models = {
             empty(status === 401
               ? '没有权限调用训练接口（HTTP 401）。请在启动服务时配置访问令牌后重试。'
               : '服务器上没有这个接口（HTTP 404）。可能后端版本较旧，或该接口被关闭。'),
-          ], { sub: '接口不可用时只显示空态，不会伪造训练结果。' }));
+          ]));
         } else {
           const detail = pick(error, 'detail', null) || pick(error, 'payload', null);
           errorHost.append(card('训练失败', [
             empty(`模型训练失败：${describeError(error)}`),
             detail ? el('p', { class: 'muted', text: typeof detail === 'string' ? detail : JSON.stringify(detail) }) : null,
-          ], { sub: '参数需满足 subjects ∈ [2, 40]、windows_per_state ∈ [1, 200]，否则后端返回 422。' }));
+          ]));
         }
         return;
       }
@@ -174,26 +174,7 @@ export const models = {
       }
     }
 
-    // 「这是什么」：作者本人都会问"模型训练是什么"，说明页面缺一段解释。
-    host.append(card('这是什么 / 用什么数据', el('div', { class: 'stack' }, [
-      el('p', { text: '用 6 个频带特征（θ/α/β 相对功率 + 三个比值）训练一个可解释的逻辑回归，'
-        + '把每个 4 秒窗分成「专注」与「困倦」两类。用途：验证"频带特征能不能把这两种状态分开"，'
-        + '并给整条链路一个可复现、可版本化的算法基线（模型就是一份 JSON 权重）。' }),
-      el('p', { class: 'muted', text: '数据来源（重要）：训练数据来自后端内置仿真被试 sim00、sim01…，'
-        + '不是你的真实被试数据。所以下面那些准确率 / AUC 是「算法基线 + 链路自检」的读数，'
-        + '不能当成对真实被试的结论。' }),
-      el('ul', { class: 'wizard__plan' }, [
-        el('li', { text: '被试数 = 生成多少个仿真被试；每状态窗口数 = 每位仿真被试在每个状态取多少窗'
-          + '（窗长 4 s / 步长 2 s，与报告同口径）。缺省 6 × 2 状态 × 8 窗 = 96 个样本。' }),
-        el('li', { text: '三组划分按被试切分 train / validation / test = 6:2:2，同一被试的窗不会跨集合'
-          + '（避免信息泄漏）；某一组显示 — 表示被试太少、组不出该集合，不是 0。' }),
-        el('li', { text: '指标：准确率 / 灵敏度 / 特异度 / AUC + 混淆矩阵；AUC 0.5 就等于随机猜。' }),
-        el('li', { text: '产物：模型权重（含标准化参数）存成 JSON —— 本页训练写到 var/studio/models/classifier.json；'
-          + '会话流程第 10 阶段也会自动训练一次，模型进该次会话的产物目录，报告里能看到模型文件与 sha256。' }),
-        el('li', { text: '边界：这是研究 / 自我调节训练用途的基线，不是诊断模型；'
-          + '用你自己的真实数据训练目前没有实现入口（接口与本页都只用内置仿真被试）。' }),
-      ]),
-    ]), { sub: '一句话：把"频带特征能否区分专注/困倦"做成可复现的基线模型' }));
+    host.append(el('p', { text: '用模拟脑电训练分类模型，比较专注与困倦两种状态。' }));
 
     host.append(card('训练参数', [
       el('div', { class: 'row' }, [
@@ -231,12 +212,12 @@ function renderSources(sources, sourcesError, conditionNote) {
   if (sourcesError) {
     return card('可用数据源', [
       empty(`探测数据源失败：${sourcesError}`),
-    ], { sub: '探测失败时只显示空态，不影响已有会话' });
+    ]);
   }
   if (!rows.length) {
     return card('可用数据源', [
       empty('没有探测到可用数据源。若需要真实设备，请先启动采集端（如 BioMultiLite / BSense-R）或运行 python -m ningsi_studio simulate-outlet。'),
-    ], { sub: '未探测到数据源' });
+    ]);
   }
   return card('可用数据源', [
     table([
@@ -256,7 +237,7 @@ function renderSources(sources, sourcesError, conditionNote) {
       real: pick(row, 'real', null) === true ? '是' : (pick(row, 'real', null) === false ? '否（仿真）' : DASH),
       note: pick(row, 'note', DASH),
     })), { caption: conditionNote || '真实设备未启动时只有仿真源可选（仿真仅用于演示与自测）' }),
-  ], { sub: '「实时硬件」列标出是否为真机；仿真源仅用于演示与自测', class: 'card--scroll' });
+  ], { class: 'card--scroll' });
 }
 
 function renderDeviceHealth(devices, hardwareNote) {
@@ -292,7 +273,7 @@ function renderDeviceHealth(devices, hardwareNote) {
     })), {
       caption: '「在收数 / 实测采样率」缺失显示 —：仿真源没有硬件，不给实测值',
     }),
-  ], { sub: '用于现场判断「设备掉了」还是「信号正常」。' });
+  ]);
 }
 
 export const devices = {
@@ -335,7 +316,7 @@ export const devices = {
             empty(status === 401
               ? '没有权限读取设备状态（HTTP 401）。请在启动服务时配置访问令牌后重试。'
               : '服务器上没有这个接口（HTTP 404）。可能后端版本较旧，或该接口被关闭。'),
-          ], { sub: '接口不可用时只显示空态，不会白屏。' }));
+          ]));
           if (timer) { clearInterval(timer); timer = null; }
           return;
         }

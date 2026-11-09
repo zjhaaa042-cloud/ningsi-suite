@@ -461,7 +461,7 @@ def build_source(device: str = SIM_SOURCE, *, channels: int = 1, srate: float = 
     engine = SyntheticEEG(srate=srate, channels=channels, seed=seed)
     return SourceInfo(
         key=SIM_SOURCE, kind="sim", srate=float(srate), channels=int(channels),
-        device=SIM_SOURCE, note="仿真脑电源：数据来源已在界面与报告中标注", engine=engine,
+        device=SIM_SOURCE, note="仿真脑电源", engine=engine,
     )
 
 

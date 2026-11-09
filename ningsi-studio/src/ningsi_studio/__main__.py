@@ -111,16 +111,22 @@ def _doctor(args) -> int:
 
 def _demo(args) -> int:
     """无浏览器跑一次完整会话（快速模式），用于自测与录制脚本。"""
-    import time
-
-    from ningsi_studio.api import routes
-    from ningsi_studio.core.runtime import SessionManager
+    from ningsi_studio.app import create_app
 
     settings = _settings(args)
-    settings.ensure_dirs()
-    db_path = store.initialize(settings.db_path)
-    router = routes.build_router(settings)
-    manager: SessionManager = getattr(router, "manager")
+    settings.port = 0
+    app = create_app(settings)
+    try:
+        return _demo_session(args, app)
+    finally:
+        app.stop()
+
+
+def _demo_session(args, app) -> int:
+    import time
+
+    db_path = app.db_path
+    manager = app.manager
 
     # 编号走与接口层同一套正规化，避免 demo 把非法编号写进库
     from ningsi_studio.api import schemas as api_schemas
@@ -146,7 +152,6 @@ def _demo(args) -> int:
                       "progress": final["progress"], "error": final["error"],
                       "artifacts": [{"kind": item["kind"], "path": item["path"]} for item in artifacts]},
                      ensure_ascii=False, indent=2))
-    manager.shutdown()
     return 0 if final["status"] == "done" else 1
 
 

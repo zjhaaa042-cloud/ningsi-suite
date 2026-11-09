@@ -68,38 +68,39 @@ def initialize(path) -> Path:
 
 @contextmanager
 def connect(path, *, retries: int = 5, base_delay: float = 0.05):
-    """短连接 + 写事务。
+    """短连接写事务；只重试 BEGIN/COMMIT，调用方的业务代码始终只执行一次。
 
-    两个细节是为并发场景专门加的：
-    - `BEGIN IMMEDIATE` 一开始就拿写锁，避免"先读后升级"造成的 SQLITE_BUSY 死锁；
-    - 遇到 database is locked 自动退避重试（最多 `retries` 次）。
-      事务在失败时会完整回滚，因此重试不会产生重复写入。
+    contextmanager 无法重放 with 块。业务语句失败时完整回滚并保留原异常；
+    COMMIT 遇到 SQLITE_BUSY 时事务仍有效，可以在同一连接上重试提交。
     """
-    attempt = 0
-    while True:
-        attempt += 1
-        conn = _connect(Path(path))
+    conn = _connect(Path(path))
+    try:
+        _transaction_command(conn, "BEGIN IMMEDIATE", retries, base_delay)
+        yield conn
+        _transaction_command(conn, "COMMIT", retries, base_delay)
+    except BaseException:
+        if conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+        raise
+    finally:
+        conn.close()
+
+
+def _transaction_command(conn, statement: str, retries: int, base_delay: float) -> None:
+    attempts = max(1, int(retries))
+    for attempt in range(1, attempts + 1):
         try:
-            conn.execute("BEGIN IMMEDIATE")
-            yield conn
-            conn.execute("COMMIT")
+            conn.execute(statement)
             return
         except sqlite3.OperationalError as exc:
-            try:
-                conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            if "locked" not in str(exc).lower() or attempt >= retries:
+            code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+            busy = code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or "locked" in str(exc).lower()
+            if not busy or attempt == attempts:
                 raise
-            time.sleep(base_delay * attempt)
-        except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise
-        finally:
-            conn.close()
+            time.sleep(max(0.0, base_delay) * attempt)
 
 
 @contextmanager

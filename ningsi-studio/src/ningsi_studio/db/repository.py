@@ -175,6 +175,24 @@ def running_sessions(conn) -> list:
     ).fetchall()
 
 
+def recover_interrupted_sessions(conn) -> int:
+    """在独占数据目录后收尾上次进程遗留的会话，保留所有已写入的结果。"""
+    rows = running_sessions(conn)
+    stamp = utcnow()
+    reason = "服务在会话完成前退出；本次启动已将中断会话标记为失败，请新建会话。"
+    for row in rows:
+        runs = conn.execute(
+            "SELECT id FROM runs WHERE session_id = ? AND status IN ('running', 'queued')",
+            (row["id"],),
+        ).fetchall()
+        for run in runs:
+            conn.execute("UPDATE runs SET status = 'failed', ended_at = ?, error = ? WHERE id = ?",
+                         (stamp, reason, run["id"]))
+            update_run_payload(conn, run["id"], {"status": "failed"})
+        update_session(conn, row["uuid"], status="failed", phase="failed", ended_at=stamp, error=reason)
+    return len(rows)
+
+
 # ------------------------------------------------------------------------- runs
 
 def start_run(conn, session_id: int, phase: str) -> int:
@@ -266,9 +284,12 @@ def list_metrics(conn, session_id: int, kind=None, name=None) -> list:
 
 
 def latest_metric_summary(conn, session_id: int) -> dict:
+    """会话评分只取监测阶段；无有效监测窗时返回空，绝不回退到基线。"""
     rows = conn.execute(
         """SELECT name, mean, std, n FROM metrics
-           WHERE session_id = ? AND kind = 'indicator_summary'""",
+           WHERE session_id = ? AND kind = 'indicator_summary'
+             AND CASE WHEN json_valid(quality) THEN json_extract(quality, '$.phase') END = 'monitor'
+           ORDER BY id""",
         (session_id,),
     ).fetchall()
     return {row["name"]: {"mean": row["mean"], "std": row["std"], "n": row["n"]} for row in rows}
@@ -402,13 +423,17 @@ def session_points(conn, public_id=None, limit=500) -> list:
         where.append("s.public_id = ?")
         params.append(public_id)
     rows = conn.execute(
-        f"""SELECT sessions.uuid, sessions.created_at, sessions.device, sessions.srate,
+        f"""WITH selected AS (
+                SELECT sessions.*, s.public_id FROM sessions {joins}
+                WHERE {' AND '.join(where)} ORDER BY sessions.id DESC LIMIT ?
+            )
+            SELECT sessions.uuid, sessions.created_at, sessions.device, sessions.srate,
                    sessions.channels, s.public_id AS public_id,
                    m.name AS metric, m.mean AS value
-            FROM sessions {joins}
+            FROM selected sessions JOIN subjects s ON s.id = sessions.subject_id
             LEFT JOIN metrics m ON m.session_id = sessions.id AND m.kind = 'indicator_summary'
-            WHERE {' AND '.join(where)}
-            ORDER BY sessions.id DESC LIMIT ?""",
+                AND CASE WHEN json_valid(m.quality) THEN json_extract(m.quality, '$.phase') END = 'monitor'
+            ORDER BY sessions.id DESC, m.id""",
         params + [limit],
     ).fetchall()
     grouped: dict[str, dict] = {}
@@ -450,6 +475,8 @@ def overview(conn) -> dict:
 # ------------------------------------------------------------------ ledger 重放
 
 def all_sessions_for_ledger(conn) -> list:
+    from ningsi import config
+
     rows = conn.execute(
         """SELECT sessions.*, s.public_id AS public_id FROM sessions
            JOIN subjects s ON s.id = sessions.subject_id
@@ -459,6 +486,10 @@ def all_sessions_for_ledger(conn) -> list:
     for row in rows:
         summary = latest_metric_summary(conn, row["id"])
         alerts = list_alerts(conn, row["id"])
+        payloads = {run["phase"]: _load(run["payload"], {}) for run in list_runs(conn, row["id"])}
+        monitor_quality = (payloads.get("monitor") or {}).get("quality") or {}
+        baseline = (payloads.get("baseline_open") or {}).get("baseline") or {}
+        valid_ratio = monitor_quality.get("valid_ratio")
         out.append({
             "participant": row["public_id"],
             "session": "01",
@@ -467,7 +498,9 @@ def all_sessions_for_ledger(conn) -> list:
             "srate": row["srate"],
             "channels": row["channels"],
             "indicators": {name: value["mean"] for name, value in summary.items()},
-            "quality": {"valid_ratio": None, "passed": True},
+            "quality": {"valid_ratio": valid_ratio,
+                        "passed": bool((valid_ratio or 0) >= config.ASSESS["min_valid_ratio"]
+                                       and baseline.get("valid"))},
             "alerts": [dict(item) for item in alerts],
             "session_uuid": row["uuid"],
             "recorded_at": row["created_at"],

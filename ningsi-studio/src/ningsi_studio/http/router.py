@@ -46,6 +46,10 @@ class Unauthorized(ApiError):
     status, code = 401, "unauthorized"
 
 
+class Forbidden(ApiError):
+    status, code = 403, "forbidden"
+
+
 class NotFound(ApiError):
     status, code = 404, "not_found"
 

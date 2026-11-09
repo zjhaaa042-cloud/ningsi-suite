@@ -12,6 +12,8 @@ from ningsi_studio import bootstrap
 from ningsi_studio.api.routes import build_router
 from ningsi_studio.core.runtime import SessionManager
 from ningsi_studio.db import sqlite_store as store
+from ningsi_studio.db import repository as repo
+from ningsi_studio.db.ownership import DataDirectoryLock
 from ningsi_studio.http.server import AppServer
 from ningsi_studio.settings import Settings
 
@@ -24,6 +26,7 @@ class Application:
     server: AppServer
     manager: SessionManager
     db_path: str
+    data_lock: DataDirectoryLock
 
     @property
     def url(self) -> str:
@@ -36,8 +39,20 @@ class Application:
         self.server.serve_forever()
 
     def stop(self) -> None:
-        self.manager.shutdown()
-        self.server.stop()
+        try:
+            self.server.stop()
+        finally:
+            self.manager.shutdown()
+            if self.manager.idle():
+                self.data_lock.release()
+            else:
+                # 超时的采集/启动线程仍可能写库；等它退出再允许另一服务恢复记录。
+                def release_when_idle():
+                    import time
+                    while not self.manager.idle():
+                        time.sleep(0.1)
+                    self.data_lock.release()
+                threading.Thread(target=release_when_idle, name="studio-unlock", daemon=True).start()
 
     def open_browser(self) -> None:
         """在后台线程打开浏览器，避免阻塞服务。"""
@@ -53,12 +68,24 @@ class Application:
 def create_app(settings: Settings | None = None) -> Application:
     settings = settings or Settings()
     settings.ensure_dirs()
-    db_path = store.initialize(settings.db_path)
-    router = build_router(settings)
-    server = AppServer(router, settings)
-    server.bind()
+    data_lock = DataDirectoryLock(settings.data_dir).acquire()
+    server = None
+    try:
+        db_path = store.initialize(settings.db_path)
+        router = build_router(settings)
+        server = AppServer(router, settings)
+        server.bind()
+        with store.connect(db_path) as conn:
+            recovered = repo.recover_interrupted_sessions(conn)
+        if recovered:
+            LOGGER.warning("已收尾 %s 个上次退出时未完成的会话", recovered)
+    except BaseException:
+        if server is not None and server.httpd is not None:
+            server.httpd.server_close()
+        data_lock.release()
+        raise
     return Application(settings=settings, server=server,
-                       manager=getattr(router, "manager"), db_path=str(db_path))
+                       manager=getattr(router, "manager"), db_path=str(db_path), data_lock=data_lock)
 
 
 def run(settings: Settings | None = None, *, serve: bool = True) -> Application:

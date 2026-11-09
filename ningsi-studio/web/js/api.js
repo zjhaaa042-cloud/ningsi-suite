@@ -187,8 +187,9 @@ export const api = {
   training: (uuid) => get(`/api/sessions/${uuid}/training`),
   report: (uuid) => get(`/api/sessions/${uuid}/report`),
   artifacts: (uuid) => get(`/api/sessions/${uuid}/artifacts`),
-  artifactUrl: (uuid, kind) => `/api/sessions/${uuid}/artifacts/${encodeURIComponent(kind)}`,
-  exportZipUrl: (uuid) => `/api/sessions/${uuid}/export.zip`,
+  // 原生 <a> 下载不会携带 fetch 的 X-API-Token，需与 SSE 一样把令牌写入查询串。
+  artifactUrl: (uuid, kind) => `/api/sessions/${uuid}/artifacts/${encodeURIComponent(kind)}` + buildQuery({ token: apiToken() }),
+  exportZipUrl: (uuid) => `/api/sessions/${uuid}/export.zip` + buildQuery({ token: apiToken() }),
 
   /* ------------------------------------------------------- 模型与趋势 */
   trainModel: (body) => post('/api/models/train', body),
@@ -200,5 +201,5 @@ export default api;
 /** SSE 地址（大屏/实时视图用）。 */
 export function eventsUrl(uuid, lastEventId) {
   const base = `/api/sessions/${uuid}/events`;
-  return lastEventId ? `${base}?last_event_id=${encodeURIComponent(lastEventId)}` : base;
+  return base + buildQuery({ last_event_id: lastEventId || undefined, token: apiToken() });
 }

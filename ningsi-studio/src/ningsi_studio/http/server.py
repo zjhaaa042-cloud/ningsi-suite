@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
 import queue as queue_module
 import socket
@@ -19,7 +20,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ningsi_studio.http import sse
-from ningsi_studio.http.router import (ApiError, Request, Response, Router, Unauthorized,
+from ningsi_studio.http.router import (ApiError, Forbidden, Request, Response, Router, Unauthorized,
                                        jsonable)
 from ningsi_studio.http.static_handler import StaticHandler
 from ningsi_studio.settings import Settings
@@ -94,6 +95,12 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         self._handle("DELETE")
 
     def do_OPTIONS(self) -> None:
+        try:
+            self._check_request_origin()
+        except ApiError as exc:
+            self.close_connection = True
+            self._send(Response.json(exc.as_body(), status=exc.status))
+            return
         self.send_response(204)
         self._common_headers()
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
@@ -113,6 +120,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         return self.rfile.read(size) if size > 0 else b""
 
     def _handle(self, method: str) -> None:
+        # 在读取请求体或调用路由之前拒绝跨域请求，阻止简单表单 POST 的副作用。
+        try:
+            self._check_request_origin()
+        except ApiError as exc:
+            self.close_connection = True
+            self._send(Response.json(exc.as_body(), status=exc.status))
+            return
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         query = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
@@ -199,11 +213,38 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             # 错误体约定（401 → unauthorized）也不一致。
             raise Unauthorized("缺少或错误的 API Token")
 
+    def _check_request_origin(self) -> None:
+        """只接受本站浏览器请求和无 Origin 的本地/API 客户端。
+
+        同时约束 Host，避免攻击者借 DNS rebinding 把自己的域名当作本站。
+        绑定所有网卡时允许当前连接实际到达的本机地址，不信任转发头。
+        """
+        address = self.connection.getsockname()[0]
+        allowed = {address.lower(), self.settings.host.lower()}
+        allowed.difference_update({'', '0.0.0.0', '::'})
+        if ipaddress.ip_address(address).is_loopback:
+            allowed.update({'localhost', '127.0.0.1', '::1'})
+        try:
+            host = urlparse('http://' + (self.headers.get('Host') or ''))
+            port = host.port or 80
+            if (host.hostname not in allowed or port != self.server.server_port
+                    or host.username is not None or host.password is not None
+                    or host.path or host.query or host.fragment):
+                raise ValueError('untrusted host')
+            origin = self.headers.get('Origin')
+            if origin is not None:
+                parsed = urlparse(origin)
+                if (parsed.scheme != 'http' or parsed.hostname != host.hostname
+                        or (parsed.port or 80) != port
+                        or parsed.username is not None or parsed.password is not None
+                        or parsed.path or parsed.query or parsed.fragment):
+                    raise ValueError('cross origin')
+            if self.headers.get('Sec-Fetch-Site', '').lower() == 'cross-site':
+                raise ValueError('cross site')
+        except ValueError as exc:
+            raise Forbidden('仅允许从本服务页面访问，请使用服务启动时显示的地址。') from exc
+
     def _common_headers(self) -> None:
-        origin = self.headers.get("Origin")
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
 
@@ -230,14 +271,15 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 {"error": {"code": "internal_error", "message": "SSE 订阅未正确初始化"}},
                 status=500))
             return
-        self.send_response(200)
-        self._common_headers()
-        self.send_header("Content-Type", SSE_TYPE)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
         try:
+            # 发送响应头失败也必须进入 finally 释放订阅。
+            self.send_response(200)
+            self._common_headers()
+            self.send_header("Content-Type", SSE_TYPE)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
             if preload:
                 self.wfile.write(sse.comment(f"replay:{preload}"))
             self.wfile.write(sse.comment("ready"))
@@ -266,6 +308,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:                       # noqa: BLE001 - 响应已发出，不能再发错误体
             self.log_error("sse stream error: %r", exc)
         finally:
+            # SSE 无 Content-Length；关闭 TCP 才能明确结束这个 HTTP/1.1 响应。
+            self.close_connection = True
             try:
                 self.wfile.flush()
             except Exception:
@@ -289,6 +333,7 @@ class AppServer:
         self.httpd: ThreadingHTTPServer | None = None
         self.port = settings.port
         self._thread: threading.Thread | None = None
+        self._serving = threading.Event()
 
     # ------------------------------------------------------------ 生命周期
     def _make_handler_class(self):
@@ -329,7 +374,11 @@ class AppServer:
         if self.httpd is None:
             self.bind()
         assert self.httpd is not None
-        self.httpd.serve_forever(poll_interval=0.2)
+        self._serving.set()
+        try:
+            self.httpd.serve_forever(poll_interval=0.2)
+        finally:
+            self._serving.clear()
 
     def start_background(self) -> None:
         if self.httpd is None:
@@ -340,7 +389,8 @@ class AppServer:
 
     def stop(self) -> None:
         if self.httpd is not None:
-            self.httpd.shutdown()
+            if self._serving.is_set() or (self._thread is not None and self._thread.is_alive()):
+                self.httpd.shutdown()
             self.httpd.server_close()
         if self._thread is not None:
             self._thread.join(timeout=3)

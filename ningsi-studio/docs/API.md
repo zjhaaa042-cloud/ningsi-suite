@@ -16,6 +16,7 @@
 |---|---|---|
 | 400 | bad_request | 请求体不是合法 JSON |
 | 401 | unauthorized | 配置了 `--token` 但 `/api` 请求未带（或带错）令牌；静态资源不受影响 |
+| 403 | forbidden | 浏览器来源与服务地址不同，或 Host 不是当前服务监听的地址 |
 | 404 | not_found | 被试/会话/产物不存在 |
 | 405 | internal_error→405 | 方法不被支持（响应带 `detail.allow`） |
 | 409 | conflict | 状态冲突：会话不在运行、任务未到该阶段、编号重复 |
@@ -468,6 +469,8 @@ lapse_rate, false_starts, valid`。
   `ledger_points` 汇总的是**每个会话自己的**台账 `<runs_root>/<uuid>/history/sessions.jsonl`
   （外加 `export-ledger` 导出的 `<data_dir>/history/sessions.jsonl`），按 `session_uuid` 去重；
   聚合口径与 `GET .../{uuid}/trend` 一致（`period/mean/n/std`，并带 `rejected` 计数）。
+  两种来源均先按 `participant` 筛选，再按同一设备参照做可比性过滤。
+  会话详情和数据库趋势只使用 `monitor` 阶段的汇总评分；该阶段无评分时返回空结果，不回退到基线。
 
 ---
 
@@ -476,13 +479,18 @@ lapse_rate, false_starts, valid`。
 以 `serve --token <字符串>` 启动后，**只有 `/api` 请求**必须带令牌，两种方式任选：
 
 - 请求头 `X-API-Token: <字符串>`（前端 `fetch` 用这种）；
-- 查询参数 `?token=<字符串>`（`EventSource` 无法自定义请求头时用这种，SSE 订阅即靠它）。
+- 查询参数 `?token=<字符串>`（SSE 与原生下载链接使用这种；前端自动对令牌做 URL 编码）。
 
 **静态资源（`/`、`/index.html`、`/js/*`、`/css/*` 与 SPA 回退路径）不受令牌约束**：页面本身不含数据，
 令牌是接口访问控制；否则带 `--token` 启动时连 SPA 入口都拿不到，页面无法 boot。缺少或错误的令牌返回
 `401` + `error.code = "unauthorized"`。
 
-未配置令牌时（默认）不做任何校验，本机演示无需认证。
+未配置令牌时（默认）本机演示无需令牌。无论是否配置令牌，浏览器请求都必须与本服务同源；
+跨域请求（包括 `Origin: null`、预检和简单表单提交）在执行业务前返回 403。
+服务还会检查 Host，防止外部域名被当成本服务。无 Origin 的 CLI/API 客户端仍可使用实际服务地址访问。
+
+同一个数据目录同一时间只允许一个服务或 CLI 演示占用。服务重新启动时，会将上次退出遗留的
+`running/queued` 会话及未完成阶段收尾为 `failed`，写入原因和结束时间，保留已保存的结果。
 
 1. 实时：优先 `EventSource('/api/sessions/<uuid>/events')`；断线后浏览器自动重连并带 `Last-Event-ID`。
 2. 兜底：`setInterval` 轮询 `/live`、`/heatmap`（10 秒）。

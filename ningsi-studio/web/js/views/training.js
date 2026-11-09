@@ -209,7 +209,7 @@ export function render(container, ctx) {
     ], rows));
     body.append(el('h4', { style: 'margin:16px 0 6px', text: '各段达标时间占比' }));
     body.append(chartHost);
-    segmentHost.append(card('训练分段', body, { sub: '统计口径与训练闭环同源，排除窗不计入统计' }));
+    segmentHost.append(card('训练分段', body));
     drawBarChart(chartHost, rows.map((row, index) => ({
       label: `第${fmtInt(Number(row.seq ?? index) + 1)}段`,
       value: typeof pick(row, '__stats.on_target_ratio') === 'number' ? pick(row, '__stats.on_target_ratio') : null,
