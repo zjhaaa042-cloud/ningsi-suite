@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# 运行产物
+var/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+export.zip
+
+# 测试与工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Office 临时锁文件
+~$*.docx
+~$*.xlsx
+
+# 验收证据（截图 / JSON / 报告，含会话数据，不入库）
+_analysis/
+
+# 合并过程备份（原两仓 .git 镜像与工作区补丁，仅本地保留）
+.repo-backup/
