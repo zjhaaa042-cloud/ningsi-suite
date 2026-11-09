@@ -83,15 +83,24 @@ ningsi-suite/
 
 ## 测试
 
-```powershell
-cd ningsi
-..\\.venv\\Scripts\\python.exe -m unittest discover -s tests -t .        # 54 个用例
+两个包的测试都只用标准库 `unittest`，不需要浏览器、真实设备或外网：
 
-cd ..\\ningsi-studio
-..\\.venv\\Scripts\\python.exe -m unittest discover -s tests -t .        # 149 个用例
+```powershell
+# 可选：先安装两个包（也可不装，用 PYTHONPATH 指向 src）
+pip install -e ningsi -e ningsi-studio
+
+cd ningsi
+python -m unittest discover -s tests -t .        # 54 个用例
+
+cd ..\ningsi-studio
+python -m unittest discover -s tests -t .        # 149 个用例
 ```
 
-或使用各包自带的启动器：`ningsi/scripts/verify.ps1`、`ningsi-studio/run.bat test`。
+未安装时可在各包目录下 `$env:PYTHONPATH="src"` 后再执行同一条命令；
+`ningsi-studio` 的测试会通过 `bootstrap.py` 自动从同级 `..\ningsi\src` 找到引擎。
+
+各包自带的启动器也可用：`ningsi\scripts\verify.ps1`（测试 + 端到端演示）、
+`ningsi-studio\run.bat test`、`ningsi-studio\run.ps1 -Action check`（静态自检）。
 
 ## 文档
 
