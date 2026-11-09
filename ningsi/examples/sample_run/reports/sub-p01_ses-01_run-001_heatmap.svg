@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="448" height="98" viewBox="0 0 448 98" font-family="sans-serif" font-size="11">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="14" y="14" font-size="13">状态热力图 sub-p01</text>
+<rect x="14" y="28" width="13" height="13" fill="#2b3a67"><title>102.0s 深蓝</title></rect>
+<rect x="28" y="28" width="13" height="13" fill="#e8a33d"><title>104.0s 橙黄</title></rect>
+<rect x="42" y="28" width="13" height="13" fill="#4a7fb5"><title>106.0s 浅蓝</title></rect>
+<rect x="56" y="28" width="13" height="13" fill="#4a7fb5"><title>108.0s 浅蓝</title></rect>
+<rect x="70" y="28" width="13" height="13" fill="#4a7fb5"><title>110.0s 浅蓝</title></rect>
+<rect x="84" y="28" width="13" height="13" fill="#d9603b"><title>112.0s 橙红</title></rect>
+<rect x="98" y="28" width="13" height="13" fill="#2b3a67"><title>114.0s 深蓝</title></rect>
+<rect x="112" y="28" width="13" height="13" fill="#4a7fb5"><title>116.0s 浅蓝</title></rect>
+<rect x="126" y="28" width="13" height="13" fill="#d9603b"><title>118.0s 橙红</title></rect>
+<rect x="140" y="28" width="13" height="13" fill="#d9603b"><title>120.0s 橙红</title></rect>
+<rect x="154" y="28" width="13" height="13" fill="#d9603b"><title>122.0s 橙红</title></rect>
+<rect x="168" y="28" width="13" height="13" fill="#d9603b"><title>124.0s 橙红</title></rect>
+<rect x="182" y="28" width="13" height="13" fill="#d9603b"><title>126.0s 橙红</title></rect>
+<rect x="196" y="28" width="13" height="13" fill="#d9603b"><title>128.0s 橙红</title></rect>
+<rect x="210" y="28" width="13" height="13" fill="#d9603b"><title>130.0s 橙红</title></rect>
+<rect x="224" y="28" width="13" height="13" fill="#d9603b"><title>132.0s 橙红</title></rect>
+<rect x="238" y="28" width="13" height="13" fill="#d9603b"><title>134.0s 橙红</title></rect>
+<rect x="252" y="28" width="13" height="13" fill="#d9603b"><title>136.0s 橙红</title></rect>
+<rect x="266" y="28" width="13" height="13" fill="#d9603b"><title>138.0s 橙红</title></rect>
+<rect x="280" y="28" width="13" height="13" fill="#d9603b"><title>140.0s 橙红</title></rect>
+<rect x="294" y="28" width="13" height="13" fill="#2b3a67"><title>142.0s 深蓝</title></rect>
+<rect x="308" y="28" width="13" height="13" fill="#2b3a67"><title>144.0s 深蓝</title></rect>
+<rect x="322" y="28" width="13" height="13" fill="#2b3a67"><title>146.0s 深蓝</title></rect>
+<rect x="336" y="28" width="13" height="13" fill="#2b3a67"><title>148.0s 深蓝</title></rect>
+<rect x="350" y="28" width="13" height="13" fill="#2b3a67"><title>150.0s 深蓝</title></rect>
+<rect x="364" y="28" width="13" height="13" fill="#2b3a67"><title>152.0s 深蓝</title></rect>
+<rect x="378" y="28" width="13" height="13" fill="#2b3a67"><title>154.0s 深蓝</title></rect>
+<rect x="392" y="28" width="13" height="13" fill="#2b3a67"><title>156.0s 深蓝</title></rect>
+<rect x="406" y="28" width="13" height="13" fill="#2b3a67"><title>158.0s 深蓝</title></rect>
+<rect x="420" y="28" width="13" height="13" fill="#2b3a67"><title>160.0s 深蓝</title></rect>
+<rect x="14" y="42" width="13" height="13" fill="#2b3a67"><title>162.0s 深蓝</title></rect>
+<rect x="28" y="42" width="13" height="13" fill="#2b3a67"><title>164.0s 深蓝</title></rect>
+<rect x="42" y="42" width="13" height="13" fill="#2b3a67"><title>166.0s 深蓝</title></rect>
+<rect x="56" y="42" width="13" height="13" fill="#2b3a67"><title>168.0s 深蓝</title></rect>
+<rect x="70" y="42" width="13" height="13" fill="#2b3a67"><title>170.0s 深蓝</title></rect>
+<rect x="14" y="70" width="12" height="12" fill="#2b3a67"/>
+<text x="28" y="82">0.00–0.20 深蓝</text>
+<rect x="98" y="70" width="12" height="12" fill="#4a7fb5"/>
+<text x="112" y="82">0.20–0.40 浅蓝</text>
+<rect x="182" y="70" width="12" height="12" fill="#8fbf9f"/>
+<text x="196" y="82">0.40–0.60 灰绿</text>
+<rect x="266" y="70" width="12" height="12" fill="#e8a33d"/>
+<text x="280" y="82">0.60–0.80 橙黄</text>
+<rect x="350" y="70" width="12" height="12" fill="#d9603b"/>
+<text x="364" y="82">0.80–1.00 橙红</text>
+<rect x="434" y="70" width="12" height="12" fill="#6b6b6b"/>
+<text x="448" y="82">— 低质量缺失</text>
+</svg>

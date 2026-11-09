@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ningsi"
+version = "0.1.0"
+description = "凝思 —— 基于便携脑电设备的专注力强化训练与心理状态评估系统"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Repository = "https://github.com/zjhaaa042-cloud/ningsi"
+Issues = "https://github.com/zjhaaa042-cloud/ningsi/issues"
+
+[project.optional-dependencies]
+lsl = ["pylsl==1.18.2"]
+studio = ["pyxdf>=1.17"]
+
+[project.scripts]
+ningsi = "ningsi.app.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

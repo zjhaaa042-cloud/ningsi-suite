@@ -1,0 +1,617 @@
+{
+  "spec": "joint-assessment-v1",
+  "participant": "p01",
+  "session": "01",
+  "run": "001",
+  "versions": {
+    "product": "0.1.0",
+    "spectrum": "welch-v1",
+    "indicator": "indicator-v1",
+    "baseline": "baseline-v1",
+    "assessment": "joint-assessment-v1"
+  },
+  "indicators": {
+    "summary": {
+      "focus": {
+        "mean": 0.4373,
+        "std": 0.4289,
+        "n": 35
+      },
+      "load": {
+        "mean": 0.4913,
+        "std": 0.3893,
+        "n": 35
+      },
+      "relax": {
+        "mean": 0.5636,
+        "std": 0.427,
+        "n": 35
+      }
+    },
+    "band_z": {
+      "alpha": 0.24493239638564573,
+      "beta": -0.5048233188392018,
+      "gamma": -0.0710385843881599,
+      "low": -0.0015541430749330114,
+      "theta": 0.3353503060340507
+    },
+    "quality": {
+      "windows_total": 35,
+      "windows_usable": 35,
+      "valid_ratio": 1.0,
+      "unusable_reasons": {},
+      "indicators": {
+        "focus": {
+          "mean": 0.4373,
+          "std": 0.4289,
+          "n": 35
+        },
+        "load": {
+          "mean": 0.4913,
+          "std": 0.3893,
+          "n": 35
+        },
+        "relax": {
+          "mean": 0.5636,
+          "std": 0.427,
+          "n": 35
+        }
+      }
+    }
+  },
+  "quality": {
+    "windows_total": 35,
+    "windows_usable": 35,
+    "valid_ratio": 1.0,
+    "unusable_reasons": {},
+    "indicators": {
+      "focus": {
+        "mean": 0.4373,
+        "std": 0.4289,
+        "n": 35
+      },
+      "load": {
+        "mean": 0.4913,
+        "std": 0.3893,
+        "n": 35
+      },
+      "relax": {
+        "mean": 0.5636,
+        "std": 0.427,
+        "n": 35
+      }
+    }
+  },
+  "scales": {
+    "SAS": {
+      "code": "SAS",
+      "name": "焦虑自评量表",
+      "version": "zung-cn-v1",
+      "raw_score": 45,
+      "standard_score": 56,
+      "level": "轻度",
+      "reverse_items": [
+        5,
+        9,
+        13,
+        17,
+        19
+      ],
+      "answered": 20,
+      "missing_items": [],
+      "items": {
+        "1": {
+          "text": "我觉得比平常容易紧张和着急",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "2": {
+          "text": "我无缘无故地感到害怕",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "3": {
+          "text": "我容易心里烦乱或觉得惊恐",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "4": {
+          "text": "我觉得我可能将要发疯",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "5": {
+          "text": "我觉得一切都很好，也不会发生什么不幸",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "6": {
+          "text": "我手脚发抖打颤",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "7": {
+          "text": "我因为头痛、颈痛和背痛而苦恼",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "8": {
+          "text": "我感觉容易衰弱和疲乏",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "9": {
+          "text": "我觉得心平气和，并且容易安静坐着",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "10": {
+          "text": "我觉得心跳得很快",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "11": {
+          "text": "我因为一阵阵头晕而苦恼",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "12": {
+          "text": "我有过晕倒发作，或觉得要晕倒似的",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "13": {
+          "text": "我呼气吸气都感到很容易",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "14": {
+          "text": "我手脚麻木和刺痛",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "15": {
+          "text": "我因为胃痛和消化不良而苦恼",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "16": {
+          "text": "我常常要小便",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "17": {
+          "text": "我的手常常是干燥温暖的",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "18": {
+          "text": "我脸红发热",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "19": {
+          "text": "我容易入睡并且一夜睡得很好",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "20": {
+          "text": "我做噩梦",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        }
+      }
+    },
+    "SDS": {
+      "code": "SDS",
+      "name": "抑郁自评量表",
+      "version": "zung-cn-v1",
+      "raw_score": 50,
+      "standard_score": 63,
+      "level": "中度",
+      "reverse_items": [
+        2,
+        5,
+        6,
+        11,
+        12,
+        14,
+        16,
+        17,
+        18,
+        20
+      ],
+      "answered": 20,
+      "missing_items": [],
+      "items": {
+        "1": {
+          "text": "我觉得闷闷不乐，情绪低沉",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "2": {
+          "text": "我觉得一天之中早晨最好",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "3": {
+          "text": "我一阵阵哭出来或觉得想哭",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "4": {
+          "text": "我晚上睡眠不好",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "5": {
+          "text": "我吃得跟平常一样多",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "6": {
+          "text": "我与异性密切接触时和以往一样感到愉快",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "7": {
+          "text": "我发觉我的体重在下降",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "8": {
+          "text": "我有便秘的苦恼",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "9": {
+          "text": "我心跳比平常快",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "10": {
+          "text": "我无缘无故地感到疲乏",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "11": {
+          "text": "我的头脑跟平常一样清楚",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "12": {
+          "text": "我觉得经常做的事情并没有困难",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "13": {
+          "text": "我觉得不安而平静不下来",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "14": {
+          "text": "我对将来抱有希望",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "15": {
+          "text": "我比平常容易生气激动",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "16": {
+          "text": "我觉得作出决定是容易的",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "17": {
+          "text": "我觉得自己是个有用的人，有人需要我",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "18": {
+          "text": "我的生活过得很有意思",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        },
+        "19": {
+          "text": "我认为如果我死了别人会生活得好些",
+          "answer": 2,
+          "reverse": false,
+          "effective": 2
+        },
+        "20": {
+          "text": "平常感兴趣的事我仍然照样感兴趣",
+          "answer": 2,
+          "reverse": true,
+          "effective": 3
+        }
+      }
+    }
+  },
+  "behavior": {
+    "sart": {
+      "task": "sart",
+      "spec": "joint-assessment-v1",
+      "sequence_set_id": 5,
+      "seed": 4157852885,
+      "trials": 180,
+      "go_trials": 160,
+      "nogo_trials": 20,
+      "go_accuracy": 1.0,
+      "commission_errors": 0,
+      "commission_rate": 0.0,
+      "omission_errors": 0,
+      "omission_rate": 0.0,
+      "rt_mean": 0.32,
+      "rt_sd": 0.0,
+      "rt_p50": 0.32,
+      "rt_variability": 0.0,
+      "valid": true,
+      "nogo_positions": [
+        0,
+        8,
+        16,
+        30,
+        39,
+        45,
+        53,
+        62,
+        74,
+        83,
+        88,
+        99,
+        110,
+        117,
+        124,
+        135,
+        145,
+        156,
+        163,
+        174
+      ],
+      "extra": {}
+    },
+    "pvt": {
+      "task": "pvt-b",
+      "duration_sec": 180.0,
+      "trials": 69,
+      "responded": 69,
+      "missed": 0,
+      "rt_mean": 0.3482,
+      "rt_median": 0.339,
+      "rt_sd": 0.0673,
+      "rt_p90": 0.383,
+      "lapses": 1,
+      "lapse_rate": 0.0145,
+      "false_starts": 0,
+      "valid": true
+    }
+  },
+  "assessment": {
+    "spec": "joint-assessment-v1",
+    "conclusion": "压力相关指标偏高，建议休息与放松训练；另有维度与其他证据不一致，建议复测",
+    "dimension_states": {
+      "attention": {
+        "state": "正常范围",
+        "evidence_codes": [
+          "eeg_focus",
+          "sart_performance",
+          "pvt_alertness"
+        ],
+        "flagged": [],
+        "missing": []
+      },
+      "stress": {
+        "state": "部分提示偏离",
+        "evidence_codes": [
+          "eeg_load",
+          "eeg_relax",
+          "sas_standard_score",
+          "sds_standard_score"
+        ],
+        "flagged": [
+          "sas_standard_score",
+          "sds_standard_score"
+        ],
+        "missing": []
+      }
+    },
+    "consistency": {
+      "eeg_vs_scale": "不一致",
+      "eeg_vs_behavior": "无冲突"
+    },
+    "evidence": [
+      {
+        "code": "eeg_focus",
+        "source": "eeg",
+        "dimension": "attention",
+        "summary": "专注度评分 0.44（可用窗比例 100%）",
+        "value": 0.4373,
+        "direction": "normal",
+        "available": true,
+        "ref": {
+          "indicator_spec": "indicator-v1",
+          "baseline_spec": "baseline-v1"
+        }
+      },
+      {
+        "code": "eeg_load",
+        "source": "eeg",
+        "dimension": "stress",
+        "summary": "认知负荷评分 0.49",
+        "value": 0.4913,
+        "direction": "normal",
+        "available": true,
+        "ref": {
+          "indicator_spec": "indicator-v1"
+        }
+      },
+      {
+        "code": "eeg_relax",
+        "source": "eeg",
+        "dimension": "stress",
+        "summary": "放松度评分 0.56",
+        "value": 0.5636,
+        "direction": "normal",
+        "available": true,
+        "ref": {
+          "indicator_spec": "indicator-v1"
+        }
+      },
+      {
+        "code": "sas_standard_score",
+        "source": "scales",
+        "dimension": "stress",
+        "summary": "焦虑自评量表标准分 56（轻度）",
+        "value": {
+          "raw": 45,
+          "standard": 56,
+          "level": "轻度"
+        },
+        "direction": "elevated",
+        "available": true,
+        "ref": {
+          "scale_version": "zung-cn-v1",
+          "reverse_items": [
+            5,
+            9,
+            13,
+            17,
+            19
+          ]
+        }
+      },
+      {
+        "code": "sds_standard_score",
+        "source": "scales",
+        "dimension": "stress",
+        "summary": "抑郁自评量表标准分 63（中度）",
+        "value": {
+          "raw": 50,
+          "standard": 63,
+          "level": "中度"
+        },
+        "direction": "elevated",
+        "available": true,
+        "ref": {
+          "scale_version": "zung-cn-v1",
+          "reverse_items": [
+            2,
+            5,
+            6,
+            11,
+            12,
+            14,
+            16,
+            17,
+            18,
+            20
+          ]
+        }
+      },
+      {
+        "code": "sart_performance",
+        "source": "behavior",
+        "dimension": "attention",
+        "summary": "SART 正确率 100%、虚报率 0.0%、漏报率 0.0%、反应时变异 0.00",
+        "value": {
+          "go_accuracy": 1.0,
+          "commission_rate": 0.0,
+          "omission_rate": 0.0,
+          "rt_mean": 0.32,
+          "rt_variability": 0.0
+        },
+        "direction": "normal",
+        "available": true,
+        "ref": {
+          "sequence_set_id": 5,
+          "seed": 4157852885,
+          "spec": "joint-assessment-v1"
+        }
+      },
+      {
+        "code": "pvt_alertness",
+        "source": "behavior",
+        "dimension": "attention",
+        "summary": "PVT-B 中位反应时 0.339s、慢反应率 1.5%",
+        "value": {
+          "rt_median": 0.339,
+          "lapse_rate": 0.0145
+        },
+        "direction": "normal",
+        "available": true,
+        "ref": {
+          "task": "pvt-b"
+        }
+      }
+    ],
+    "advice": [
+      "在安静环境、固定佩戴位置下复测一次，优先核对伪迹比例与基线质量。",
+      "安排 5–10 分钟腹式呼吸或闭眼放松，并观察放松度评分是否回升。",
+      "本结论仅用于研究与自我调节参考，不构成医疗诊断，也不得用于处罚或自动上岗决策。"
+    ],
+    "boundary": "本结论仅用于研究与自我调节参考，不构成医疗诊断，也不得用于处罚或自动上岗决策。"
+  },
+  "extras": {
+    "device": "sim-bsense",
+    "srate": 250.0,
+    "channels": 1,
+    "alerts": [
+      {
+        "kind": "low_focus",
+        "state": "triggered",
+        "t": 160.0,
+        "value": 0.0356,
+        "sustained_sec": 20.0,
+        "message": "专注度持续偏低，建议先做 1 分钟放松再继续任务"
+      },
+      {
+        "kind": "high_load",
+        "state": "triggered",
+        "t": 170.0,
+        "value": 0.8736,
+        "sustained_sec": 30.0,
+        "message": "认知负荷持续偏高，建议休息并放慢节奏"
+      }
+    ]
+  }
+}
