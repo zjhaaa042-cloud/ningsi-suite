@@ -1278,12 +1278,18 @@ def _build_zip_response(uuid: str, db_path: Path, settings: Settings, manager) -
         artifacts.update({kind: str(path) for kind, path in runtime.artifacts.items()})
     if not artifacts:
         raise NotFound("该会话还没有可打包的产物")
-    target = Path(settings.runs_root) / uuid / "export.zip"
+    from tempfile import TemporaryDirectory
+
+    session_dir = Path(settings.runs_root) / uuid
+    session_dir.mkdir(parents=True, exist_ok=True)
     meta = {"uuid": uuid, "status": row["status"], "phase": row["phase"],
             "device": row["device"], "source": row["source"],
             "engine_versions": json.loads(row["engine_versions"] or "{}")}
-    export_domain.build_zip(target, {kind: Path(path) for kind, path in artifacts.items()}, meta)
-    return Response(status=200, body=target.read_bytes(), content_type="application/zip",
+    with TemporaryDirectory(prefix="export-", dir=session_dir) as tmp:
+        target = Path(tmp) / "export.zip"
+        export_domain.build_zip(target, {kind: Path(path) for kind, path in artifacts.items()}, meta)
+        body = target.read_bytes()
+    return Response(status=200, body=body, content_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="ningsi-{uuid[:8]}.zip"'})
 
 

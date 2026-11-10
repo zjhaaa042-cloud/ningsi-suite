@@ -15,12 +15,15 @@ import queue as queue_module
 import socket
 import sys
 import threading
+import time
+from dataclasses import dataclass
+from typing import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ningsi_studio.http import sse
-from ningsi_studio.http.router import (ApiError, Forbidden, Request, Response, Router, Unauthorized,
+from ningsi_studio.http.router import (ApiError, BadRequest, Forbidden, Request, Response, Router, Unauthorized,
                                        jsonable)
 from ningsi_studio.http.static_handler import StaticHandler
 from ningsi_studio.settings import Settings
@@ -29,6 +32,17 @@ LOGGER = logging.getLogger("ningsi_studio.http")
 
 SSE_TYPE = "text/event-stream; charset=utf-8"
 NO_CACHE = "no-store, no-cache, must-revalidate"
+MAX_BODY_BYTES = 1024 * 1024
+BODY_TIMEOUT_SEC = 10.0
+
+
+@dataclass
+class StreamResponse(Response):
+    preload: int = 0
+    queue: queue_module.Queue | None = None
+    heartbeat_sec: float = 20.0
+    keep_alive: Callable[[], bool] | None = None
+    on_close: Callable[[], None] | None = None
 
 
 class StudioRequestHandler(BaseHTTPRequestHandler):
@@ -97,6 +111,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         try:
             self._check_request_origin()
+            self._read_body()
         except ApiError as exc:
             self.close_connection = True
             self._send(Response.json(exc.as_body(), status=exc.status))
@@ -110,14 +125,44 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------- 核心
     def _read_body(self) -> bytes:
-        length = self.headers.get("Content-Length")
-        if not length:
+        def reject(message, status=400):
+            self.close_connection = True
+            raise BadRequest(message, status=status)
+
+        if self.headers.get("Transfer-Encoding") is not None:
+            reject("不支持 Transfer-Encoding")
+        lengths = self.headers.get_all("Content-Length", [])
+        if not lengths:
             return b""
+        if len(lengths) != 1:
+            reject("Content-Length 不得重复")
+        raw = lengths[0].strip()
+        if not raw.isascii() or not raw.isdecimal():
+            reject("Content-Length 必须是非负整数")
         try:
-            size = int(length)
+            size = int(raw)
         except ValueError:
-            return b""
-        return self.rfile.read(size) if size > 0 else b""
+            reject("Content-Length 不合法")
+        if size > MAX_BODY_BYTES:
+            reject("请求体过大", 413)
+        previous_timeout = self.connection.gettimeout()
+        deadline = time.monotonic() + BODY_TIMEOUT_SEC
+        body = bytearray()
+        try:
+            while len(body) < size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    reject("读取请求体超时", 408)
+                self.connection.settimeout(remaining)
+                chunk = self.rfile.read1(min(65536, size - len(body)))
+                if not chunk:
+                    reject("请求体不完整")
+                body.extend(chunk)
+        except TimeoutError:
+            reject("读取请求体超时", 408)
+        finally:
+            self.connection.settimeout(previous_timeout)
+        return bytes(body)
 
     def _handle(self, method: str) -> None:
         # 在读取请求体或调用路由之前拒绝跨域请求，阻止简单表单 POST 的副作用。
@@ -130,13 +175,11 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         query = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
-        body = self._read_body() if method in ("POST", "PATCH", "PUT") else b""
         request = Request(
             method=method,
             path=path.rstrip("/") or "/",
             query=query,
             headers={key.lower(): value for key, value in self.headers.items()},
-            body=body,
             remote=self.client_address[0] if self.client_address else "",
         )
 
@@ -147,24 +190,24 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 # 校验放在 /api 分支内（而不是 _handle 开头）是必须的：否则带 --token 启动时
                 # GET /index.html 会 401，前端拿不到 SPA 入口，页面永远 boot 不起来。
                 self._check_token(request)
+                request.body = self._read_body()
                 response = self.router.dispatch(request)
-                if getattr(response, "stream", False):
+                if isinstance(response, StreamResponse):
                     if self.command == "HEAD":
-                        on_close = getattr(response, "on_close", None)
+                        on_close = response.on_close
                         if on_close is not None:
                             on_close()
                         return self._send(Response(content_type=response.content_type))
                     return self.send_event_stream(
-                        getattr(response, "preload", 0),
-                        getattr(response, "queue", None),
-                        getattr(response, "heartbeat_sec", 20.0),
-                        getattr(response, "keep_alive", None),
-                        getattr(response, "on_close", None),
+                        response.preload, response.queue, response.heartbeat_sec,
+                        response.keep_alive, response.on_close,
                     )
                 self._send(response)
                 return
+            self._read_body()
             self._serve_static(path)
         except ApiError as exc:
+            self.close_connection = True
             self._send(Response.json(exc.as_body(), status=exc.status))
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError) as exc:
             # 浏览器关页面/刷新/切路由时会直接掐断连接（SSE 尤其常见）。
@@ -412,21 +455,16 @@ class AppServer:
 
 
 def sse_response(preload: int, queue, *, heartbeat_sec: float, keep_alive=None,
-                 on_close=None) -> Response:
-    """把 SSE 连接打包成带 stream 标记的 Response；补发事件已在订阅时进入队列。
+                 on_close=None) -> StreamResponse:
+    """把 SSE 连接打包成显式 StreamResponse；补发事件已在订阅时进入队列。
 
     `on_close` 会在**流真正结束**（客户端断开 / keep_alive 转假）时调用一次，
     用于释放订阅资源。注意不能放在路由函数的 finally 里——路由返回响应时流还没开始，
     那时清理会把刚建立的订阅立刻拆掉（真实踩过的坑：连接建立却一帧都收不到）。
     """
-    response = Response(status=200, body=b"", content_type=SSE_TYPE)
-    response.stream = True          # type: ignore[attr-defined]
-    response.preload = int(preload)  # type: ignore[attr-defined]
-    response.queue = queue                    # type: ignore[attr-defined]
-    response.heartbeat_sec = heartbeat_sec    # type: ignore[attr-defined]
-    response.keep_alive = keep_alive          # type: ignore[attr-defined]
-    response.on_close = on_close              # type: ignore[attr-defined]
-    return response
+    return StreamResponse(content_type=SSE_TYPE, preload=int(preload), queue=queue,
+                          heartbeat_sec=heartbeat_sec, keep_alive=keep_alive,
+                          on_close=on_close)
 
 
 def load_json(path: Path) -> dict:

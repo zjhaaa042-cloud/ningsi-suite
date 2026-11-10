@@ -3,6 +3,7 @@
 - 基地址：与前端同端口（默认 `http://127.0.0.1:8765`）
 - 全部接口在 `/api` 前缀下；`GET /api/openapi.json` 返回机器可读描述
 - 请求/响应均为 `application/json; charset=utf-8`
+- 请求体最多 1 MiB，读取总期限为 10 秒；API 令牌在读取请求体之前校验。不支持 `Transfer-Encoding`，重复或非法 `Content-Length` 会被拒绝并关闭连接。
 - 时间倍率 `time_scale`：`1.0` 为真实节奏（每窗 2 秒），`0.05` 为 20 倍速演示；算法口径与窗口长度不变
 - 运行中会话的实时数据通过 **SSE** 推送，`GET /api/sessions/{uuid}/live` 为轮询兜底
 
@@ -14,12 +15,14 @@
 
 | HTTP | code | 场景 |
 |---|---|---|
-| 400 | bad_request | 请求体不是合法 JSON |
+| 400 | bad_request | 请求体不是合法 JSON，长度头非法或请求体不完整 |
 | 401 | unauthorized | 配置了 `--token` 但 `/api` 请求未带（或带错）令牌；静态资源不受影响 |
 | 403 | forbidden | 浏览器来源与服务地址不同，或 Host 不是当前服务监听的地址 |
 | 404 | not_found | 被试/会话/产物不存在 |
 | 405 | internal_error→405 | 方法不被支持（响应带 `detail.allow`） |
+| 408 | bad_request | 请求体读取超过 10 秒 |
 | 409 | conflict | 状态冲突：会话不在运行、任务未到该阶段、编号重复 |
+| 413 | bad_request | 请求体超过 1 MiB |
 | 422 | validation_failed | 字段缺失或取值越界 |
 | 429 | too_many_requests | 并发运行会话超上限（默认 2） |
 | 500 | internal_error | 未预期异常（已记录日志，服务不退出） |
@@ -460,6 +463,7 @@ lapse_rate, false_starts, valid`。
 ## 模型与趋势
 
 - `POST /api/models/train` → `{ "subjects": 6, "windows_per_state": 8 }`
+  评估集只有一种标签时，`auc` 为 `null`（不可计算），不以 `0.5` 代替。
   返回 `spec, version`（引擎 `config.VERSION`）、`features[]`、`subject_split{train,validation,test}`、
   `samples`（= 被试数 × 状态数 × 每状态窗数）、`participants[]`（参与训练的被试编号）、
   `train, validation, test`（后两者在划分不足时可能为 `null`）、`model_path`。

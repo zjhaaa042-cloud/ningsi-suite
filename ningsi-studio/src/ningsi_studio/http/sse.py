@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 import queue
 import threading
 import time
@@ -66,9 +67,11 @@ class EventBus:
         settings = Settings()
         self.session_uuid = session_uuid
         self.backlog_size = int(backlog if backlog is not None else settings.sse_backlog)
+        if self.backlog_size < 0:
+            raise ValueError("backlog 必须大于等于 0")
         self._lock = threading.Lock()
         self._counter = 0
-        self._backlog: list[dict] = []
+        self._backlog: deque[dict] = deque(maxlen=self.backlog_size)
         self._subscribers: set[_Subscriber] = set()
         self.closed = False
 
@@ -86,8 +89,6 @@ class EventBus:
             if extra:
                 event.update(extra)
             self._backlog.append(event)
-            if len(self._backlog) > self.backlog_size:
-                self._backlog = self._backlog[-self.backlog_size:]
             # put 为非阻塞操作；与计数器、订阅及关闭同锁，保持投递顺序。
             for subscriber in self._subscribers:
                 subscriber.put(event)
