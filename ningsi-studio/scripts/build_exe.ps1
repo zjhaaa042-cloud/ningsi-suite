@@ -41,6 +41,9 @@ function Fail([string]$Text) { Write-Host ("  [build] ERROR: " + $Text) -Foregro
 # ------------------------------------------------------------------ python
 $Python = Join-Path $Studio ".venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) {
+    $Python = Join-Path $Root ".venv\Scripts\python.exe"
+}
+if (-not (Test-Path $Python)) {
     $found = Get-Command python -ErrorAction SilentlyContinue
     if (-not $found) { Fail "python not found; run .\run.ps1 -Action bootstrap first" }
     $Python = $found.Source
@@ -138,6 +141,7 @@ if ($Mode -eq "onefile") {
     Write-Host ("  [build] try:  `"$Exe`" doctor")
     Write-Host ("  [build] run:  `"$Exe`"            # starts the web service and opens the browser")
 } else {
+    $Exe = Join-Path (Join-Path $Dist $Name) ($Name + ".exe")
     if (-not (Test-Path $Exe)) { Fail ("expected exe not produced: " + $Exe) }
     Write-Host ""
     Write-Host ("  [build] OK  " + (Join-Path $Dist $Name) + "\  (folder build)")
