@@ -10,6 +10,7 @@
  */
 
 import { api } from '../api.js';
+import { renderDiagnostics } from './report-diagnostics.js';
 import { describeError, toast } from '../store.js';
 import {
   DASH, button, card, el, empty, fmtBytes, fmtInt, fmtNum, fmtPercent, fmtTime,
@@ -259,6 +260,7 @@ export async function render(container, ctx) {
         el('p', { class: 'summary-note', text: simulated ? '以上为模拟脑电的平均指标（0–1）。' : '指标为本次有效脑电窗口的均值（0–1）。' }),
       ]);
       host.append(card(null, summary));
+      host.append(renderDiagnostics(data || {}));
       const details = el('details', { class: 'result-details' }, [
         el('summary', { text: '查看完整报告与评估证据' }),
         renderMarkdown(markdown),

@@ -39,3 +39,8 @@
 - Can the Spontaneous Electroencephalography Theta/Beta Power Ratio and Alpha Oscillation Measure Individuals’ Attentional Control? (2024)：https://pmc.ncbi.nlm.nih.gov/articles/PMC10968630/
 - Whitham et al. (2007), Scalp electrical recording during paralysis：https://doi.org/10.1016/j.clinph.2007.04.027
 - Basner et al. (2011), Validity and Sensitivity of a Brief Psychomotor Vigilance Test：https://doi.org/10.1016/j.actaastro.2011.07.015
+## 采集诊断与严格评分分离（2026-11-10）
+
+质量不合格不代表没有任何可分析内容。严格合格窗口才进入个体基线与评分；全部有限、完整窗口的频带统计可以作为采集诊断，但需分组显示合格与排除窗口，排除组不能作为注意力证据。报告展示窗口时间轴、逐项排除原因、基线去重覆盖时长和独立行为表现。幅值敏感性分析仅改变幅值门槛、保持其他条件不变，不修改已记录的判定，也不自动降低阈值。
+
+真机质检必须等待完整4秒缓冲，窗口间留出真实采集步长；不使用仿真专用的伪迹注入。无有效基线时不推荐根据基线设置训练目标。工程门槛仍待设备和目标人群验证。

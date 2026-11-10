@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ningsi"
-version = "0.1.0"
+version = "0.1.1"
 description = "凝思 —— 基于便携脑电设备的专注力强化训练与心理状态评估系统"
 readme = "README.md"
 license = { text = "MIT" }

@@ -1,6 +1,6 @@
 """全局参数与口径。所有可复算参数集中在此，界面与报告引用同一份定义。"""
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 SPECTRUM_SPEC = "welch-v1"
 INDICATOR_SPEC = "indicator-v1"
 BASELINE_SPEC = "baseline-v2"

@@ -188,7 +188,8 @@ def assess(eeg, scales=None, behavior=None) -> JointAssessment:
 
     dimension_states, consistency = _consistency(evidence, thresholds)
     conclusion = _conclusion(dimension_states, consistency, evidence)
-    advice = _advice(dimension_states, consistency)
+    advice = _advice(dimension_states, consistency,
+                     eeg_available=any(e.source == "eeg" and e.available for e in evidence))
     return JointAssessment(
         conclusion=conclusion,
         dimension_states=dimension_states,
@@ -299,16 +300,18 @@ def _conclusion(states, consistency, evidence) -> str:
     return conclusion
 
 
-def _advice(states, consistency) -> list:
+def _advice(states, consistency, eeg_available=True) -> list:
     advice = []
     insufficient = [name for name, value in states.items() if value.get("state") == "证据不足"]
     if insufficient:
         advice.append("证据不足的维度：" + "、".join(insufficient) + "；请先完成量表填写与行为任务，或在安静环境重测脑电。")
     if "不一致" in consistency.values():
         advice.append("在安静环境、固定佩戴位置下复测一次，优先核对伪迹比例与基线质量。")
+    if not eeg_available:
+        advice.append("本次脑电不支持个体评分或训练目标；先核对电极接触、信号单位与采集质量，再重新采集基线。行为任务仍可独立查看，不用量表或行为成绩补造脑电分数。")
     if states.get("stress", {}).get("state") in ("一致提示偏离", "部分提示偏离"):
-        advice.append("安排 5–10 分钟腹式呼吸或闭眼放松，并观察放松度评分是否回升。")
-    if states.get("attention", {}).get("state") in ("一致提示偏离", "部分提示偏离"):
+        advice.append("安排适当休息与放松；本次量表仅反映自评感受，不作诊断。" if not eeg_available else "安排 5–10 分钟腹式呼吸或闭眼放松，并观察放松度评分是否回升。")
+    if eeg_available and states.get("attention", {}).get("state") in ("一致提示偏离", "部分提示偏离"):
         advice.append("按个体基线中位数设置训练目标，先完成 2 段短时专注训练并记录达标时间占比。")
     if not advice or all(item.startswith("证据不足") for item in advice):
         advice.append("维持当前作息与训练频次，按周复评以观察趋势。")

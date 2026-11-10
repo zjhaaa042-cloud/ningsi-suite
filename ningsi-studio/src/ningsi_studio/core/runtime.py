@@ -20,6 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from ningsi import config
+from ningsi.assessment.diagnostics import summarize_windows
 from ningsi.monitoring import history as history_module
 from ningsi.monitoring.heatmap import render_svg as heatmap_svg
 
@@ -97,6 +98,8 @@ class SessionRuntime:
         self.source = None
         self.engine = None
         self.heatmap_series: list[tuple[float, float | None]] = []
+        self.diagnostic_windows: list[dict] = []
+        self.diagnostic_started = time.monotonic()
         self.artifacts: dict[str, Path] = {}
         self.summary: dict = {}
 
@@ -352,6 +355,15 @@ class SessionRuntime:
         except Exception:  # noqa: BLE001
             pass
 
+    def _record_diagnostic(self, step, phase: str) -> None:
+        """诊断单独留存，不改变指标序列、预警或反馈节拍。"""
+        diagnostic = step.payload(include_signal=False)
+        diagnostic.update(phase=phase, source_kind=self.source.kind,
+                          elapsed_sec=round(time.monotonic() - self.diagnostic_started, 3))
+        if self.source.kind == "lsl":
+            diagnostic["state"] = "unknown"
+        self.diagnostic_windows.append(diagnostic)
+
     def _publish_window(self, step, *, phase: str, include_signal: bool) -> None:
         """推送一窗结果。总进度由 `_progress()` 按窗序号推进，这里不再重复计算。"""
         payload = step.payload(include_signal=include_signal)
@@ -359,6 +371,7 @@ class SessionRuntime:
         payload["source_kind"] = self.source.kind
         if self.source.kind == "lsl":
             payload["state"] = "unknown"  # 采集指令不是被试真实状态标签
+        self._record_diagnostic(step, phase)
         self.bus.publish("window", payload)
         try:
             with store.connect(self.db_path) as conn:
@@ -420,7 +433,10 @@ class SessionRuntime:
 
         # 1) 设备质检
         with self._phase("qc") as context:
-            qc = self.engine.device_qc()
+            qc = self.engine.device_qc(
+                artifact=self.source.kind != "lsl",
+                wait_between=self._sleep if self.source.kind == "lsl" else None,
+                on_step=lambda step: self._record_diagnostic(step, "qc"))
             self._merge_run_payload(context["run_id"], qc)
             self.bus.publish("quality", qc)
             if not qc.get("passed"):
@@ -786,6 +802,7 @@ class SessionRuntime:
             step_index = 0
             while time.time() < deadline and step_index < max_windows:
                 step = self.engine.step(states[index % len(states)])
+                self._record_diagnostic(step, "training")
                 step_index += 1
                 score = step.focus
                 trainer.feed(score, step.t_end, usable=step.usable)
@@ -846,6 +863,7 @@ class SessionRuntime:
             behavior={"sart": sart_result, "pvt": pvt_result},
             assessment=assessment_result,
             extras={
+                "signal_diagnostics": summarize_windows(self.diagnostic_windows),
                 "device": self.source.device,
                 "source_kind": self.source.kind,
                 "source_note": self.source.note,

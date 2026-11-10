@@ -58,7 +58,11 @@ def check_channels(window_uv, srate: float, quality: dict | None = None, spectru
     channel_metrics = []
     for index, item in enumerate(spectra):
         rel = relative_band_powers(item.freqs, item.psd)
-        channel_metrics.append({"channel": index, "emg_rel": float(rel.get("gamma", 0.0)),
+        channel_metrics.append({"channel": index,
+                                "peak_uv": round(float(np.max(np.abs(data[index]))), 3),
+                                "std_uv": round(float(stds[index]), 3),
+                                "amplitude_exceed_fraction": round(float(np.mean(np.abs(data[index]) > q['amp_max_uv'])), 4),
+                                "emg_rel": float(rel.get("gamma", 0.0)),
                                 "eog_rel": float(rel.get("low", 0.0))})
     metrics["channels"] = channel_metrics
     # 任一通道不合格就拒绝整个窗；避免平均功率掩盖局部污染。

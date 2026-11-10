@@ -140,7 +140,7 @@ PHASES: tuple[Phase, ...] = (
     Phase(
         "monitor", "任务态监测", 0.14, False,
         "rest/focused/drowsy 共 35 窗，逐窗指标与预警",
-        headline="稍等，正在模拟三种状态并逐窗算指标",
+        headline="保持自然坐姿，正在采集任务态信号并逐窗分析",
         details=(
             "界面会实时画出脑电波形与三指标曲线",
             "灰色格表示那一窗信号质量不合格，已排除、不计入指标",

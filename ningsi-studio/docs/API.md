@@ -455,9 +455,9 @@ lapse_rate, false_starts, valid`。
   expected_samples}`；它同时会渲染成报告正文表头的「采集调理」一行，便于复算与审计。
 - `GET /api/sessions/{uuid}/artifacts?page=1&limit=50`
   → `{ "items": [{ kind, path, bytes, sha256, exists, download }], "total": 7, "limit": 50, "page": 1 }`
-  同一信封与分页参数；单会话产物通常不足 10 条（`report_md/report_json/heatmap_svg/trend_svg/
+  同一信封与分页参数；单会话产物通常不足 10 条（`report_md/report_json/report_html/heatmap_svg/trend_svg/
   model/history/zip` 的子集），默认一页即可取全，`total` 为登记到 `artifacts` 表的产物总数。
-- `GET /api/sessions/{uuid}/artifacts/{kind}` → 文件下载（`report_md/report_json/heatmap_svg/
+- `GET /api/sessions/{uuid}/artifacts/{kind}` → 文件下载（`report_md/report_json/report_html/heatmap_svg/
   trend_svg/model/history/zip`），带 `Content-Disposition`。
 - `GET /api/sessions/{uuid}/export.zip` → 打包全部产物 + `manifest.json`（含 sha256）。
 

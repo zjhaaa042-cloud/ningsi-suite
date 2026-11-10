@@ -160,10 +160,14 @@ class WindowEngine:
         return steps
 
     # ---------------------------------------------------------------- 质检
-    def device_qc(self, windows: int = 4, artifact: bool = True) -> dict:
-        steps = [self.step("rest") for _ in range(int(windows))]
-        if artifact:
-            steps.append(self.step("rest", artifact=True))
+    def device_qc(self, windows: int = 4, artifact: bool = True, wait_between=None, on_step=None) -> dict:
+        steps = []
+        for index in range(int(windows) + int(artifact)):
+            if index and wait_between is not None:
+                wait_between(config.STEP_SEC)
+            steps.append(self.step("rest", artifact=artifact and index == int(windows)))
+            if on_step is not None:
+                on_step(steps[-1])
         reasons: dict[str, int] = {}
         for step in steps:
             if step.window is None:

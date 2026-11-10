@@ -365,6 +365,15 @@ class ArtifactDownloadTests(StudioTestCase):
         markdown = self.get(f"/api/sessions/{uuid}/artifacts/report_md")
         self.assert_status(markdown, 200, "report_md 下载应返回 200")
         self.assertIn("text/markdown", markdown.content_type, "report_md 应为 markdown 类型")
+        html = self.get(f"/api/sessions/{uuid}/artifacts/report_html")
+        self.assert_status(html, 200, "离线报告可下载")
+        self.assertIn("text/html", html.content_type)
+        self.assertIn('频带组成'.encode('utf-8'), html.body)
+        self.assertIn('阈值敏感性'.encode('utf-8'), html.body)
+        diagnostics = report['extras']['signal_diagnostics']
+        self.assertEqual(diagnostics['total'], len(diagnostics['windows']))
+        self.assertIn('qc', {w['phase'] for w in diagnostics['windows']})
+        self.assertIn('training', {w['phase'] for w in diagnostics['windows']})
 
         svg = self.get(f"/api/sessions/{uuid}/artifacts/heatmap_svg")
         self.assert_status(svg, 200, "heatmap_svg 下载应返回 200")

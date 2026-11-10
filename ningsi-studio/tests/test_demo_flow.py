@@ -22,7 +22,7 @@ from ningsi_studio import bootstrap
 
 DEMO_TIME_SCALE = 0.01
 
-REQUIRED_ARTIFACTS = ("report_md", "report_json", "heatmap_svg", "trend_svg", "model", "history")
+REQUIRED_ARTIFACTS = ("report_md", "report_json", "report_html", "heatmap_svg", "trend_svg", "model", "history")
 
 
 class DemoFlowTests(StudioTestCase):

@@ -274,7 +274,7 @@ class ManagedLslSource:
 
     def __init__(self, stream_name: str, *, device: str, srate: float = 250.0,
                  channels: int = 1, buffer_seconds: float = 60.0,
-                 ready_timeout: float = 15.0, fill_timeout: float = 2.0,
+                 ready_timeout: float = 15.0, fill_timeout: float = 6.0,
                  stale_timeout: float = 3.0) -> None:
         from ningsi_studio.acquisition.lsl import LiveStreamManager
 
@@ -410,7 +410,7 @@ class ManagedLslSource:
                     else np.zeros((self.channels, 0), dtype=float))
             # 就绪判据只看"最后一窗"那部分，与调理前完全一致（多取的历史不参与判据）。
             window_part = data[:, -expected:] if (expected > 0 and data.shape[1] > expected) else data
-            if data.size and fresh and window_part.shape[1] >= expected * 0.5:
+            if data.size and fresh and window_part.shape[1] >= expected:
                 return self._condition(data, expected, stats.get("observed_srate"))
             if time.monotonic() >= deadline:
                 if not fresh:

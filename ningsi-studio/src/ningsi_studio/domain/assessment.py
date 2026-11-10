@@ -52,6 +52,9 @@ def write_report(report: SessionReport, reports_dir, stem: str) -> dict:
     target.mkdir(parents=True, exist_ok=True)
     md_path = target / f"{stem}_report.md"
     json_path = target / f"{stem}_report.json"
+    html_path = target / f"{stem}_report.html"
     md_path.write_text(report.to_markdown(), encoding="utf-8")
     json_path.write_text(report.to_json(), encoding="utf-8")
-    return {"report_md": md_path, "report_json": json_path}
+    from ningsi.assessment.diagnostics import render_html
+    html_path.write_text(render_html(report.as_dict()), encoding="utf-8")
+    return {"report_md": md_path, "report_json": json_path, "report_html": html_path}

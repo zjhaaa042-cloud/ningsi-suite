@@ -1076,6 +1076,7 @@ def build_router(settings: Settings) -> Router:
             raise NotFound(f"产物文件已不存在：{path}")
         content_type = {
             "report_md": "text/markdown; charset=utf-8",
+            "report_html": "text/html; charset=utf-8",
             "report_json": "application/json; charset=utf-8",
             "heatmap_svg": "image/svg+xml",
             "trend_svg": "image/svg+xml",

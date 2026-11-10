@@ -18,46 +18,51 @@ ningsi/          算法引擎：信号处理、量表、行为任务、联合评
 
 ## 发行版下载与使用（Windows x64）
 
-无需安装 Python。当前发行版为 **v0.1.0**，对应源码提交 [`c3756c3`](https://github.com/zjhaaa042-cloud/ningsi-suite/commit/c3756c352a6a2dd6787a83eea3868618191281b1)。
+无需安装 Python。当前发行版为 **v0.1.1**，源码见 [v0.1.1 标签](https://github.com/zjhaaa042-cloud/ningsi-suite/tree/v0.1.1)，精确构建提交见发行附件 `BUILD.json`。
 
-- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.0)
-- [下载 Windows x64 便携版 ZIP（约 22 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.0/ningsi-studio-0.1.0-c3756c3-win-x64.zip)
-- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.0/ningsi-studio-0.1.0-c3756c3-win-x64.zip.sha256)
-- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.0/README.zh-CN.txt) · [构建环境与版本清单](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.0/BUILD.json)
+- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.1)
+- [下载 Windows x64 便携版 ZIP（约 22 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.1/ningsi-studio-0.1.1-win-x64.zip)
+- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.1/ningsi-studio-0.1.1-win-x64.zip.sha256)
+- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.1/README.zh-CN.txt) · [构建环境与版本清单](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.1/BUILD.json)
+
+### v0.1.1 更新
+
+- 修复真实 LSL 启动时半窗即返回、质检连续重复读取缓冲的问题；真机质检按2秒步长取完整4秒窗。
+- 新增质量窗口序列、排除原因、基线覆盖、分组频带、幅值阈值敏感性和 PVT 可视化；新增离线 HTML 报告，随会话 ZIP 导出。
+- 个体脑电评分不可用时仍提供采集诊断与独立行为分析；修正无效基线下的训练建议，并保留阈值待验证说明。
+- 诊断窗与任务态评分窗区分展示；旧会话缺失逐窗频带时明确提示，不事后补造。训练诊断不改变原有指标序列。
 
 ### 解压与运行
 
 1. 下载 ZIP 和同名 `.sha256` 文件，按下方方法校验。
 2. 将 ZIP **完整解压**到可写目录；进入解压后的文件夹，保留 EXE 旁的 `_internal` 文件夹。
-3. 双击 `ningsi-studio-0.1.0-c3756c3.exe`，程序会启动本机服务并打开浏览器。默认地址为 `http://127.0.0.1:8765`；端口被占用时可能顺延，以控制台显示地址为准。
+3. 双击 `ningsi-studio-0.1.1.exe`，程序会启动本机服务并打开浏览器。默认地址为 `http://127.0.0.1:8765`；端口被占用时可能顺延，以控制台显示地址为准。若提示来源校验失败，请在浏览器地址栏手动输入该地址并回车。
 4. 无设备时可点击「运行模拟演示」；真实脑电设备需通过其采集软件发布 LSL EEG 流。
 5. 使用结束后关闭控制台程序以停止服务。数据默认保存在程序旁的 `var/studio`；目录不可写时使用用户本地应用数据目录。
 
 如需诊断，在解压后的程序目录打开 PowerShell，运行：
 
 ```powershell
-.\ningsi-studio-0.1.0-c3756c3.exe doctor
+.\ningsi-studio-0.1.1.exe doctor
 ```
 
-该发行包已验证 EXE 启动、完整仿真会话与报告、本机服务接口、Studio/NeuroFocus 页面，以及解压后的启动诊断。**真实硬件完整采集流程尚未验证，程序未做代码签名。** 脑电指数不是专注概率，评分与判定阈值仍待验证，详见[测量有效性说明](ningsi/docs/MEASUREMENT_VALIDITY.md)。
+该发行包已验证 EXE 启动、完整仿真会话、可视化/HTML 报告与导出、本机服务接口及打包页面。曾用 v0.1.0 完成真机流程并发现启动质检问题，本版据此修复；**v0.1.1 尚未重新完成真实硬件全流程验证，程序未做代码签名。** 脑电指数不是专注概率，评分与判定阈值仍待验证，详见[测量有效性说明](ningsi/docs/MEASUREMENT_VALIDITY.md)。
+
+升级时解压到新目录，先保留旧程序及其 `var/studio` 数据；需要迁移时先停止旧程序并备份数据，再将 `var/studio` 复制到新程序旁，或通过 `NINGSI_STUDIO_DATA` 指定数据目录。不要把旧的 `_internal` 混入新目录。
 
 ### SHA-256 校验
 
 在 ZIP 和 `.sha256` 文件所在目录打开 PowerShell，执行：
 
 ```powershell
-$archive = 'ningsi-studio-0.1.0-c3756c3-win-x64.zip'
+$archive = 'ningsi-studio-0.1.1-win-x64.zip'
 $expected = ((Get-Content -LiteralPath "$archive.sha256" -Raw).Trim() -split '\s+')[0]
 $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
 if ($actual -ne $expected) { throw 'SHA-256 不一致，请重新下载并核对文件。' }
 'SHA-256 校验通过'
 ```
 
-此版本 ZIP 的预期 SHA-256 为：
-
-```text
-5be88543c3a446843e25226eea4ac441fef17757d0cc77fed2bbee296c25781a
-```
+预期 SHA-256 以本版本同名 `.sha256` 附件为准；包内 `FILES.sha256` 提供逐文件校验。发行包不包含真实脑电、量表作答或测试数据库。
 
 ## 从源码运行
 
