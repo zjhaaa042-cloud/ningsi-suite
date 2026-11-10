@@ -52,6 +52,8 @@ def compute_indicators(window, baseline: Baseline) -> IndicatorResult:
         return IndicatorResult(available=False, reason="window_unusable")
     if baseline is None or not baseline.valid:
         return IndicatorResult(available=False, reason="baseline_invalid")
+    if window.srate != baseline.srate or window.channels != baseline.channels:
+        return IndicatorResult(available=False, reason="baseline_configuration_mismatch")
 
     index_z: dict[str, float] = {}
     missing: list[str] = []

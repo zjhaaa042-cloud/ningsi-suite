@@ -10,7 +10,7 @@ from ningsi.signal.baseline import build_baseline
 from ningsi.signal.window import analyze_window
 
 
-def make_baseline(seed: int = 11, count: int = 8, device: str = "sim"):
+def make_baseline(seed: int = 11, count: int = 16, device: str = "sim"):
     sim = SyntheticEEG(seed=seed)
     windows = [analyze_window(sim.window("rest"), sim.srate, t_end=index * 2.0) for index in range(count)]
     return sim, build_baseline(windows, device=device, srate=sim.srate)

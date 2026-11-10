@@ -56,6 +56,8 @@ class JointAssessment:
             "evidence": [e.as_dict() for e in self.evidence],
             "advice": list(self.advice),
             "boundary": self.boundary,
+            "validation_note": config.VALIDATION_NOTE,
+            "threshold_status": config.VALIDATION_STATUS,
         }
 
 
@@ -136,7 +138,13 @@ def assess(eeg, scales=None, behavior=None) -> JointAssessment:
         evidence.append(_scale_evidence(sds, "stress"))
 
     sart = behavior.get("sart")
-    if sart:
+    if sart and not sart.get("valid", True):
+        evidence.append(Evidence(
+            code="sart_unavailable", source="behavior", dimension="attention",
+            summary="SART 行为证据不可用：任务计分未通过有效性检查",
+            value=None, direction="unknown", available=False,
+        ))
+    elif sart:
         attention_flag = (
             sart.get("commission_rate", 0.0) > thresholds["commission_rate_high"]
             or sart.get("omission_rate", 0.0) > thresholds["omission_rate_high"]
@@ -155,15 +163,27 @@ def assess(eeg, scales=None, behavior=None) -> JointAssessment:
             ref={"sequence_set_id": sart.get("sequence_set_id"), "seed": sart.get("seed"), "spec": sart.get("spec")},
         ))
     pvt = behavior.get("pvt")
-    if pvt:
+    if pvt and not pvt.get("valid", True):
+        evidence.append(Evidence(
+            code="pvt_unavailable", source="behavior", dimension="attention",
+            summary="PVT 行为证据不可用：有效作答不足、数据无效或任务未完成",
+            value=None, direction="unknown", available=False,
+            ref={"reasons": pvt.get("unavailable_reasons", [])},
+        ))
+    elif pvt:
         evidence.append(Evidence(
             code="pvt_alertness",
             source="behavior",
             dimension="attention",
-            summary=f"PVT-B 中位反应时 {pvt.get('rt_median', 0):.3f}s、慢反应率 {pvt.get('lapse_rate', 0):.1%}",
+            summary=(f"PVT-B 中位反应时 {pvt.get('rt_median', 0):.3f}s、慢反应率 {pvt.get('lapse_rate', 0):.1%}、"
+                     f"漏答率 {pvt.get('omission_rate', 0):.1%}（判定阈值待验证）"),
             value={"rt_median": pvt.get("rt_median"), "lapse_rate": pvt.get("lapse_rate")},
-            direction="low" if pvt.get("lapse_rate", 0.0) > thresholds["lapse_rate_high"] else "normal",
-            ref={"task": "pvt-b"},
+            direction="low" if (pvt.get("lapse_rate", 0.0) > thresholds["lapse_rate_high"]
+                                or pvt.get("omission_rate", 0.0) > thresholds["omission_rate_high"]) else "normal",
+            ref={"task": "pvt-b", "scoring_spec": pvt.get("scoring_spec"),
+                 "threshold_status": config.VALIDATION_STATUS,
+                 "omission_rate": pvt.get("omission_rate"),
+                 "lapse_sec": pvt.get("lapse_sec")},
         ))
 
     dimension_states, consistency = _consistency(evidence, thresholds)
@@ -271,7 +291,7 @@ def _conclusion(states, consistency, evidence) -> str:
             return "结果不一致，建议复测（脑电指标与其他证据方向不一致）"
         if any(states.get(name, {}).get("state") in ("证据不足", None) for name in ("stress", "attention")):
             return "证据不足，暂不给出状态结论（请补充缺失的评估环节）"
-        return "本次各项证据均落在个体基线与常模范围内"
+        return "本次可用证据未触发当前工程判定阈值（阈值待验证）"
 
     conclusion = DIMENSION_CONCLUSION[target]
     if inconsistent:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sys
 import time
+import threading
 import unittest
 from pathlib import Path
 
@@ -80,7 +81,7 @@ class PvtFalseStartMechanismTests(unittest.TestCase):
             self.assertAlmostEqual(actual, planned, places=6)
 
     def test_index_mismatch_is_not_counted_as_that_trial(self) -> None:
-        """错位作答（前端定时器晚到）按"未作答"记账，不会被算到下一个试次头上。"""
+        """错位作答被丢弃，当前窗口到期才记为未作答。"""
         self.runtime.provide_input("pvt", {"index": 99, "responded": True, "rt": 0.3,
                                            "false_start": False})
         answer = self.runtime._wait_trial("pvt", {"task": "pvt", "index": 4},
@@ -88,6 +89,59 @@ class PvtFalseStartMechanismTests(unittest.TestCase):
                                           window=0.05)
         self.assertFalse(answer.get("responded"), "index 不匹配时不能当成有效作答")
         self.assertIsNone(answer.get("rt"))
+
+    def test_late_answer_does_not_advance_or_poison_following_trials(self):
+        for index in range(16, 22):
+            with self.subTest(index=index):
+                # 上一试次的定时器在等待期迟到；下一试次仍应等到正确作答。
+                self.runtime.provide_input('pvt', {'index': index - 1, 'responded': False})
+                result = []
+                thread = threading.Thread(target=lambda: result.append(self.runtime._wait_trial(
+                    'pvt', {'task': 'pvt', 'index': index}, auto=False,
+                    fallback={}, window=0.5)))
+                thread.start()
+                try:
+                    time.sleep(0.03)
+                    self.assertTrue(thread.is_alive(), '旧序号不能提前结束当前试次')
+                    self.assertFalse(self.runtime.provide_input('pvt',
+                        {'index': index - 1, 'responded': True, 'rt': 0.2}))
+                    self.assertTrue(self.runtime.provide_input('pvt',
+                        {'index': index, 'responded': True, 'rt': 0.4}))
+                finally:
+                    thread.join(2)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(result[0]['index'], index)
+                self.assertEqual(self.runtime._behavior_misses, 0)
+
+    def test_practice_answer_cannot_match_main_trial_with_same_index(self):
+        result = []
+        self.runtime.provide_input('sart', {'phase': 'practice', 'index': 0, 'responded': True})
+        thread = threading.Thread(target=lambda: result.append(self.runtime._wait_trial(
+            'sart', {'task': 'sart', 'phase': 'main', 'index': 0},
+            auto=False, fallback={}, window=0.5)))
+        thread.start()
+        try:
+            time.sleep(0.03)
+            self.assertTrue(thread.is_alive())
+            self.runtime.provide_input('sart', {'phase': 'main', 'index': 0, 'responded': False})
+        finally:
+            thread.join(2)
+        self.assertEqual(result[0]['phase'], 'main')
+
+    def test_invalid_inputs_do_not_extend_deadline(self):
+        started = time.monotonic()
+        self.runtime.provide_input('pvt', {'index': 99})
+        result = self.runtime.wait_for_input('pvt', timeout=0.05,
+                                            accept=lambda answer: answer.get('index') == 0)
+        self.assertEqual(result, {})
+        self.assertGreaterEqual(time.monotonic() - started, 0.04)
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_cancel_interrupts_filtered_wait(self):
+        from ningsi_studio.core.runtime import SessionCancelled
+        self.runtime.cancel()
+        with self.assertRaises(SessionCancelled):
+            self.runtime.wait_for_input('pvt', accept=lambda answer: True)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ import {
   list, pageFrame, pick, renderMarkdown, statusText, table,
 } from '../util.js';
 
-const INDICATOR_LABELS = { focus: '专注度', relax: '放松度', load: '认知负荷' };
+const INDICATOR_LABELS = { focus: '专注相关指数', relax: '放松度', load: '认知负荷' };
 const DIMENSION_LABELS = { attention: '专注维度', stress: '压力维度' };
 
 /** 表格单元格里的 `|` 会破坏极简 Markdown 表格语法，统一替换。 */
@@ -37,6 +37,7 @@ function composeMarkdown(report) {
   lines.push('');
   lines.push(`- 评估口径：${cell(pick(report, 'spec'))}；频谱 ${cell(versions.spectrum)}；指标 ${cell(versions.indicator)}；基线 ${cell(versions.baseline)}`);
   lines.push(`- 软件版本：${cell(versions.product)}`);
+  lines.push(`- 解释边界：${cell(report.validation_note || '专注相关脑电指数不是专注概率；评分、预警及行为判定阈值为工程设定，待验证。')}`);
   if (report.created_at) lines.push(`- 生成时间：${cell(fmtTime(report.created_at))}`);
 
   // 采集调理：只有真实设备会话才有（仿真源不做这一步），与后端 report.to_markdown() 表头同一口径。
@@ -81,6 +82,10 @@ function composeMarkdown(report) {
   // 真实设备 + 快速演示：相邻窗读到几乎同一段缓冲（实测质检阶段 5 个窗指标逐字节相同），
   // 窗计数不是独立样本。仿真源每窗重新生成数据，不受影响。与后端 report.to_markdown() 同一口径。
   const extras = pick(report, 'extras', null) || {};
+  for (const [key, label] of [['baseline_eyes_open', '睁眼'], ['baseline_eyes_closed', '闭眼']]) {
+    const baseline = extras[key];
+    if (baseline?.quality) lines.push(`- ${label}基线：去重有效时长 ${cell(fmtNum(baseline.quality.usable_seconds, 1))} 秒；可用比例 ${cell(fmtPercent(baseline.quality.valid_ratio))}；前后半段对数比值均值差 ${cell(JSON.stringify(baseline.quality.half_mean_difference))}；原因 ${cell((baseline.reasons || []).join('、') || '无')}；稳定性尚未验证。`);
+  }
   if (String(pick(extras, 'source_kind')) === 'lsl' && Number(pick(extras, 'time_scale') || 1) < 0.2) {
     lines.push('- 采集口径提醒：真实设备 + 快速演示模式（time_scale < 0.2）下相邻 4 秒窗读到的是几乎同一段缓冲数据，上面的可用窗计数是**高重叠样本**，只能用于链路自检；真实节奏采集请用 time_scale = 1.0（此时量表与按键任务由本人操作）。');
   }
@@ -106,6 +111,7 @@ function composeMarkdown(report) {
       if (name === 'sart') {
         lines.push(`- SART：${cell(fmtInt(pick(result, 'trials')))} 试次（No-Go ${cell(fmtInt(pick(result, 'nogo_trials')))}），正确率 ${cell(fmtPercent(pick(result, 'go_accuracy')))}，虚报率 ${cell(fmtPercent(pick(result, 'commission_rate')))}，漏报率 ${cell(fmtPercent(pick(result, 'omission_rate')))}，反应时 ${cell(fmtNum(pick(result, 'rt_mean'), 3))} ± ${cell(fmtNum(pick(result, 'rt_sd'), 3))} s`);
       } else if (name === 'pvt') {
+        if (result.scoring_spec) lines.push(`- PVT 计分：${cell(result.scoring_spec)}；主慢反应 >500 ms；≥355 ms 对照 ${cell(fmtPercent(result.lapse_rate_355ms))}；漏答率 ${cell(fmtPercent(result.omission_rate))}；证据${result.valid ? '可用' : '不可用'}；阈值待验证。${cell(result.protocol_note)}`);
         lines.push(`- PVT-B：${cell(fmtInt(pick(result, 'trials')))} 试次，应答 ${cell(fmtInt(pick(result, 'responded')))}，漏失 ${cell(fmtInt(pick(result, 'missed')))}，中位反应时 ${cell(fmtNum(pick(result, 'rt_median'), 3))} s，慢反应率 ${cell(fmtPercent(pick(result, 'lapse_rate')))}，抢答 ${cell(fmtInt(pick(result, 'false_starts')))} 次`);
       } else {
         lines.push(`- ${cell(name)}：见结构化 JSON`);

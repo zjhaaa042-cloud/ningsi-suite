@@ -23,7 +23,7 @@ import {
 } from '../charts.js';
 
 const INDICATORS = [
-  { key: 'focus', label: '专注度' },
+  { key: 'focus', label: '专注相关指数' },
   { key: 'relax', label: '放松度' },
   { key: 'load', label: '认知负荷' },
 ];
@@ -312,7 +312,8 @@ export function render(container, ctx) {
     if (local.indicatorReason && !Object.values(local.scores).some(value => Number.isFinite(value))) {
       body.append(el('p', { class: 'muted', text: local.indicatorReason }));
     }
-    body.append(metricBar('专注度', summaryStat('focus'), {
+    body.append(el('p', { class: 'muted', text: '专注相关脑电指数表示相对个人基线的变化，不是专注概率。评分与预警阈值为工程设定，待验证。' }));
+    body.append(metricBar('专注相关脑电指数', summaryStat('focus'), {
       threshold: pick(alerts, 'low_focus.threshold'),
       thresholdLabel: `低专注阈值 ${fmtNum(pick(alerts, 'low_focus.threshold'), 2)}（持续 ${fmtSeconds(pick(alerts, 'low_focus.sustain_sec'), 0)}）`,
       fillClass: 'fill-0',
@@ -607,7 +608,8 @@ export function render(container, ctx) {
       }
       case 'window': {
         const reasonLabels = {
-          baseline_invalid: '睁眼基线尚未建立或有效窗不足，请完成基线采集；若仍不合格，请检查电极后重新开始。',
+          baseline_invalid: '睁眼基线尚未通过窗数、有效时长或可用比例审核，请检查电极并完成基线采集。',
+          baseline_configuration_mismatch: '当前采样率或通道数与基线不一致，请重新建立基线。',
           baseline_pending: '正在采集个体基线，暂不显示评分。',
           no_data: '未收到新鲜脑电数据，请检查设备连接和采集程序。',
           signal_too_short: '脑电样本不足，正在等待缓冲。',

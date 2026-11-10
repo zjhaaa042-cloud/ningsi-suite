@@ -6,10 +6,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 from ningsi.behavior import metrics
 
 LAPSE_SEC = 0.5
+COMPARISON_LAPSE_SEC = 0.355
+MIN_RT_SEC = 0.1
+SCORING_SPEC = "pvt-scoring-v2"
 DURATION_SEC = 180.0
 ISI_RANGE = (1.0, 4.0)
 
@@ -28,23 +32,52 @@ class PvtResult:
     duration_sec: float = DURATION_SEC
 
     def score(self) -> dict:
-        rts = [t.rt for t in self.trials if t.responded and t.rt is not None]
+        rts = []
+        false_starts = missed = invalid = 0
+        for trial in self.trials:
+            rt = trial.rt
+            finite = isinstance(rt, (int, float)) and not isinstance(rt, bool) and math.isfinite(rt)
+            if trial.false_start or (trial.responded and finite and 0 <= rt < MIN_RT_SEC):
+                false_starts += 1
+            elif not trial.responded:
+                missed += 1
+            elif not finite or rt < 0:
+                invalid += 1
+            else:
+                rts.append(float(rt))
+        # 保留原来的 >500 ms 主阈值；355 ms 仅作论文口径对照，不替换判断阈值。
         lapses = [rt for rt in rts if rt > LAPSE_SEC]
-        false_starts = sum(1 for t in self.trials if t.false_start)
+        opportunities = len(rts) + missed
+        valid = len(rts) >= 5 and invalid == 0
         return {
             "task": "pvt-b",
             "duration_sec": self.duration_sec,
             "trials": len(self.trials),
             "responded": len(rts),
-            "missed": sum(1 for t in self.trials if not t.responded),
+            "missed": missed,
+            "invalid_responses": invalid,
             "rt_mean": round(metrics.mean(rts), 4),
             "rt_median": round(metrics.percentile(rts, 0.5), 4),
             "rt_sd": round(metrics.std(rts), 4),
             "rt_p90": round(metrics.percentile(rts, 0.9), 4),
             "lapses": len(lapses),
             "lapse_rate": metrics.ratio(len(lapses), len(rts)),
+            "omission_rate": metrics.ratio(missed, opportunities),
+            "lapses_355ms": sum(rt >= COMPARISON_LAPSE_SEC for rt in rts),
+            "lapse_rate_355ms": metrics.ratio(sum(rt >= COMPARISON_LAPSE_SEC for rt in rts), len(rts)),
+            "lapse_sec": LAPSE_SEC,
+            "lapse_operator": ">",
+            "comparison_lapse_sec": COMPARISON_LAPSE_SEC,
+            "comparison_lapse_operator": ">=",
+            "scoring_spec": SCORING_SPEC,
+            "threshold_status": "pending_validation",
+            "protocol_note": "定时刺激变体，尚未完成等效性验证；120 秒短版不继承标准 PVT-B 效度。",
+            "rate_denominators": {"lapse_rate": len(rts), "omission_rate": opportunities},
+            "unavailable_reasons": ([] if valid else
+                                    (["insufficient_valid_responses"] if len(rts) < 5 else [])
+                                    + (["invalid_response_time"] if invalid else [])),
             "false_starts": false_starts,
-            "valid": len(rts) >= 5,
+            "valid": valid,
         }
 
 

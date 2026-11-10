@@ -14,7 +14,7 @@ from ningsi.signal.baseline import build_baseline
 from ningsi.signal.indicators import aggregate, compute_indicators
 from ningsi.signal.window import analyze_window
 
-INDICATOR_LABELS = {"focus": "专注度", "relax": "放松度", "load": "认知负荷"}
+INDICATOR_LABELS = {"focus": "专注相关指数", "relax": "放松度", "load": "认知负荷"}
 
 
 @dataclass
@@ -122,8 +122,8 @@ class WindowEngine:
         )
 
     def _min_samples(self) -> int:
-        """一个 4 秒窗至少要够 Welch 一个分段（segment_sec × srate）。"""
-        segment = float(config.WELCH["segment_sec"])
+        """评分窗口须包含完整的 4 秒数据，不能把一个 Welch 分段当成完整窗。"""
+        segment = float(config.WINDOW_SEC)
         return max(1, int(round(segment * self.srate)))
 
     def _enough_data(self, raw) -> bool:

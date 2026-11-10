@@ -16,6 +16,7 @@ import threading
 import time
 import traceback
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from ningsi import config
@@ -79,6 +80,7 @@ class SessionRuntime:
         self._thread: threading.Thread | None = None
         self._input_events: dict[str, threading.Event] = {}
         self._input_payload: dict[str, dict] = {}
+        self._input_accept: dict = {}
         self._input_lock = threading.Lock()
         self._lock = threading.Lock()
         self._state = threading.Event()          # 临时存放的进度/阶段快照
@@ -143,25 +145,36 @@ class SessionRuntime:
         return bool(self._thread is not None and self._thread.is_alive())
 
     # ------------------------------------------------------------- 外部注入
-    def wait_for_input(self, name: str, timeout: float = INPUT_TIMEOUT_SEC) -> dict:
+    def wait_for_input(self, name: str, timeout: float = INPUT_TIMEOUT_SEC, *, accept=None) -> dict:
         """等待前端提交的作答。
 
         分段等待（每段 0.5 秒）而不是一次 `wait(timeout)`：这样会话被取消时能在半秒内
         立即响应，而不是傻等到总超时；无论成功、取消还是超时都清理该交互点，避免事件泄漏。
         """
         event = self._register_input(name)
-        waited = 0.0
+        deadline = time.monotonic() + timeout
+        with self._input_lock:
+            if accept is not None:
+                self._input_accept[name] = accept
         try:
-            while waited < timeout:
+            while True:
                 self._check_cancel()
-                if event.wait(min(0.5, max(0.05, timeout - waited))):
-                    break
-                waited += 0.5
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return {}
+                if event.wait(min(0.5, remaining)):
+                    self._check_cancel()
+                    with self._input_lock:
+                        payload = self._input_payload.pop(name, {}) or {}
+                        event.clear()
+                        if accept is None or accept(payload):
+                            return payload
+                        # 迟到/错位输入不能推进当前试次，也不能重置截止时间。
         finally:
             with self._input_lock:
-                payload = self._input_payload.pop(name, {}) or {}
+                self._input_payload.pop(name, None)
                 self._input_events.pop(name, None)
-        return payload
+                self._input_accept.pop(name, None)
 
     def provide_input(self, name: str, payload) -> bool:
         """把作答交给当前试次；若上一个试次的作答尚未被消费，则拒绝（返回 False）。
@@ -170,6 +183,9 @@ class SessionRuntime:
         上游的顺序校验会直接判失败；明确拒绝能让前端立刻知道"这一帧没进去"。
         """
         with self._input_lock:
+            accept = self._input_accept.get(name)
+            if payload and accept is not None and not accept(payload):
+                return False
             event = self._input_events.get(name)
             if event is None:
                 event = threading.Event()
@@ -539,6 +555,9 @@ class SessionRuntime:
         for index in range(total):
             self._check_cancel()
             step = self.engine.step(state)
+            if self.source.kind == "lsl" and step.window is not None:
+                # 真实采集按经过的时间覆盖计时，禁止加速演示虚增基线时长。
+                step.window = replace(step.window, t_end=time.monotonic())
             steps.append(step)
             self._publish_window(step, phase=key, include_signal=(index % 5 == 0))
             if progress and index % 5 == 0:
@@ -600,8 +619,8 @@ class SessionRuntime:
         自动补一笔"未作答"（SART 的 No-Go 试次本来就不该按键，否则服务端会一直等到 900 秒）。
 
         服务端只等 `window + TRIAL_GRACE_SEC`，并且：
-        - 拿到的作答**必须带匹配的 index**：前端定时器与下一次 `trial` 事件存在竞态，
-          晚到的作答如果对不上当前试次，就按"未作答"记账，绝不能算到下一个试次头上（错记会污染指标）；
+        - 作答必须匹配 index（SART 还需匹配练习/正式阶段）；错位输入被丢弃，
+          当前试次继续等待到原截止时间，避免迟到输入造成连续错位；
         - 单次超时按"未作答"记账继续跑（丢一帧不该让整段评估失败）；
         - 连续 `BEHAVIOR_MISS_LIMIT` 次超时才判定前端已掉线并抛错，
           这样页面关掉时是"约 10 秒后明确失败"，而不是把会话空转 15 分钟。
@@ -613,16 +632,21 @@ class SessionRuntime:
             self._behavior_misses = 0
             return dict(fallback)
         started = time.monotonic()
-        answer = self.wait_for_input(name, timeout=float(window) + TRIAL_GRACE_SEC)
-        if answer and (expected_index is None or answer.get("index") in (None, expected_index)):
+        def matches(answer):
+            return (answer.get("index") == expected_index
+                    and (name != "sart" or answer.get("phase") == payload.get("phase")))
+
+        answer = self.wait_for_input(name, timeout=float(window) + TRIAL_GRACE_SEC,
+                                     accept=matches)
+        if answer:
             self._behavior_misses = 0
             answer["__elapsed"] = time.monotonic() - started
             return answer
         self._behavior_misses = getattr(self, "_behavior_misses", 0) + 1
         if self._behavior_misses >= BEHAVIOR_MISS_LIMIT:
             raise RuntimeError(
-                f"{payload.get('task')} 连续 {self._behavior_misses} 个试次没有收到有效作答"
-                f"（前端可能已关闭或掉线；最近一次 index={answer.get('index')!r}，期望 {expected_index!r}）")
+                f"{payload.get('task')} 连续 {self._behavior_misses} 个试次未在期限内收到匹配作答"
+                f"（当前 index={expected_index!r}；请保持测试页面打开并检查连接）")
         return {"responded": False, "rt": None, "__elapsed": time.monotonic() - started}
 
     def _run_sart(self, auto: bool):
@@ -711,6 +735,7 @@ class SessionRuntime:
                 # 服务端把它记到紧接着的那一个试次上（responded=false / rt=null）。
                 self.bus.publish("notice", {
                     "level": "info",
+                    "task": "pvt", "index": nxt["index"], "false_start": True,
                     "message": f"抢答已记账：第 {nxt['index'] + 1} 试次记为抢答（刺激出现前按键，不计入反应时）",
                 })
         result = task.result()

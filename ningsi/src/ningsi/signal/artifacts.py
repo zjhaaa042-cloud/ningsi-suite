@@ -21,13 +21,17 @@ class Verdict:
         return {"ok": self.ok, "reasons": list(self.reasons), "metrics": dict(self.metrics)}
 
 
-def check_channels(window_uv, srate: float, quality: dict | None = None, spectrum=None) -> Verdict:
+def check_channels(window_uv, srate: float, quality: dict | None = None, spectrum=None, spectra=None) -> Verdict:
     """window_uv: 形状 (通道, 采样点) 的 4 秒窗。返回是否可用与不可用原因。
 
     spectrum 可传入已算好的 Spectrum，避免逐窗重复估计功率谱。
     """
     q = {**config.QUALITY, **(quality or {})}
     data = np.atleast_2d(np.asarray(window_uv, dtype=float))
+    if data.ndim != 2 or not data.size:
+        return Verdict(False, ("no_data",), {})
+    if not np.isfinite(data).all():
+        return Verdict(False, ("non_finite_signal",), {})
     reasons: list[str] = []
     metrics: dict = {}
 
@@ -46,13 +50,24 @@ def check_channels(window_uv, srate: float, quality: dict | None = None, spectru
     if span > q["span_max_uv"]:
         reasons.append("channel_span")
 
-    spectrum = spectrum or welch_psd(data[0], srate)
-    rel = relative_band_powers(spectrum.freqs, spectrum.psd)
-    metrics["emg_rel"] = round(rel.get("gamma", 0.0), 4)
-    metrics["eog_rel"] = round(rel.get("low", 0.0), 4)
-    if rel.get("gamma", 0.0) > q["emg_rel_max"]:
+    if spectra is None:
+        spectra = [spectrum if index == 0 and spectrum is not None else welch_psd(channel, srate)
+                   for index, channel in enumerate(data)]
+    if len(spectra) != data.shape[0]:
+        raise ValueError("频谱数量与通道数不一致")
+    channel_metrics = []
+    for index, item in enumerate(spectra):
+        rel = relative_band_powers(item.freqs, item.psd)
+        channel_metrics.append({"channel": index, "emg_rel": float(rel.get("gamma", 0.0)),
+                                "eog_rel": float(rel.get("low", 0.0))})
+    metrics["channels"] = channel_metrics
+    # 任一通道不合格就拒绝整个窗；避免平均功率掩盖局部污染。
+    metrics["emg_rel"] = max(item["emg_rel"] for item in channel_metrics)
+    metrics["eog_rel"] = max(item["eog_rel"] for item in channel_metrics)
+    metrics["screening_note"] = "逐通道频带代理粗筛，不能保证排除眼电或肌电污染；阈值待验证"
+    if metrics["emg_rel"] > q["emg_rel_max"]:
         reasons.append("emg")
-    if rel.get("low", 0.0) > q["eog_rel_max"]:
+    if metrics["eog_rel"] > q["eog_rel_max"]:
         reasons.append("eog")
 
     return Verdict(ok=not reasons, reasons=tuple(reasons), metrics=metrics)

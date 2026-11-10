@@ -248,6 +248,8 @@ def build_router(settings: Settings) -> Router:
             "indicators": {key: list(value) for key, value in engine_config.INDICATORS.items()},
             "score_gain": engine_config.SCORE_GAIN,
             "baseline_protocol": engine_config.BASELINE_PROTOCOL,
+            "validation_note": engine_config.VALIDATION_NOTE,
+            "threshold_status": engine_config.VALIDATION_STATUS,
             "quality": engine_config.QUALITY,
             "alerts": engine_config.ALERTS,
             "assess": engine_config.ASSESS,
@@ -925,7 +927,7 @@ def build_router(settings: Settings) -> Router:
             "rt": rt,
         })
         if not delivered:
-            raise Conflict("当前会话不处于 SART 阶段或已结束")
+            raise Conflict("SART 作答未接收：试次序号或阶段不匹配，或已有待处理作答")
         return Response.json({"accepted": True})
 
     @router.get(r"/api/sessions/{uuid}/behaviors/pvt/sequence")
@@ -952,7 +954,7 @@ def build_router(settings: Settings) -> Router:
             "false_start": schemas.as_bool(payload.get("false_start"), False),
         })
         if not delivered:
-            raise Conflict("当前会话不处于 PVT 阶段或已结束")
+            raise Conflict("PVT 作答未接收：试次序号不匹配，或已有待处理作答")
         return Response.json({"accepted": True})
 
     @router.get(r"/api/sessions/{uuid}/behaviors/{task}/result")
@@ -1365,7 +1367,7 @@ def _openapi_spec() -> dict:
         "info": {"title": API_TITLE, "version": API_VERSION,
                  "description": "凝思 Studio：便携脑电专注力训练与心理状态评估的 Web 接口。"
                                 "算法口径全部来自 ningsi 引擎（welch-v1 / indicator-v1 / "
-                                "baseline-v1 / neurofeedback-v1）。"},
+                                "baseline-v2 / neurofeedback-v2）。"},
         "servers": [{"url": "/", "description": "同端口静态前端与 API"}],
         "paths": paths,
         "components": {

@@ -68,12 +68,22 @@ class WindowFeatures:
 def analyze_window(window_uv, srate: float, t_end: float = 0.0, quality: dict | None = None) -> WindowFeatures:
     """window_uv 形状为 (通道, 采样点)；多通道时对功率谱取平均。"""
     data = np.atleast_2d(np.asarray(window_uv, dtype=float))
+    reason = None
+    if data.ndim != 2 or not data.size:
+        reason = "no_data"
+    elif not np.isfinite(data).all():
+        reason = "non_finite_signal"
+    elif data.shape[1] < round(config.WINDOW_SEC * srate):
+        reason = "signal_too_short"
+    if reason:
+        return WindowFeatures(float(t_end), float(srate), int(data.shape[0]), {}, {},
+                              Verdict(False, (reason,), {}), {})
     spectra: list[Spectrum] = []
     for channel in data:
         spectra.append(welch_psd(channel, srate))
     freqs = spectra[0].freqs
     psd = np.mean([s.psd for s in spectra], axis=0)
-    verdict = check_channels(data, srate, quality=quality, spectrum=spectra[0])
+    verdict = check_channels(data, srate, quality=quality, spectra=spectra)
     return WindowFeatures(
         t_end=float(t_end),
         srate=float(srate),

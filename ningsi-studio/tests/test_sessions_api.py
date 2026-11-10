@@ -358,7 +358,7 @@ class ArtifactDownloadTests(StudioTestCase):
                       "下载应带 Content-Disposition: attachment")
         self.assertIn("filename=", response.content_disposition, "下载响应应带文件名")
         report = response.json()
-        self.assertEqual(report["spec"], "joint-assessment-v1", "报告口径应为 joint-assessment-v1")
+        self.assertEqual(report["spec"], config.LABEL_SPEC, "报告口径应与当前评估版本一致")
         self.assertIn("report_markdown", report, "报告应附带 Markdown 原文")
         self.assertTrue(report["report_markdown"].startswith("#"), "Markdown 原文应以标题开头")
 

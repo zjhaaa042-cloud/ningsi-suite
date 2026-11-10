@@ -335,6 +335,8 @@ export function render(container, ctx) {
     scales: new Map(),              // code → 已渲染的作答区状态
     scaleResults: new Map(),        // code → 后端计分结果（用于"量表计分汇总"卡）
     trial: null,                    // { task, phase, index, digit, total, keyReady, answer }
+    pvtNextIndex: 0,
+    pvtEarlyIndex: null,             // 每个等待期最多上报一次抢答
     finished: false,
     notices: [],
     offline: false,
@@ -578,7 +580,7 @@ export function render(container, ctx) {
       ? `这次检测${statusText(status)}${reason ? `：${reason}` : ''}`
       : '检测完成，数据与报告已生成' }));
     body.push(el('div', { class: 'done__metrics' }, [
-      metric('专注度', fmtNum(pick(summary, 'focus.mean')), '指标均值 0–1'),
+      metric('专注相关指数', fmtNum(pick(summary, 'focus.mean')), '指标均值 0–1'),
       metric('放松度', fmtNum(pick(summary, 'relax.mean')), '指标均值 0–1'),
       metric('认知负荷', fmtNum(pick(summary, 'load.mean')), '指标均值 0–1'),
       metric('采集质量', quality ? `${fmtInt(quality.usable)}/${fmtInt(quality.windows)} 窗` : DASH,
@@ -1328,6 +1330,7 @@ export function render(container, ctx) {
   /** 空格作答：仅在 trial 已就绪（本试次已渲染刺激）时接受，杜绝跨试次串答。 */
   const onKeyDown = (event) => {
     if (event.code !== 'Space' && event.key !== ' ') return;
+    if (event.repeat) return;       // 长按空格不能自动变成下一试次的抢答
     // 输入类元素里允许正常输入空格
     const tag = (event.target && event.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -1363,17 +1366,16 @@ export function render(container, ctx) {
       toast('抢答：演示模式下由服务端自动作答，本机按键不计入', 'info');
       return;
     }
-    // 下一个试次的 0-based index：优先用舞台上写着的"第 N 试次"（等待态显示的是**刚答完**那一试次，
-    // 所以下一个就是 N），拿不到再用 local.trial.index + 1。**不能瞎报**——服务端会核对 index，
-    // 对不上就按"未作答"记账，抢答反而没了。
-    const stageText = (local.taskSlots && local.taskSlots.get('pvt') && local.taskSlots.get('pvt').stage
-      ? local.taskSlots.get('pvt').stage.textContent : '') || '';
-    const shown = /第\s*([0-9]+)\s*试次/.exec(stageText);
-    const nextIndex = shown ? Number(shown[1])
-      : (local.trial && Number.isFinite(local.trial.index) ? local.trial.index + 1 : 0);
+    // 使用服务端 trial 序号维护等待期，不从页面文案反推业务序号。
+    const nextIndex = local.pvtNextIndex;
+    if (local.pvtEarlyIndex === nextIndex) return;
+    local.pvtEarlyIndex = nextIndex;
     api.submitPvtTrial(uuid, { index: nextIndex, responded: false, rt: null, false_start: true })
       .then(() => toast('抢答已上报：光点还没出现，这一次记为抢答（不计入反应时）', 'info'))
-      .catch((error) => toast(`抢答上报失败：${describeError(error)}`, 'error'));
+      .catch((error) => {
+        if (local.pvtEarlyIndex === nextIndex) local.pvtEarlyIndex = null;
+        toast(`抢答上报失败：${describeError(error)}`, 'error');
+      });
   };
   window.addEventListener('keydown', onKeyDown);
   // 视图卸载时摘掉监听，避免其它视图误触发
@@ -1555,6 +1557,19 @@ export function render(container, ctx) {
         break;
       }
       case 'notice': {
+        // 抢答已由服务端消费：取消同一试次的刺激/漏答计时，避免再提交一次旧序号。
+        // 旧通知绝不能清掉已经到达的下一试次。
+        if (payload.task === 'pvt' && payload.false_start === true
+            && local.trial?.task === 'pvt' && local.trial.index === payload.index) {
+          const trial = local.trial;
+          clearTrialWindow();
+          clearStimulusTicker();
+          local.trial = null;
+          renderTaskStage('pvt', {
+            index: trial.index + 1, total: trial.total, stimulus: false,
+            answered: true, hint: '本试次已记为抢答，等待下一个光点。',
+          });
+        }
         local.notices.push({ level: payload.level, message: payload.message });
         if (String(payload.message || '').includes('训练结束')) {
           const slot = local.taskSlots?.get('training-feedback');
@@ -1604,6 +1619,8 @@ export function render(container, ctx) {
         slot.host.textContent = '';
         slot.host.append(card(`基线：${payload.label || payload.key || DASH}`, el('div', {}, [
           el('p', { class: 'muted', text: `可用窗 ${fmtInt(pick(baseline, 'n_windows'))}｜设备 ${pick(baseline, 'device', DASH)}｜采样率 ${fmtNum(pick(baseline, 'srate'), 0)} Hz｜${pick(baseline, 'valid') ? '有效' : '无效'}` }),
+          el('p', { class: 'muted', text: `去重有效时长 ${fmtNum(pick(baseline, 'quality.usable_seconds'), 1)} 秒；最低 ${fmtNum(pick(baseline, 'quality.min_usable_seconds'), 0)} 秒（工程门槛，待验证）。通过质量门控不代表稳定性已获验证。` }),
+          el('p', { class: 'muted', text: `质检原因：${(baseline.reasons || []).join('、') || '无'}；前后半段对数比值均值差：${JSON.stringify(pick(baseline, 'quality.half_mean_difference', {}))}` }),
           table([
             { title: '类别', render: (row) => row[0] },
             { title: '均值', align: 'right', render: (row) => fmtNum(pick(row[1], 'mean'), 4) },
@@ -1616,8 +1633,8 @@ export function render(container, ctx) {
           ]),
           pick(baseline, 'valid') === false
             ? el('p', { class: 'muted', text: payload.key === 'baseline_closed'
-              ? '闭眼基线有效窗不足；任务评分仍以睁眼基线是否合格为准。'
-              : '睁眼基线有效窗不足，暂停个体评分。请检查电极接触，保持放松并重新采集；波形和频带功率仍可查看。' })
+              ? '闭眼基线质量或有效时长不足；任务评分仍以睁眼基线是否合格为准。'
+              : '睁眼基线质量或有效时长不足，暂停个体评分。请检查电极接触，保持放松并重新采集；波形和频带功率仍可查看。' })
             : null,
         ])));
         break;
@@ -1665,6 +1682,7 @@ export function render(container, ctx) {
         const task = taskKey(payload.task
           || (local.behaviorRequest && local.behaviorRequest.task) || 'sart');
         const at = performance.now();
+        if (task === 'pvt') local.pvtNextIndex = Number(payload.index ?? 0) + 1;
         local.trial = {
           task,
           phase: payload.phase || 'main',
@@ -1713,14 +1731,17 @@ export function render(container, ctx) {
           : [
             ['试次 / 应答 / 漏失', `${fmtInt(result.trials)} / ${fmtInt(result.responded)} / ${fmtInt(result.missed)}`],
             ['中位反应时', `${fmtNum(result.rt_median, 3)} s`],
-            ['慢反应率', fmtPercent(result.lapse_rate)],
+            ['慢反应率（>500 ms，主口径）', fmtPercent(result.lapse_rate)],
+            ['慢反应率（≥355 ms，仅对照）', fmtPercent(result.lapse_rate_355ms)],
+            ['漏答率（不含抢答）', fmtPercent(result.omission_rate)],
+            ['计分口径', result.scoring_spec || '历史口径'],
             ['抢答次数', fmtInt(result.false_starts)],
             ['数据有效性', result.valid === true ? '有效' : result.valid === false ? '无效' : DASH],
           ];
         slot.host.append(card(`${payload.task === 'sart' ? 'SART' : 'PVT-B'} 结果`, table([
           { title: '指标', render: (row) => row[0] },
           { title: '值', align: 'right', render: (row) => row[1] },
-        ], rows), { sub: '漏报 / 虚报 / 反应时与变异' }));
+        ], rows), { sub: '行为判定阈值为工程设定，待验证；短版与定时刺激变体不直接继承标准任务效度。' }));
         break;
       }
       case 'monitor': {
@@ -1728,7 +1749,7 @@ export function render(container, ctx) {
         const indicators = summary.indicators || summary;
         const rows = ['focus', 'relax', 'load'].map((name) => {
           const stat = indicators && indicators[name] ? indicators[name] : {};
-          return [`${{ focus: '专注度', relax: '放松度', load: '认知负荷' }[name]}`, `${fmtNum(pick(stat, 'mean'), 3)} ± ${fmtNum(pick(stat, 'std'), 3)}（n=${fmtInt(pick(stat, 'n'))}）`];
+          return [`${{ focus: '专注相关指数', relax: '放松度', load: '认知负荷' }[name]}`, `${fmtNum(pick(stat, 'mean'), 3)} ± ${fmtNum(pick(stat, 'std'), 3)}（n=${fmtInt(pick(stat, 'n'))}）`];
         });
         const slot = ensureTaskSlot('monitor');
         slot.host.textContent = '';

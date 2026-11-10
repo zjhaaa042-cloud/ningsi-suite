@@ -3,8 +3,8 @@
 VERSION = "0.1.0"
 SPECTRUM_SPEC = "welch-v1"
 INDICATOR_SPEC = "indicator-v1"
-BASELINE_SPEC = "baseline-v1"
-LABEL_SPEC = "joint-assessment-v1"
+BASELINE_SPEC = "baseline-v2"
+LABEL_SPEC = "joint-assessment-v2"
 
 # Welch 功率谱：4 秒分析窗、2 秒分段、50% 重叠、汉宁窗（对应文档 8.3.1）
 WELCH = {
@@ -23,6 +23,7 @@ BASELINE_PROTOCOL = {
     "eyes_open_sec": 120.0,
     "eyes_closed_sec": 120.0,
     "min_windows": 5,
+    "min_usable_sec": 30.0,  # 工程质量门槛，待目标设备/人群验证；按窗口时间区间并集计时
     "task_reference": "eyes_open",
 }
 
@@ -37,7 +38,8 @@ BANDS = {
 TOTAL_BAND = (0.5, 45.0)
 
 # 指标定义：以频带功率比值刻画，再相对个体基线做 z 标准化
-# 专注度 = beta/theta（β 相对增强且 θ 受抑制）；放松度 = alpha/beta；认知负荷 = theta/alpha
+# 注意相关候选特征 = beta/theta；放松度 = alpha/beta；认知负荷 = theta/alpha。
+# 频带比值的方向依赖任务/导联，不能将 θ 增加普遍解释为注意下降；阈值待验证。
 # 用比值而不是"相对功率之差"，避免各频带相对功率此消彼长带来的串扰。
 INDICATORS = {
     "focus": ("beta", "theta"),
@@ -48,6 +50,9 @@ INDEX_FLOOR = 1e-6  # 比值分母下限
 SCORE_GAIN = 1.1          # 逻辑函数斜率
 SCORE_CENTER = 0.0        # z=0 时评分 0.5
 SCORE_MIN, SCORE_MAX = 0.0, 1.0
+
+VALIDATION_NOTE = "专注相关脑电指数反映相对个人基线的变化，不是专注概率；评分、预警及行为判定阈值为工程设定，待验证。"
+VALIDATION_STATUS = "pending_validation"
 
 # 伪迹与质量门槛（文档 7.2.15）
 QUALITY = {

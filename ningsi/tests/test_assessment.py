@@ -44,7 +44,7 @@ class JointAssessmentTest(unittest.TestCase):
 
     def test_normal_case_and_boundary(self):
         result = assess(EEG_FINE, {"SAS": score_scale("SAS", normal_answers("SAS")), "SDS": score_scale("SDS", normal_answers("SDS"))}, {"sart": NORMAL_SART})
-        self.assertIn("常模范围内", result.conclusion)
+        self.assertIn("阈值待验证", result.conclusion)
         self.assertEqual(result.boundary, BOUNDARY_NOTE)
         self.assertTrue(all(item.ref is not None for item in result.evidence))
 

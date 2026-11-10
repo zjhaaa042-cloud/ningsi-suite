@@ -43,6 +43,8 @@ class SessionReport:
     def as_dict(self) -> dict:
         return {
             "spec": config.LABEL_SPEC,
+            "validation_note": config.VALIDATION_NOTE,
+            "threshold_status": config.VALIDATION_STATUS,
             "participant": self.participant,
             "session": self.session,
             "run": self.run,
@@ -73,6 +75,7 @@ class SessionReport:
             "",
             f"- 指标口径：{config.INDICATOR_SPEC}；基线口径：{config.BASELINE_SPEC}；处理链：{config.SPECTRUM_SPEC}",
             f"- 软件版本：{config.VERSION}；预处理协议：preprocess-v2；训练协议：neurofeedback-v2",
+            f"- 解释边界：{config.VALIDATION_NOTE}",
             "",
         ]
         # 真实设备专用：把采集调理口径写进报告表头（仿真源没有这一步，不出现这一行）
@@ -99,7 +102,7 @@ class SessionReport:
             "## 一、状态评分",
         ]
         indicator_summary = self.indicators.get("summary", {}) if isinstance(self.indicators, dict) else {}
-        labels = {"focus": "专注度", "relax": "放松度", "load": "认知负荷"}
+        labels = {"focus": "专注相关脑电指数", "relax": "放松度", "load": "认知负荷"}
         if indicator_summary:
             for key, label in labels.items():
                 stat = indicator_summary.get(key)
@@ -112,6 +115,14 @@ class SessionReport:
             lines.append(f"- 相对基线的频带 z 值：{band_text}")
 
         lines += ["", "## 二、采集质量"]
+        for key, label in (("baseline_eyes_open", "睁眼"), ("baseline_eyes_closed", "闭眼")):
+            baseline = (self.extras or {}).get(key) or {}
+            quality = baseline.get("quality") or {}
+            if quality:
+                lines.append(f"- {label}基线：去重有效时长 {quality.get('usable_seconds')} 秒，"
+                             f"可用窗比例 {quality.get('valid_ratio', 0):.0%}；"
+                             f"前后半段对数比值均值差 {quality.get('half_mean_difference')}；"
+                             f"质检原因 {baseline.get('reasons') or '无'}。稳定性尚未验证。")
         q = self.quality or {}
         lines.append(
             f"- 4 秒窗 {q.get('windows_usable', 0)}/{q.get('windows_total', 0)} 可用"
@@ -148,6 +159,12 @@ class SessionReport:
                         f"±{result.get('rt_sd', 0):.3f}s，序列集 {result.get('sequence_set_id', '—')}"
                     )
                 elif name == "pvt":
+                    if result.get('scoring_spec'):
+                        lines.append(f"- PVT 计分：{result['scoring_spec']}；主慢反应 >500 ms；"
+                                     f"≥355 ms 对照慢反应率 {result.get('lapse_rate_355ms', 0):.1%}；"
+                                     f"漏答率 {result.get('omission_rate', 0):.1%}；"
+                                     f"证据{'可用' if result.get('valid', False) else '不可用'}；判定阈值待验证。"
+                                     f"{result.get('protocol_note', '')}")
                     lines.append(
                         f"- PVT-B：{result.get('trials', '—')} 试次，中位反应时 {result.get('rt_median', 0):.3f}s，"
                         f"慢反应率 {result.get('lapse_rate', 0):.1%}，抢答 {result.get('false_starts', 0)} 次"

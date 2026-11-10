@@ -36,7 +36,7 @@
 {
   "status": "ok", "service": "ningsi-studio", "version": "0.1.0", "product": "0.1.0",
   "engine": { "product": "0.1.0", "spectrum": "welch-v1", "indicator": "indicator-v1",
-              "baseline": "baseline-v1", "assessment": "joint-assessment-v1" },
+              "baseline": "baseline-v2", "assessment": "joint-assessment-v2" },
   "engine_path": ".../ningsi/src/ningsi/__init__.py",
   "db": ".../var/studio/studio.sqlite3", "data_dir": ".../var/studio",
   "runs_root": ".../var/studio/runs",
@@ -238,7 +238,7 @@ DELETE /api/devices/preview          → { "active": false, "stopped": true }
                 "device": "lsl:BioMultiLite EEG-00cde1",
                 "time_scale": 0.05, "training_mode": "quick",
                 "engine_versions": { "spectrum": "welch-v1", "indicator": "indicator-v1",
-                                     "baseline": "baseline-v1", "assessment": "joint-assessment-v1" },
+                                     "baseline": "baseline-v2", "assessment": "joint-assessment-v2" },
                 "source": "lsl:BioMultiLite EEG-00cde1", "srate": 250.0, "channels": 2,
                 "started_at": "...", "ended_at": null, "created_at": "...", "error": null },
   "events_url": "/api/sessions/<uuid>/events",
@@ -291,7 +291,7 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 | event | data 关键字段 |
 |---|---|
 | `started` | `uuid, participant, device, source_kind, source_note, time_scale, auto, phases[], engine_versions` |
-| `notice` | `level, message`（例如"当前使用仿真脑电源"） |
+| `notice` | `level, message`；PVT 抢答结算另带 `task: "pvt", index, false_start: true`，前端据此取消同一试次的刺激和漏答计时 |
 | `phase` | `key, label, state(running/done), progress` |
 | `progress` | `key, progress, windows_done?, windows_total?, trials_done?, trials_total?, segments_done?, segments_total?` |
 | `quality` | `windows, usable, valid_ratio, reasons{}, passed` |
@@ -317,11 +317,12 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 > **`trial.response_window`（秒，真实时间）**：本试次的作答窗口，是试次能否推进的关键——
 > 试次是"服务端发一个、前端答一个"驱动的，而 **SART 的 No-Go 试次（显示 3）正确做法就是不按键**；
 > 前端必须在窗口到点时自动补交一笔 `{responded:false, rt:null}`（Go 记漏报、No-Go 记正确抑制），
-> 否则服务端会一直等到 `INPUT_TIMEOUT_SEC`（900 秒），现场看到的就是"显示 3 之后任务不动了"。
+> 该提交表示页面仍在正常执行试次；不能仅依赖服务端超时来推进。
 > 该值已按 `time_scale` 折算（演示模式整体节奏变快），且不小于 0.35 秒。
-> 服务端自身只等 `response_window + 0.6s`，并校验提交里的 `index` 必须与当前试次一致
-> （晚到的作答按"未作答"记账，不会算到下一试次头上）；单次超时按未作答继续，
-> 连续 5 次才判定前端掉线并使该阶段失败。
+> 服务端自身只等 `response_window + 0.6s`，并校验提交里的 `index`（SART 另校验 `phase`）。
+> 错位输入被拒绝或丢弃，当前试次继续等待原截止时间，不会被旧作答提前推进。
+> 单次超时按未作答继续；连续 5 个试次都未收到匹配提交才中止并提示检查页面与连接。
+> PVT 抢答结算后会发送带试次序号的 `notice`；前端必须清除该试次的计时器，避免重复提交。
 >
 > 注：本说明必须放在事件表**之外**——表格中间夹引用块或空行会把 Markdown 表格截断，
 > `ningsi_studio check` 的"文档事件"统计会掉（本文件被踩过一次：23 → 11）。
@@ -509,3 +510,12 @@ lapse_rate, false_starts, valid`。
 - `GET /api/sessions/{uuid}` 的 `runtime` 增加 `source_note`，用于区分模拟 LSL 与真实 LSL 来源。LSL 传输本身不能证明真实硬件或真人采集。
 - `EventBus.publish` 产生的会话 SSE 事件增加顶层 `emitted_at_ms`，表示服务器发送的 Unix epoch 毫秒，重放保持原值。它不是设备逐样本时间戳；客户端重连后须检查新鲜度。
 - 原 `/signal` 的 `t` 是服务器显示帧时间；只有未抽稀样点可按声明采样率显示窗内相对位置，不能把抽稀后的数组当作原始等间隔采样。
+## 测量有效性字段更新
+
+`GET /api/config` 增加 `validation_note`、`threshold_status=pending_validation`；报告和联合评估 JSON 同步携带这两个字段。现有数值阈值保留。基线版本为 `baseline-v2`，`quality` 包含 `usable_seconds`（窗口时间区间并集）、`valid_ratio`、`half_mean_difference`、`stability_status=not_validated`、`min_usable_seconds=30`。不可用原因新增 `insufficient_baseline_duration`、`insufficient_baseline_valid_ratio`、`inconsistent_baseline_data`。
+
+窗口 `quality.metrics.channels` 为各通道的 `channel`（零基索引）、`emg_rel`、`eog_rel`；顶层两个频带代理值是通道最大值。任一通道不合格则整窗拒绝。该门控仍为伪迹粗筛，阈值待验证。
+
+PVT `scoring_spec=pvt-scoring-v2`，保留主 `lapse_sec=0.5`、`lapse_operator=>`；增加 `comparison_lapse_sec=0.355`、`comparison_lapse_operator=>=`、`lapses_355ms`、`lapse_rate_355ms`、`omission_rate`、`invalid_responses`、`rate_denominators`、`unavailable_reasons`、`protocol_note`、`threshold_status`。Studio 另有 `completed`。已作答的 RT<100 ms 视为抢答，负数/缺失/非有限 RT 视为无效；抢答不进入反应时统计和漏答分母。正常漏答不再被零慢反应率掩盖，联合评估检查既有 10% 漏答率阈值（待验证）。调用方须先检查 `valid`，不可将不可用结果中的零统计解释成正常状态。
+
+完整说明见 [测量有效性](../../ningsi/docs/MEASUREMENT_VALIDITY.md)。

@@ -150,6 +150,9 @@ class PvtTask:
             "trials": len(self.onsets),
             "onsets": list(self.onsets),
             "lapse_sec": pvt_module.LAPSE_SEC,
+            "comparison_lapse_sec": pvt_module.COMPARISON_LAPSE_SEC,
+            "threshold_status": config.VALIDATION_STATUS,
+            "scoring_spec": pvt_module.SCORING_SPEC,
             "instruction": "屏幕出现计时器时尽快按空格；不要抢在计时器出现前按。",
         }
 
@@ -176,6 +179,10 @@ class PvtTask:
     def result(self) -> dict:
         result = pvt_module.PvtResult(trials=list(self.trials), duration_sec=self.duration_sec)
         scored = result.score()
+        scored["completed"] = self.index == len(self.onsets)
+        if not scored["completed"]:
+            scored["valid"] = False
+            scored["unavailable_reasons"].append("task_incomplete")
         scored["spec"] = config.LABEL_SPEC
         scored["source"] = "studio-session"
         return scored

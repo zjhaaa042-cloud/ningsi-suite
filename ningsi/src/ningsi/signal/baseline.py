@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 from ningsi import config
 
@@ -28,6 +29,7 @@ class Baseline:
     n_windows: int = 0
     valid: bool = True
     reasons: tuple = ()
+    quality: dict = field(default_factory=dict)
 
     def _z(self, table: dict, name: str, value: float) -> float | None:
         stat = table.get(name)
@@ -62,6 +64,7 @@ class Baseline:
             "reasons": list(self.reasons),
             "bands": self.bands,
             "indices": self.indices,
+            "quality": self.quality,
         }
 
 
@@ -91,14 +94,45 @@ def _index_values(window) -> dict:
 
 def build_baseline(windows, device: str = "unknown", srate: float = 250.0, min_windows: int = 5) -> Baseline:
     """windows: 静息基线窗（睁眼/闭眼）序列；只用质量合格的窗。"""
+    windows = list(windows)
     usable = [w for w in windows if w.usable]
     if not usable:
         return Baseline(config.BASELINE_SPEC, srate, 0, device, {}, {}, 0, False, ("no_usable_window",))
+    required = {band for pair in config.INDICATORS.values() for band in pair}
+    if any(not math.isfinite(w.t_end) or w.channels != usable[0].channels
+           or w.srate != srate or not required.issubset(w.rel) or set(w.rel) != set(usable[0].rel)
+           or not all(math.isfinite(v) and v >= 0 for v in w.rel.values()) for w in usable):
+        return Baseline(config.BASELINE_SPEC, srate, 0, device, {}, {}, 0, False,
+                        ("inconsistent_baseline_data",))
+    usable.sort(key=lambda w: w.t_end)
+    # 合并真实时间区间，重复窗与重叠窗不重复累计有效秒数。
+    intervals = sorted((w.t_end - config.WINDOW_SEC, w.t_end) for w in usable)
+    start, end = intervals[0]
+    covered = 0.0
+    for left, right in intervals[1:]:
+        if left > end:
+            covered += end - start
+            start, end = left, right
+        else:
+            end = max(end, right)
+    covered += end - start
     names = sorted(usable[0].rel)
     bands = {name: _stats([float(w.rel[name]) for w in usable]) for name in names}
     raw_indices = [_index_values(w) for w in usable]
     indices = {name: _stats([vals[name] for vals in raw_indices]) for name in raw_indices[0]}
-    reasons = () if len(usable) >= min_windows else ("insufficient_baseline_windows",)
+    reasons = []
+    if len(usable) < min_windows:
+        reasons.append("insufficient_baseline_windows")
+    if covered < config.BASELINE_PROTOCOL["min_usable_sec"]:
+        reasons.append("insufficient_baseline_duration")
+    valid_ratio = len(usable) / len(windows)
+    if valid_ratio < config.QUALITY["valid_ratio_min"]:
+        reasons.append("insufficient_baseline_valid_ratio")
+    # 稳定性诊断保留原始量，不另造未经验证的“稳定/不稳定”阈值。
+    mid = len(raw_indices) // 2
+    drift = {name: (_stats([v[name] for v in raw_indices[mid:]])["mean"]
+                    - _stats([v[name] for v in raw_indices[:mid]])["mean"])
+             for name in indices} if mid else {}
     return Baseline(
         spec=config.BASELINE_SPEC,
         srate=float(srate),
@@ -107,8 +141,12 @@ def build_baseline(windows, device: str = "unknown", srate: float = 250.0, min_w
         bands=bands,
         indices=indices,
         n_windows=len(usable),
-        valid=len(usable) >= min_windows,
-        reasons=reasons,
+        valid=not reasons,
+        reasons=tuple(reasons),
+        quality={"usable_seconds": round(covered, 3), "valid_ratio": round(valid_ratio, 4),
+                 "half_mean_difference": drift, "stability_status": "not_validated",
+                 "threshold_status": config.VALIDATION_STATUS,
+                 "min_usable_seconds": config.BASELINE_PROTOCOL["min_usable_sec"]},
     )
 
 
