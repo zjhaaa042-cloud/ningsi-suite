@@ -519,3 +519,8 @@ lapse_rate, false_starts, valid`。
 PVT `scoring_spec=pvt-scoring-v2`，保留主 `lapse_sec=0.5`、`lapse_operator=>`；增加 `comparison_lapse_sec=0.355`、`comparison_lapse_operator=>=`、`lapses_355ms`、`lapse_rate_355ms`、`omission_rate`、`invalid_responses`、`rate_denominators`、`unavailable_reasons`、`protocol_note`、`threshold_status`。Studio 另有 `completed`。已作答的 RT<100 ms 视为抢答，负数/缺失/非有限 RT 视为无效；抢答不进入反应时统计和漏答分母。正常漏答不再被零慢反应率掩盖，联合评估检查既有 10% 漏答率阈值（待验证）。调用方须先检查 `valid`，不可将不可用结果中的零统计解释成正常状态。
 
 完整说明见 [测量有效性](../../ningsi/docs/MEASUREMENT_VALIDITY.md)。
+
+
+### v0.1.2 十分钟协议扩展
+
+`POST /api/sessions` 的 `protocol` 新增 `ten_min`；`GET /api/config` 返回三个协议档。新阶段为 `practice`、`baseline_after`。十分钟PVT作答须携带 `phase: "practice" | "main"`，旧协议不要求。`feedback` 增加 `feedback_mode`、`mode_label`、`grade`；非eeg模式 `score=null`、`usable=false`。报告 `extras.ten_min` 包含阶段时长、前后同通道描述性统计及分轮反馈时长；`signal_diagnostics.grades` 返回A/B/C窗数。旧字段和旧协议语义保持兼容。

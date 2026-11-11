@@ -141,6 +141,10 @@ export function render(container, ctx) {
   const renderGauge = () => {
     gaugeHost.textContent = '';
     const view = finalView();
+    if (local.feedbackMode && local.feedbackMode !== 'eeg' && !local.summary) {
+      gaugeHost.append(card('当前反馈模式', el('p', { text: local.modeLabel })));
+      return;
+    }
     const body = el('div');
     gaugeHost.append(card('专注度仪表', body, {
       sub: `目标随训练表现调整；允许目标范围 ${fmtNum(pick(trainingConfig(), 'target_min'), 2)}–${fmtNum(pick(trainingConfig(), 'target_max'), 2)}`,
@@ -165,7 +169,7 @@ export function render(container, ctx) {
     const ratioText = view.ratio === null || view.ratio === undefined
       ? DASH
       : `${fmtPercent(view.ratio)}（有效点 n=${fmtInt(view.n)}）`;
-    statusHost.append(card('达标状态', el('div', { class: 'training-stats' }, [
+    statusHost.append(card(local.modeLabel || '达标状态', el('div', { class: 'training-stats' }, [
       el('div', {}, [el('p', { class: 'muted', text: view.usingFallback ? '末段平均专注度' : '当前专注度' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.score, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '目标线' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.target, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '达标状态' }), el('p', { class: 'kpi__value', text: achieved })]),
@@ -267,6 +271,8 @@ export function render(container, ctx) {
         break;
       }
       case 'feedback': {
+        local.feedbackMode = payload.feedback_mode;
+        local.modeLabel = payload.mode_label;
         local.segment = payload.segment;
         local.currentHold = payload.usable === false ? 0 : payload.current_hold_sec ?? null;
         local.maxHold = payload.max_hold_sec ?? null;

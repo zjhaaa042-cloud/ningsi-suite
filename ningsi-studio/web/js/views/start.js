@@ -7,7 +7,7 @@ const option = (value, text) => el('option', { value, text });
 
 export async function render(container, ctx) {
   const purpose = el('select', { id: 'purpose' }, [
-    option('short', '评估专注力'), option('full', '评估并进行反馈训练'),
+    option('ten_min', '十分钟测试＋训练'), option('short', '评估专注力'), option('full', '评估并进行反馈训练'),
   ]);
   const participant = el('select', { id: 'participant' }, [option('', '新参与者（自动分配编号）')]);
   const alias = el('input', { id: 'alias', placeholder: '可留空', maxLength: 80 });
@@ -48,6 +48,7 @@ export async function render(container, ctx) {
     const minutes = profile && Math.round((profile.total_sec + (full ? 30 + (mode.value === 'full' ? 240 : 0) : 0)) / 60);
     plan.textContent = profile ? '约 ' + minutes + ' 分钟。记录睁眼和闭眼时的脑电，填写量表，完成数字判断和反应速度任务。'
       + (full ? '随后根据实时专注度反馈练习。' : '') : '';
+    if (purpose.value === 'ten_min') plan.textContent = '10分钟采集：质检30秒、睁眼60秒、练习30秒、PVT3分钟、训练4分钟、训练后60秒。报告生成另计；质量不足时自动切换为质量反馈或固定引导，不追加基线时间。';
     form.disabled = submitting;
     scanButton.disabled = scanning || submitting;
     preview.hidden = !device.value;
@@ -103,7 +104,7 @@ export async function render(container, ctx) {
       }
       const { data } = await api.createSession({
         participant: id, create_subject: false, device: isDemo ? 'sim-bsense' : device.value,
-        protocol: isDemo ? 'short' : purpose.value, training_mode: isDemo ? 'quick' : mode.value,
+        protocol: purpose.value, training_mode: isDemo ? 'quick' : mode.value,
         time_scale: isDemo ? 0.05 : 1,
       });
       if (ctx.signal.aborted) return;

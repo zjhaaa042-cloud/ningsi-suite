@@ -257,7 +257,7 @@ export async function render(container, ctx) {
         el('p', { class: 'muted', text: `参与者 ${pick(data, 'participant', DASH)} · ${pick(data, 'extras.protocol_label', '检测协议未记录')}` }),
         el('p', { text: Object.entries(INDICATOR_LABELS).map(([key, label]) =>
           label + ' ' + fmtNum(pick(data, 'indicators.summary.' + key + '.mean'), 2)).join('　') }),
-        el('p', { class: 'summary-note', text: simulated ? '以上为模拟脑电的平均指标（0–1）。' : '指标为本次有效脑电窗口的均值（0–1）。' }),
+        el('p', { class: 'summary-note', text: data.extras?.protocol === 'ten_min' ? '本协议未采集独立任务态评分；请查看PVT、分级信号与训练记录。' : simulated ? '以上为模拟脑电的平均指标（0–1）。' : '指标为本次有效脑电窗口的均值（0–1）。' }),
       ]);
       host.append(card(null, summary));
       host.append(renderDiagnostics(data || {}));

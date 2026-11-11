@@ -247,6 +247,20 @@ PROFILES: dict[str, dict] = {
 }
 
 
+PROFILE_TEN = "ten_min"
+PHASE_BY_KEY["practice"] = Phase("practice", "PVT练习（不计分）", .05, True,
+    headline="出现红点按空格；练习不计入正式成绩", duration_sec=30, advance=ADVANCE_SUBJECT)
+PHASE_BY_KEY["baseline_after"] = Phase("baseline_after", "训练后睁眼采集", .1,
+    headline="保持睁眼，安静坐一分钟", duration_sec=60)
+TEN_DURATIONS = {"qc": 30, "baseline_open": 60, "practice": 30, "pvt": 180,
+                 "training": 240, "baseline_after": 60, "assessment": 0, "report": 0}
+PROFILES[PROFILE_TEN] = {
+    "key": PROFILE_TEN, "label": "十分钟测试＋训练", "summary": "质检、睁眼基线、PVT练习和3分钟测试、4轮训练、训练后采集",
+    "phases": tuple(TEN_DURATIONS), "pvt_duration_sec": 180.0, "sart_sec_estimate": 0,
+    "caveat": "600秒采集预算，报告生成另计；设备等待可导致超时并记录实际时长。不含量表、SART或模型训练；不能与完整协议直接比较，不能证明短时训练疗效。",
+}
+
+
 def normalize_profile(name: object) -> str:
     """把外部传入的协议名归一；未知值一律回落到完整协议（默认档，绝不静默变成短协议）。"""
     key = str(name or "").strip().lower()
@@ -301,6 +315,17 @@ def as_list(profile: object = PROFILE_FULL) -> list[dict]:
             ]
         elif phase.key == "pvt":
             row["duration_sec"] = float(item["pvt_duration_sec"])
+        if item["key"] == PROFILE_TEN:
+            row["duration_sec"] = TEN_DURATIONS[phase.key]
+            if phase.key == "baseline_open":
+                row.update(headline="保持睁眼，安静坐一分钟", details=["固定60秒，不因基线不足追加时间"], next_hint="接下来练习PVT")
+            if phase.key == "training":
+                row.update(headline="按当前反馈模式练习，低质量时跟随固定节奏", details=["4轮，每轮50秒训练＋10秒休息", "脑电／质量／固定引导自动切换；受限信号不发注意力奖励"], next_hint="随后静息一分钟")
+            if phase.key == "qc":
+                row.update(description="固定30秒启动质检，无人为伪迹", next_hint="随后采集一分钟睁眼基线")
+            if phase.key == "pvt":
+                row["next_hint"] = "随后开始四轮训练"
+            row["why"] = item["caveat"]
         rows.append(row)
     return rows
 
@@ -309,7 +334,7 @@ def profiles_as_list() -> list[dict]:
     """给 `GET /api/config`：界面（向导）据此展示协议档与负担。"""
     rows = []
     full = PROFILES[PROFILE_FULL]
-    for key in (PROFILE_FULL, PROFILE_SHORT):
+    for key in PROFILES:
         item = PROFILES[key]
         active = [PHASE_BY_KEY[name] for name in item["phases"]]
         # 总时长按**实际**行为任务秒数算：SART 的阶段名义时长（420s）是完整协议的值，
@@ -322,7 +347,7 @@ def profiles_as_list() -> list[dict]:
             **{name: value for name, value in item.items() if name != "phases"},
             "phases": list(item["phases"]),
             "phase_count": len(item["phases"]),
-            "total_sec": round(total, 1),
+            "total_sec": 600 if key == PROFILE_TEN else round(total, 1),
             "dropped_phases": [name for name in PHASE_KEYS if name not in item["phases"]],
             "saved_sec": round(float(full.get("sart_sec_estimate", 0)) + full["pvt_duration_sec"]
                                + sum(PHASE_BY_KEY[name].duration_sec

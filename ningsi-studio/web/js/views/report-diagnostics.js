@@ -20,10 +20,27 @@ export function renderDiagnostics(report) {
   if (d?.scope) root.append(el('p', { text: d.scope }));
   root.append(el('p', { text: `严格合格 ${accepted}/${total} 窗。${d ? d.note : '旧版本未保存完整逐窗信号；可查看已有质量与行为汇总，不能事后重建频谱。'}` }));
   root.append(bar('严格合格窗', accepted, total), bar('排除窗', total - accepted, total, true));
+  const ten = report.extras?.ten_min;
+  if (ten) {
+    root.append(el('h3', { text: '十分钟测试＋训练：分级利用' }), el('p', { text: ten.note }));
+    for (const [grade, label] of [['A', '严格可用'], ['B', '受限片段可用'], ['C', '不可解释']]) root.append(bar(label, d?.grades?.[grade] || 0, total));
+    root.append(el('p', { text: ten.comparison_note }));
+    for (const [ch, change] of Object.entries(ten.changes || {})) root.append(el('p', { text: `通道${ch}：log(β/θ)中位数变化 ${fmtNum(change, 4)}` }));
+    if (!Object.keys(ten.changes || {}).length) root.append(el('p', { text: '无同通道可比较片段，保留行为与质量报告。' }));
+    for (const [key, label] of [['baseline_before','训练前'], ['baseline_after','训练后']]) {
+      for (const [ch, ref] of Object.entries(ten[key] || {})) root.append(el('p', { text: `${label}通道${ch}：保留片段去重覆盖 ${fmtNum(ref.usable_seconds, 1)}秒，窗数${ref.n}（非独立样本），中位数${fmtNum(ref.median, 4)}，MAD ${fmtNum(ref.mad, 4)}` }));
+    }
+    const modes = { eeg: '探索性脑电反馈', quality: '质量反馈', guided: '固定引导' };
+    for (const seg of ten.segments || []) {
+      root.append(el('h3', { text: `训练第${seg.index}轮（另含10秒休息）` }));
+      root.append(bar('未反馈（采样/计算）秒', seg.unobserved_seconds ?? null, 50));
+      for (const [mode, seconds] of Object.entries(seg.mode_seconds || {})) root.append(bar(`${modes[mode] || mode} 秒`, seconds, 50));
+    }
+  }
   const timeline = el('div', { class: 'diagnostic-timeline', role: 'img', 'aria-label': '窗口质量时间轴，绿色合格，橙色排除' });
   for (const row of d?.windows || []) {
     const reasons = (row.reasons || row.unusable_reasons || []).map(r => labels[r] || r).join('、');
-    timeline.append(el('span', { class: row.usable ? 'diagnostic-window good' : 'diagnostic-window', title: `${row.phase || ''} · 窗${row.index ?? ''} · ${row.usable ? '合格' : reasons}` }));
+    timeline.append(el('span', { class: row.usable ? 'diagnostic-window good' : 'diagnostic-window', title: `${row.phase || ''} · 等级${row.graded?.grade || '未分级'} · 窗${row.index ?? ''} · ${row.usable ? '合格' : reasons}` }));
   }
   if (timeline.childNodes.length) root.append(el('p', { text: '逐窗质量：绿色合格，橙色排除；悬停查看原因。' }), timeline);
   for (const [reason, count] of Object.entries(d?.reason_counts || quality.unusable_reasons || {})) root.append(bar(labels[reason] || reason, count, total, true));

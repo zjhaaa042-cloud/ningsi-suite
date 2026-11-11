@@ -29,6 +29,7 @@ class WindowStep:
     scores: dict = field(default_factory=dict)
     alerts: list = field(default_factory=list)
     raw: object = None
+    graded: dict = field(default_factory=dict)
 
     @property
     def usable(self) -> bool:
@@ -58,6 +59,7 @@ class WindowStep:
                        if self.indicators is not None and self.indicators.available else {}),
             "reasons": list(quality.get("reasons", [])),
             "alerts": self.alerts,
+            "graded": self.graded,
         }
         if include_signal and self.raw is not None:
             payload["signal"] = _trace(self.raw, self.window)
@@ -114,8 +116,13 @@ class WindowEngine:
         events = self.alerts.feed(window, indicators)
         triggered = [event.as_dict() for event in events if event.state == "triggered"]
         self.fired_alerts.extend(triggered)
+        graded = {}
+        if getattr(self, "graded_enabled", False):
+            from ningsi.signal.graded import describe_fragments
+            graded = describe_fragments(raw, self.srate, window.usable)
+            graded["t_end"] = window.t_end
         return WindowStep(
-            index=self.index, t_end=self.t, state=state, window=window,
+            graded=graded, index=self.index, t_end=self.t, state=state, window=window,
             indicators=indicators,
             scores=dict(indicators.scores) if indicators is not None and indicators.available else {},
             alerts=triggered, raw=raw,

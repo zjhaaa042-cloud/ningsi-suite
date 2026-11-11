@@ -6,4 +6,4 @@
 
 from ningsi_studio import bootstrap  # noqa: F401  (导入即完成引擎路径兜底)
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

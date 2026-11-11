@@ -16,6 +16,7 @@ REASONS = {
 def summarize_windows(rows):
     rows = list(rows)
     reasons = Counter(reason for row in rows for reason in row.get('reasons', row.get('unusable_reasons', [])))
+    grades = Counter(r.get('graded', {}).get('grade') for r in rows if r.get('graded', {}).get('grade'))
     bands = {}
     for label, accepted in [('accepted', True), ('rejected', False)]:
         subset = [r for r in rows if bool(r.get('usable')) == accepted]
@@ -42,7 +43,7 @@ def summarize_windows(rows):
         'thresholds': dict(config.QUALITY), 'total': len(rows),
         'accepted': sum(bool(r.get('usable')) for r in rows),
         'reason_counts': dict(reasons), 'reason_labels': REASONS, 'bands': bands,
-        'windows': rows, 'amplitude_sensitivity': sensitivity,
+        'windows': rows, 'amplitude_sensitivity': sensitivity, 'grades': dict(grades),
         'scope': '本图统计已记录的质检、基线、任务态监测及训练窗口；不是仅任务态评分窗。行为任务期间未同步保存脑电窗。按采集顺序排列，间隔不代表连续时间。',
         'note': '合格窗用于严格评分；被拒绝窗的频带仅描述采集信号，可能包含眼电、肌电或漂移，不能解释为注意力。窗口有重叠，窗数不等于独立样本数。',
     }
@@ -65,7 +66,24 @@ def render_html(report):
              f'<section><h2>1. 数据可用性</h2><p>严格合格窗 <b>{accepted}/{total}</b>。' + ('本次没有可用个体脑电评分；仍可查看采集质量和行为表现。' if not report.get('indicators', {}).get('summary') else '个体指标见完整证据。') + '</p>',
              f'<p>{esc(d.get("scope", ""))}</p><p class="muted">{esc(d.get("note", "旧版未保存完整逐窗数据，以下仅展示已有汇总，不能重建频谱或重新判定质量。"))}</p>',
              bar('严格合格', accepted, total), bar('排除', max(0,total-accepted),total,'#b35b45')]
-    for key,label in [('baseline_eyes_open','睁眼'),('baseline_eyes_closed','闭眼')]:
+    ten = report.get('extras', {}).get('ten_min')
+    if ten:
+        parts.append('<section><h2>十分钟测试＋训练</h2><p>' + esc(ten.get('note')) + '</p>')
+        for grade, label in [('A', '严格可用'), ('B', '受限片段可用'), ('C', '不可解释')]:
+            parts.append(bar(label, d.get('grades', {}).get(grade, 0), total))
+        parts.append('<p>等级按窗口计数，重叠窗不是独立样本。B级仅作描述与质量反馈。</p>')
+        parts.append('<h3>同通道训练前后变化</h3><p>' + esc(ten.get('comparison_note')) + '</p>')
+        for channel, change in ten.get('changes', {}).items():
+            parts.append('<p>通道 ' + esc(channel) + '：log(β/θ)中位数差 ' + esc(round(change, 4)) + '</p>')
+        if not ten.get('changes'):
+            parts.append('<p>没有同通道可比较片段；行为报告仍可使用。</p>')
+        for key, label in [('baseline_before', '训练前'), ('baseline_after', '训练后')]:
+            for ch, ref in ten.get(key, {}).items():
+                parts.append('<p>' + esc(label) + '通道' + esc(ch) + '：去重覆盖 ' + esc(ref.get('usable_seconds', '未知')) + ' 秒；MAD ' + esc(ref.get('mad')) + '</p>')
+        for segment in ten.get('segments', []):
+            parts.append('<p>训练轮 ' + esc(segment['index']) + '（秒）：' + esc(segment.get('mode_seconds', {})) + '；未反馈秒数 ' + esc(segment.get('unobserved_seconds', '未知')) + '</p>')
+        parts.append('<p>实际采集耗时 ' + esc(ten.get('elapsed_sec')) + ' 秒；倍率 ' + esc(ten.get('time_scale')) + '</p></section>')
+    for key,label in [('baseline_eyes_open' ,'睁眼'),('baseline_eyes_closed','闭眼')]:
         base = report.get('extras',{}).get(key) or {}
         quality = base.get('quality',{})
         parts.append(f'<p>{label}基线：{"合格" if base.get("valid") else "不合格/未采集"}；有效覆盖 {esc(quality.get("usable_seconds", "未知"))} 秒；有效窗 {esc(base.get("n_windows",0))}。阈值：至少30秒、5窗、60%有效比例。</p>')

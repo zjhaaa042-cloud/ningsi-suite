@@ -101,6 +101,12 @@ class SessionReport:
         lines += [
             "## 一、状态评分",
         ]
+        ten = (self.extras or {}).get("ten_min")
+        if ten:
+            lines.extend(["", "## 十分钟分级反馈", ten["note"], ten["comparison_note"],
+                          "- 质量等级窗数：" + json.dumps(self.extras["signal_diagnostics"].get("grades"), ensure_ascii=False),
+                          "- 同通道中位数变化：" + json.dumps(ten["changes"], ensure_ascii=False),
+                          "- 分轮反馈时长：" + json.dumps([x["mode_seconds"] for x in ten["segments"]], ensure_ascii=False)])
         indicator_summary = self.indicators.get("summary", {}) if isinstance(self.indicators, dict) else {}
         labels = {"focus": "专注相关脑电指数", "relax": "放松度", "load": "认知负荷"}
         if indicator_summary:

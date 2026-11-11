@@ -363,7 +363,7 @@ export function render(container, ctx) {
    * 任务结束自动回总览；同一任务内可用任务条上的按钮手动切回，**不中断会话**。
    */
   const taskModeLabel = () => {
-    if (local.finished || !['scales', 'sart', 'pvt'].includes(currentPhaseKey())) return null;
+    if (local.finished || !['scales', 'sart', 'pvt', 'practice'].includes(currentPhaseKey())) return null;
     const stage = interactionHost.querySelector('.task-stage');
     const scale = interactionHost.querySelector('.scale-item');
     const anchor = stage || scale;
@@ -387,7 +387,7 @@ export function render(container, ctx) {
       const isTask = !!child.querySelector('.scale-item, .task-stage');
       child.classList.toggle('flow-task-hidden', !isTask);
       const slot = child.dataset.slot;
-      const phases = { quality: ['qc'], baseline: ['baseline_open', 'baseline_closed'],
+      const phases = { quality: ['qc'], baseline: ['baseline_open', 'baseline_closed', 'baseline_after'],
         monitor: ['monitor'], waveform: ['monitor'], training: ['training'],
         'training-feedback': ['training'], segments: ['training'], assessment: ['assessment'],
         model: ['model'], artifacts: ['report'], 'result-sart': ['sart'], 'result-pvt': ['pvt'] };
@@ -1370,7 +1370,7 @@ export function render(container, ctx) {
     const nextIndex = local.pvtNextIndex;
     if (local.pvtEarlyIndex === nextIndex) return;
     local.pvtEarlyIndex = nextIndex;
-    api.submitPvtTrial(uuid, { index: nextIndex, responded: false, rt: null, false_start: true })
+    api.submitPvtTrial(uuid, { phase: local.behaviorRequest?.phase || 'main', index: nextIndex, responded: false, rt: null, false_start: true })
       .then(() => toast('抢答已上报：光点还没出现，这一次记为抢答（不计入反应时）', 'info'))
       .catch((error) => {
         if (local.pvtEarlyIndex === nextIndex) local.pvtEarlyIndex = null;
@@ -1472,6 +1472,7 @@ export function render(container, ctx) {
         // PVT 只上报 index/responded/rt：抢答（false_start）需要前端自己判定刺激时刻，
         // 与服务端序列语义容易冲突，交给服务端按 index 顺序处理更安全。
         await api.submitPvtTrial(uuid, {
+          phase: trial.phase,
           index,
           responded: answer.responded,
           rt: answer.responded ? Number(Math.min(answer.rt, 9.999).toFixed(3)) : null,
@@ -1666,10 +1667,13 @@ export function render(container, ctx) {
         local.behaviorRequest = payload;
         const key = taskKey(payload.task);
         if (key === 'pvt') {
+          local.pvtNextIndex = 0;
+          local.pvtEarlyIndex = null;
+          local.lastEarlyWarn = 0;
           // 先进入"等待光点"状态：PVT 的刺激要等 trial 事件到来才画
           revealTaskStage(renderTaskStage('pvt', {
             stimulus: false,
-            hint: 'PVT-B：屏幕出现光点后尽快按空格；没出现就按算抢答（不计入）。',
+            hint: (payload.phase === 'practice' ? '练习，不计分。' : '正式测试。') + 'PVT-B：屏幕出现光点后尽快按空格；没出现就按算抢答（不计入）。',
           }));
         } else {
           revealTaskStage(renderTaskStage('sart', {
@@ -1803,7 +1807,8 @@ export function render(container, ctx) {
         slot.value.textContent = usable ? fmtNum(payload.score, 3) : '信号待恢复';
         slot.target.textContent = `第 ${fmtInt(payload.segment)} 段 · 目标 ${fmtNum(payload.target, 3)}`;
         slot.hold.value = usable && required > 0 ? Math.min(1, hold / required) : 0;
-        slot.status.textContent = !usable ? '当前信号质量不足，此窗不计入有效训练。'
+        if (payload.feedback_mode) slot.hint.textContent = payload.mode_label;
+        slot.status.textContent = payload.feedback_mode && payload.feedback_mode !== 'eeg' ? payload.mode_label : !usable ? '当前信号质量不足，此窗不计入有效训练。'
           : payload.achieved ? '本段已达到连续保持要求，继续稳定保持。'
           : `连续保持 ${fmtDuration(hold)} / ${fmtDuration(required)} · ${payload.on_target ? '已到目标线，继续保持' : '尚未到目标线，平稳调整'}`;
         break;

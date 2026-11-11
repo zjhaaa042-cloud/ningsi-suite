@@ -948,6 +948,7 @@ def build_router(settings: Settings) -> Router:
         if rt is not None:
             rt = schemas.clamp_float(rt, 0.0, low=0.05, high=10.0, name="反应时")
         delivered = runtime.provide_input("pvt", {
+            "phase": schemas.optional_text(payload.get("phase"), max_len=16, name="PVT阶段") or "main",
             "index": schemas.clamp_int(payload.get("index"), -1, low=0, high=1000, name="试次序号"),
             "responded": schemas.as_bool(payload.get("responded"), False),
             "rt": rt,

@@ -482,7 +482,7 @@ export function render(container, ctx) {
     if (!feedback) return;
     // 三态：缺测（usable === false）不能被当成"未达标"——那是两种完全不同的结论
     const usable = feedback.usable !== false;
-    const stateText = !usable
+    const stateText = feedback.mode_label ? feedback.mode_label : !usable
       ? '缺测（本窗不可用，不计入达标统计）'
       : (feedback.on_target ? '达标' : '未达标');
     extraHost.append(card('神经反馈', el('div', { class: 'grid grid--3' }, [

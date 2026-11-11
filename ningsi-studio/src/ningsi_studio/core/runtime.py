@@ -431,6 +431,9 @@ class SessionRuntime:
             self.source.engine, self.source.srate, device=self.source.device
         )
 
+        if self.protocol == "ten_min":
+            return self._run_ten_min(auto)
+
         # 1) 设备质检
         with self._phase("qc") as context:
             qc = self.engine.device_qc(
@@ -557,6 +560,10 @@ class SessionRuntime:
         }
         self._finish("done", None, summary=self.summary)
 
+    def _run_ten_min(self, auto):
+        from .ten_min import run
+        return run(self, auto)
+
     # -------------------------------------------------------------- 各阶段实现
     # -------------------------------------------------------------- 各阶段实现
     @property
@@ -650,7 +657,8 @@ class SessionRuntime:
         started = time.monotonic()
         def matches(answer):
             return (answer.get("index") == expected_index
-                    and (name != "sart" or answer.get("phase") == payload.get("phase")))
+                    and (not (name == "sart" or (name == "pvt" and self.protocol == "ten_min"))
+                         or answer.get("phase") == payload.get("phase")))
 
         answer = self.wait_for_input(name, timeout=float(window) + TRIAL_GRACE_SEC,
                                      accept=matches)
@@ -715,15 +723,15 @@ class SessionRuntime:
         responded = rng.random() < 0.955
         return (responded, round(rng.uniform(0.26, 0.62), 3) if responded else None)
 
-    def _run_pvt(self, auto: bool):
-        task = behavior_domain.PvtTask(seed=abs(hash(self.uuid + "pvt")) % 100000,
-                                       duration_sec=self.profile["pvt_duration_sec"])
+    def _run_pvt(self, auto: bool, *, practice=False):
+        task = behavior_domain.PvtTask(seed=abs(hash(self.uuid + ("pvt-practice" if practice else "pvt"))) % 100000,
+                                       duration_sec=30.0 if practice else self.profile["pvt_duration_sec"])
         self.pvt_task = task
         payload = task.sequence_payload()
         # `task` 必须写在最后：`payload` 里也有一个 `task` 键（PvtTask 给的是 "pvt-b"），
         # 放在后面写会把 "pvt" 覆盖成 "pvt-b"，前端按 `payload.task === 'pvt'` 分支就会走错，
         # 于是 PVT 阶段一开始渲染出一张 **SART** 卡（实测：用户反馈"PVT-B 的刺激是什么？我没看到"）。
-        self.bus.publish("behavior_request", {**payload, "task": "pvt"})
+        self.bus.publish("behavior_request", {**payload, "task": "pvt", "phase": "practice" if practice else "main"})
         rng = random.Random(f"auto-pvt-{self.uuid}")
         started_at = time.monotonic()
         onsets = list(payload["onsets"])
@@ -739,9 +747,12 @@ class SessionRuntime:
             # 留 0.3s 余量避免与下一次 trial 事件抢跑；最后一个试次用固定窗口。
             gap = (onsets[position + 1] - onset) if position + 1 < len(onsets) else PVT_TRIAL_WINDOW
             window = max(MIN_TRIAL_WINDOW, max(0.8, min(PVT_TRIAL_WINDOW, gap - 0.3)) * self.scale)
+            if self.protocol == "ten_min" and not auto:
+                budget = 30 if practice else self.profile["pvt_duration_sec"]
+                window = min(window, max(0.001, started_at + budget*self.scale-time.monotonic()))
             responded = rng.random() < 0.99
             rt = round(max(0.18, rng.gauss(0.33, 0.06)), 3) if responded else None
-            answer = self._wait_trial("pvt", {"task": "pvt", **nxt}, auto=auto,
+            answer = self._wait_trial("pvt", {"task": "pvt", **nxt, "phase": "practice" if practice else "main"}, auto=auto,
                                       fallback={"responded": responded, "rt": rt}, window=window)
             false_start = schemas_bool(answer.get("false_start"))
             task.submit(index=nxt["index"], responded=schemas_bool(answer.get("responded")),
@@ -755,7 +766,8 @@ class SessionRuntime:
                     "message": f"抢答已记账：第 {nxt['index'] + 1} 试次记为抢答（刺激出现前按键，不计入反应时）",
                 })
         result = task.result()
-        self._persist_behavior("pvt", result, task.trials_payload())
+        if not practice:
+            self._persist_behavior("pvt", result, task.trials_payload())
         return result
 
     def _run_monitor(self):
@@ -864,6 +876,7 @@ class SessionRuntime:
             assessment=assessment_result,
             extras={
                 "signal_diagnostics": summarize_windows(self.diagnostic_windows),
+                "ten_min": getattr(self, "ten_min_result", None),
                 "device": self.source.device,
                 "source_kind": self.source.kind,
                 "source_note": self.source.note,
