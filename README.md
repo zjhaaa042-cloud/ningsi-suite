@@ -6,7 +6,7 @@
 
 Studio 按「评估与训练」「记录与结果」组织日常操作；设备连接、参与者和模型管理集中在默认折叠的「设置与管理」。赛事展示页已退出产品导航与路由，保留的开发分析模块与接口见[开发说明](ningsi-studio/docs/SHOWCASE.md)。
 
-Studio 0.1.10 增加按数据源保存的设备档案，以及开始前的单位、采样率和模型适配检查；配置通过后仍需采集质检和个人基线。Capture 0.4.1 可选发布不含答案的 LSL 事件，供 LabRecorder 独立同步记录。原始信号复核、成熟工具依据和现场步骤见[现场验证说明](docs/EXISTING_SOLUTIONS_AND_FIELD_VALIDATION.md)及[验收清单](docs/FIELD_ACCEPTANCE_CHECKLIST.txt)。
+开始评估前可检查单位、采样率和模型适配，连接后执行采集质检与个人基线。Capture 0.4.1 可选发布不含答案的 LSL 事件，供 LabRecorder 独立同步记录。原始信号复核、成熟工具依据和现场步骤见[现场验证说明](docs/EXISTING_SOLUTIONS_AND_FIELD_VALIDATION.md)及[验收清单](docs/FIELD_ACCEPTANCE_CHECKLIST.txt)。
 
 Studio 0.1.12 新增“有效时长训练”：坏窗暂停累计、信号恢复后有限补采，前后基线各累计 60 秒、4 轮训练各累计 50 秒可用反馈；PVT 仍按固定时长运行。训练主要展示有效时间内达标率，并同时报告覆盖、有效秒数和用时；达到补采上限仍不足会明确标记。质量门槛保持原规则，原固定十分钟方案继续保留。
 
@@ -34,16 +34,18 @@ Capture ──带版本与校验值的导出文件──▶ Studio 真人模型�
 
 ## 发行版下载与使用（Windows x64）
 
-当前正式版为 **v0.1.13**，包含 Studio 0.1.13、Capture 0.4.1 和引擎 0.1.2，无需安装 Python。
+当前正式版为 **v0.1.14**，包含 Studio 0.1.14、Capture 0.4.1 和引擎 0.1.2，无需安装 Python。Studio 和 Capture 均已从本次源码重新构建。
 
-- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.13)
-- [下载 Windows x64 完整便携套件（约 49 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/ningsi-product-0.1.13-20261117.zip)
-- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/ningsi-product-0.1.13-20261117.zip.sha256)
-- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/README.zh-CN.txt) · [构建记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/BUILD.json) · [EXE 验收记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/FROZEN_VERIFICATION.json)
+- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.14)
+- [下载 Windows x64 完整便携套件（约 49 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/ningsi-product-0.1.14-20261118.zip)
+- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/ningsi-product-0.1.14-20261118.zip.sha256)
+- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/README.zh-CN.txt) · [构建记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/BUILD.json) · [EXE 验收记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/FROZEN_VERIFICATION.json)
 
 完整解压到可写目录，保留整个 `_internal`，双击 `01-Start-Studio.bat` 打开平台，或 `02-Start-Capture.bat` 打开采集器。升级请使用新目录；需要原会话时先备份数据，再按包内说明指定旧数据目录。
 
-本版补充 BSense-R 手册参考、安全资料草稿、连接与录制提示，并改善被拒绝请求的连接收尾；原有效时长训练与质量门继续保留。完整回归运行 635 项：632 项通过、3 项可选检查跳过，最终 EXE 通过 38 项验收。程序未签名；真人识别与训练效果仍需独立验证。套件不含私人脑电或会话数据库。
+本版按手册内置 BSense-R 参数并简化设备页，新增双通道个人眨眼校准，修复断流恢复后旧样本混入、评分窗口误受相邻眨眼影响、预览状态失真、有效时长统计及取消会话回看问题。
+
+源码全量回归共 712 项，默认通过 709 项，其余 3 项可选检查在对应环境启用后通过。四种协议的 50 项端到端检查和最终 EXE 的 44 项验收通过，Capture EXE 已实际完成短协议模拟采集及导出。程序未签名，真人识别与训练效果仍需独立验证。下载包附逐文件校验清单与构建记录。
 
 ### v0.1.2 历史发行版
 
