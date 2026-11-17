@@ -7,6 +7,15 @@
 | `GET /api/device-profile` | 查询参数 `device=lsl:<流名称>` 或 `sim-bsense`；返回该来源独立的 `profile`、`saved`、`missing_fields`、`updated_at` 与 `status=pending_verification`。离线也可查看；无档案不会套用其他来源或历史展示档案 |
 | `POST /api/device-profile` | `{device,profile:{manufacturer,model,electrodes,reference,srate,source_unit,scale_to_uv,unit_basis,document_reference,notes?}}`；原子保存所选来源的操作员声明，不认证合规或标定。资料出处仅存文本，不读取路径 |
 | `POST /api/sessions/preflight` | `{device,protocol?,participant?,eeg_calibration?}`；只读扫描服务端 LSL 元数据并核对配置，返回 `ready`、`checks[]`、`device_profile`、`calibration`、`descriptor`、`scoring.relative_indices` 与 `scoring.attention_model`。不创建会话或参与者，不建立 EEG inlet，不采集或保存脑电 |
+| `POST /api/devices/blink-calibration` | `{action:"start"/"mark"/"finish"/"status"/"clear",participant,device,token?,eeg_calibration?}`；真实双通道原始 EEG 的个人眨眼校准。返回 `token,state,count,expires_in_seconds`，验证失败422。仅 start 接受本次单位确认；其他操作须同一参与者、设备与 token |
+
+开始页“减少眨眼干扰”先创建或选择本次参与者，再开启所选 EEG 流预览。连续数据至少2.5秒且单位已确认后开始校准；自然短眨眼后等约半秒再点记录，每次间隔至少3秒，标记15–20次后结束。标记在已接收数据中回查生理峰，按每路模板、两路幅度关系、形状与宽度验证，点击时刻不会直接作为眨眼峰。采集期间页面每2秒请求 status，服务端按样本索引追加同一条连续原始记录；最多120秒，发生时间戳间断、缓冲丢失或重连需重做。校准失败不会产生可用 token；模型至少需要8次通过波形筛查的标记，建议标记20次以留出拒绝空间。
+
+校准原始记录只在服务端内存短暂保留，结束时清除；模板 token 30分钟有效，仅匹配本人、当前来源、通道顺序/标签、采样率和换算倍率。`POST /api/sessions` 可增加 `blink_calibration_token`；由服务端核对后将模板与绑定信息单独存入会话的 `blink_calibration`，会话公开对象仅返回是否配置。换人、重新佩戴或改变接线后应重做；运行中检测到缓冲重连或配置变化会暂停更新，不能保证自动识别物理佩戴变化。
+
+普通相对指数路径先在原始µV上联合检测，再仅对可信事件分别局部拟合/扣除，随后运行原有滤波与质量检查。`quality.metrics.artifact_control.blink_control` 留存版本、逐事件状态、校正次数、掩码比例和原因；当前窗经校正也必须通过全部质量门槛。未校准、密集/边界事件、模板不匹配、残留干扰或接触异常保持不可用，分数缺失而不计为低专注。校准模板不由任务数据自适应更新。原始源缓冲不修改，基线在所选校准生效后重新采集。
+
+既有真人分类模型保持原训练预处理；个人模板不会替换其输入或重新训练分类器。其原始双通道窗另加眨眼否决检查，疑似污染窗不贡献模型预测；启用此类模型时，相对指数也保持训练对齐的预处理并增加同样的否决，而不应用模板扣除。上述工程行为通过合成回放验证，不能作为真人眨眼检测准确率、真实脑电恢复率或专注分类效力证明。
 
 `checks[].status` 为 `pass/warning/fail/pending`，并有 `key/label/message/action?`。`ready=true` 仅表示当前可见的真实 EEG 来源与单位配置可用于开始流程；实时信号质量、伪迹、新鲜度和个人基线仍为 `pending`，开始后才检查。模拟源、同名来源歧义、非 EEG、无设备、采样率不大于 90 Hz 或缺少单位确认时为 `false`。当前生产处理链使用 45 Hz 低通，检查只拒绝不支持的输入，不调整滤波参数。无有效 ADC 倍率或单位与设备声明冲突时返回 `checks.units=fail`。非法请求形状、来源键或协议为 422；显式传入的参与者不存在为 404。
 
@@ -137,8 +146,7 @@
 
 - **真实 LSL 流排在前面**；仿真源 `sim-bsense` 永远排最后并带 `explicit_only: true`，
   只能被**显式**选择，不再作为缺省（原来它排第一，前端就把仿真当默认了）。
-- `has_real_source` 直接回答"现在到底有没有脑机信号"；没有实时源时列表里只有仿真源，
-  且它带 `hardware_note`（接入指引）。
+- `has_real_source` 表示扫描发现了真实 EEG 流。预览接口的 `live` 表示近期实际收到了 EEG 样本。
 - `simulated: true` 表示这条 `lsl:` 流是**本仓库内置的仿真 outlet**（`simulate-outlet`）：
   传输是真的、数据是算出来的，note 会写明"非真实设备"。
 
@@ -160,8 +168,8 @@ GET  /api/devices/preview?window=1   → 上面字段 + { "seconds": 4.0, "sampl
 DELETE /api/devices/preview          → { "active": false, "stopped": true }
 ```
 
-- `source` 省略时用**当前检测到的实时源**；一个都没有 ⇒ `409 conflict`
-  （「未检测到脑电信号…」），**不会**回落到仿真源。
+- 省略 `source` 时使用已发现的真实 EEG 流。只有辅助流或仿真源时返回 `409 conflict`。
+- 停止接收失败时返回 `409 conflict` 并保留预览句柄，可以再次请求停止。
 - 预览**只读**：不建会话、不落库、不出指标；`quality` 用的是与报告同一份 `config.QUALITY` 门槛。
 - `live=false` / `no_signal=true` 表示流还在但最近没有样本（设备停了/线掉了），界面据此显示"无信号"。
 
@@ -254,7 +262,7 @@ LSL 会话要求 `time_scale=1`。可省略 `eeg_calibration` 以使用流声明
 
 | `device` | 行为 |
 |---|---|
-| 省略 / `""` / `auto` | 用**当前检测到的实时源**（真机优先、脑电流优先于同机的 Metric/HeartRate 等，其次内置仿真 outlet）；**一个都没有 ⇒ `409`**，消息里给接入指引 |
+| 省略 / `""` / `auto` | 使用已发现的真实 EEG 流。只有辅助流或仿真源时返回 `409` |
 | `lsl:<流名称>` | 先确认该流现在可见，否则 `409`（fail fast，不再"建好会话才发现没信号"）；连接后 `srate`/`channels` 按流描述符回写 |
 | `sim-bsense` | **允许，但必须显式**：这是演示/自测入口，`source`/SSE 事件/报告都会标注为仿真 |
 | 其它任意字符串 | `422 validation_failed`（不再被当成仿真源） |
@@ -323,6 +331,8 @@ LSL 会话要求 `time_scale=1`。可省略 `eeg_calibration` 以使用流声明
 ### `GET /api/sessions?participant=p01&status=done&page=1&limit=50`
 `items[]` 为会话对象，额外含 `alert_count` 与 `phase_label`（已知阶段的**中文名**，与详情接口同一张
 `core/phases.py` 映射表；终态 `done`/`failed`/`cancelled` 不是流程阶段，此字段为 `null`，由界面本地化）。
+列表行的 `has_artifacts`、`has_report` 表示已登记且仍存在的产物文件和 JSON 报告。
+`has_training` 表示已有训练分段或汇总，或当前运行的会话方案包含训练。
 `phase` 运行中是流程阶段键（`qc`/`baseline`/`scale`/…），会话收尾后写的**就是终态本身**
 （`done`/`failed`/`cancelled`，与 `status` 一致），所以取消掉的会话是「已取消」而不是「失败」。
 
@@ -469,7 +479,9 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 ### `GET /api/sessions/{uuid}/trend?field=focus&period=week`
 `field ∈ {focus, relax, load, stress}`，`period ∈ {week, month}`；
 `points[{period, mean, n, std}]`，另返回 `sessions / comparable / rejected / rejected_reasons`
-（设备、采样率或通道数变化的历史记录会被排除在聚合之外）。
+及 `comparison_group{protocol,protocol_label,training_mode,source,source_kind,time_scale,device,srate,channels}`。
+脑电趋势以所选会话为参照，仅聚合同一协议、训练模式、数据来源、时间倍率与设备配置；
+没有该指标的会话计为 `metric_unavailable`，不进入均值或 `comparable`。失败与取消会话不参与。
 
 `field=stress` 使用已完成现场 LSL 会话的本人压力自评（0–10 分），先求各会话均值，再按周或月对会话等权平均。模拟记录与未作答会话不参与，`n` 为会话数，`ledger_points` 为空。同一统计适用于全局趋势端点，可用 `participant` 选择个体。
 
@@ -546,7 +558,8 @@ lapse_rate, false_starts, valid`。
   空 `summary: {}` 不代表训练结束；实时反馈缺测时显示缺测，训练结束后才展示保存结果。
 - `GET /api/sessions/{uuid}/report` → 报告 JSON（`spec/participant/indicators/quality/scales/
   behavior/assessment/extras`），并附 `report_markdown`（报告原文，Markdown 文本）与
-  `report_markdown_path`；尚未生成时返回 `202` 且带 `partial: true` 与阶段进度。
+  `report_markdown_path`。没有完整报告时返回 `partial: true` 和已保存的阶段记录。
+  运行中返回 `202`，终态返回 `200`，失败原因保存在 `error`。
   `extras.signal_conditioning` **只在真实 LSL 会话里出现**（仿真源不做调理），形状为
   `{spec, dc_removal, chain{spec,stages[]}, srate, observed_srate, context_samples, window_samples,
   expected_samples}`；它同时会渲染成报告正文表头的「采集调理」一行，便于复算与审计。
@@ -567,11 +580,13 @@ lapse_rate, false_starts, valid`。
   `train, validation, test`（后两者在划分不足时可能为 `null`）、`model_path`。
 - `GET /api/reports/trend?participant=p01&field=focus&period=week`
   → `points[]`（来自数据库）、`ledger_points[]`（来自 JSONL 台账）、`sessions`、
-  `comparable` / `rejected` / `rejected_reasons`（可比性过滤结果）、`note`。
+  `comparable` / `rejected` / `rejected_reasons`（可比性过滤结果）、`comparison_group`、`note`。
   `ledger_points` 汇总的是**每个会话自己的**台账 `<runs_root>/<uuid>/history/sessions.jsonl`
   （外加 `export-ledger` 导出的 `<data_dir>/history/sessions.jsonl`），按 `session_uuid` 去重；
   聚合口径与 `GET .../{uuid}/trend` 一致（`period/mean/n/std`，并带 `rejected` 计数）。
-  两种来源均先按 `participant` 筛选，再按同一设备参照做可比性过滤。
+  两种来源均先按 `participant` 筛选，再以最新含该指标的已完成会话作为参照，
+  核对同一协议、训练模式、来源、倍率、设备、采样率与通道数；没有指标时 `comparison_group=null`。
+  旧台账缺少协议等上下文时按 `session_uuid` 从 SQLite 补全；未关联到已完成数据库会话的台账不参与。
   会话详情和数据库趋势只使用 `monitor` 阶段的汇总评分；该阶段无评分时返回空结果，不回退到基线。
 
 ---
@@ -645,6 +660,13 @@ Studio还要求任务完成。这些是待验证的工程完整性门槛，由 `
 SSE新增 `effective_progress`，数据为 `{phase,key,segment?,effective_time}`。`feedback`、`baseline`、`segment` 和训练总览均可带 `effective_time`：
 
 有效协议分段还保留 `support_gap_count` 与 `support_gap_interruptions`（本段协议秒坐标），表示上一反馈支持期到期后产生的无依据空隙。它们打断连续保持，不增加 EEG 的 `excluded_windows`。
+
+`feedback_schedule` 记录实际更新调度（`ahead-of-expiry-v1`）。下一窗按上次处理耗时提前开始分析，
+并留最多50毫秒实际时间、且不超过0.5协议秒的调度余量；因此反馈更新可略早于名义2秒。
+记录包含名义步长、支持上限、实际使用余量、最大分析耗时、实际反馈间隔均值/最大值及时间倍率。
+4秒分析窗和每个分值最多2秒的支持上限保持原口径；发布时间及本训练阶段用时统一采用
+高精度单调 `perf_counter` 的实际相对时间，避免 Windows 粗分辨率时钟造成同刻事件顺序丢失。
+处理突发变慢或晚唤醒超出支持期仍留下缺口，中断连续保持，不以预定 deadline 补计有效时间。
 
 ```json
 {"spec":"effective-time-v1","target_seconds":50,"valid_seconds":24,"elapsed_seconds":40,"max_seconds":100,"extension_seconds":0,"quality_paused":false,"completion_reason":null,"target_reached":false,"completed":false}

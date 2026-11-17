@@ -19,6 +19,13 @@ from ningsi_studio.domain.training import StudioTraining
 from tests.helpers import StudioTestCase
 
 
+@contextmanager
+def patched_clock(clock):
+    with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic), \
+         patch("ningsi_studio.core.effective_time.time.perf_counter", clock.monotonic):
+        yield
+
+
 class VirtualClock:
     def __init__(self):
         self.now = 0.0
@@ -123,7 +130,7 @@ class EffectiveTimeTests(unittest.TestCase):
     def test_baseline_overlap_union_and_original_minimum_are_separate(self):
         clock = VirtualClock()
         r = self.runtime(clock)
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             steps, base = collect_baseline(r, "baseline_open", "b")
         state = r.payloads["b"]["effective_time"]
         self.assertTrue(base.valid)
@@ -136,7 +143,7 @@ class EffectiveTimeTests(unittest.TestCase):
     def test_bad_baseline_windows_remain_in_denominator_even_after_goal(self):
         clock = VirtualClock()
         r = self.runtime(clock, pattern=lambda phase, index: index % 3 == 0)
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             _, base = collect_baseline(r, "baseline_open", "b")
         state = r.payloads["b"]["effective_time"]
         self.assertGreaterEqual(state["valid_seconds"], 60)
@@ -150,7 +157,7 @@ class EffectiveTimeTests(unittest.TestCase):
         clock = VirtualClock()
         r = self.runtime(clock)
         trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             segment = training_round(r, trainer, self.base, 0, "t")
         self.assertEqual(segment["duration_sec"], 54)
         self.assertEqual(segment["stats"]["valid_seconds"], 50)
@@ -173,7 +180,7 @@ class EffectiveTimeTests(unittest.TestCase):
             return step
         r.engine.step = changed_score_after_bad_windows
         trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             segment = training_round(r, trainer, self.base, 0, "t")
         feedback = [p for name,p in r.bus.events if name == "feedback"]
         self.assertEqual(segment["stats"]["valid_seconds"], 50)
@@ -188,7 +195,7 @@ class EffectiveTimeTests(unittest.TestCase):
     def test_all_bad_finishes_bounded_insufficient_and_pvt_stays_fixed(self):
         clock = VirtualClock()
         r = self.runtime(clock, pattern=lambda phase, index: False)
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             run(r, True)
         result = r.summary["effective_time"]
         self.assertEqual(clock.now, 840)
@@ -209,7 +216,7 @@ class EffectiveTimeTests(unittest.TestCase):
     def test_normal_run_and_previous_protocol_definitions_do_not_change(self):
         clock = VirtualClock()
         r = self.runtime(clock)
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             run(r, True)
         self.assertEqual(r.summary["effective_time"]["collection_status"], "complete")
         self.assertEqual(clock.now, 616)
@@ -224,7 +231,7 @@ class EffectiveTimeTests(unittest.TestCase):
         clock = VirtualClock()
         r = self.runtime(clock, cancel_at=13)
         trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             with self.assertRaises(SessionCancelled):
                 training_round(r, trainer, self.base, 0, "t")
         self.assertEqual(len(r.persisted), 1)
@@ -238,7 +245,7 @@ class EffectiveTimeTests(unittest.TestCase):
         clock = VirtualClock()
         r = self.runtime(clock, pattern=lambda phase, index: False)
         trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             segment = training_round(r, trainer, self.base, 0, "t")
         self.assertEqual(segment["duration_sec"], 100)
         self.assertEqual(segment["effective_time"]["completion_reason"], "max_duration")
@@ -247,7 +254,7 @@ class EffectiveTimeTests(unittest.TestCase):
     def test_cancelled_baseline_retains_partial_union_and_reason(self):
         clock = VirtualClock()
         r = self.runtime(clock, cancel_at=17)
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             with self.assertRaises(SessionCancelled):
                 collect_baseline(r, "baseline_open", "b")
         state = r.payloads["b"]["effective_time"]
@@ -261,7 +268,7 @@ class EffectiveTimeTests(unittest.TestCase):
         r = self.runtime(clock)
         r.scale = .05
         trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             segment = training_round(r, trainer, self.base, 0, "t")
         state = segment["effective_time"]
         self.assertEqual(state["time_basis"], "protocol_seconds")
@@ -274,35 +281,96 @@ class EffectiveTimeTests(unittest.TestCase):
         clock = VirtualClock()
         r = self.runtime(clock, latency=5)
         trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             segment = training_round(r, trainer, self.base, 0, "t")
         self.assertLess(segment["stats"]["valid_seconds"], 50)
         self.assertEqual(segment["effective_time"]["completion_reason"], "max_duration")
         self.assertGreater(segment["unobserved_seconds"], 0)
         self.assertGreaterEqual(segment["duration_sec"], 100)
 
-    def test_short_processing_gaps_break_hold_without_losing_effective_time_or_adding_bad_windows(self):
+    def test_analysis_is_prepared_before_expiry_without_inventing_support_time(self):
         clock = VirtualClock()
         r = self.runtime(clock, latency=.5)
         trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
         target_before = trainer.target
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             segment = training_round(r, trainer, self.base, 0, "t")
-        self.assertEqual(segment["duration_sec"], 67.5)
+        self.assertAlmostEqual(segment["duration_sec"], 54.4)
         self.assertEqual(segment["stats"]["valid_seconds"], 50)
         self.assertEqual(segment["effective_time"]["valid_seconds"], 50)
         self.assertTrue(segment["effective_time"]["timing_consistent"])
         self.assertTrue(segment["effective_time"]["completed"])
-        self.assertLessEqual(segment["stats"]["max_hold_sec"], config.STEP_SEC)
-        self.assertLessEqual(segment["stats"]["current_hold_sec"], config.STEP_SEC)
-        self.assertFalse(segment["achieved"])
-        self.assertEqual(segment["target_after"], target_before)
+        self.assertGreaterEqual(segment["stats"]["max_hold_sec"], trainer.inner.hold_sec)
+        self.assertTrue(segment["achieved"])
+        self.assertGreater(segment["target_after"], target_before)
         self.assertEqual(segment["excluded_windows"], 2, "Only the two initial gate windows were unusable")
-        self.assertEqual(segment["support_gap_count"], 24)
-        self.assertEqual(segment["support_gap_interruptions"][0], 7.5)
-        self.assertIn(7.5, segment["interruptions"])
+        self.assertEqual(segment["support_gap_count"], 0)
+        self.assertEqual(segment["support_gap_interruptions"], [])
+        self.assertEqual(segment["feedback_schedule"]["support_cap_seconds"], config.STEP_SEC)
+        self.assertAlmostEqual(segment["feedback_schedule"]["feedback_interval_seconds_mean"], 1.95)
+        self.assertAlmostEqual(segment["feedback_schedule"]["actual_scheduling_margin_seconds"], .05)
         feedback = [p for name,p in r.bus.events if name == "feedback"]
-        self.assertTrue(all(p["current_hold_sec"] <= config.STEP_SEC for p in feedback))
+        self.assertTrue(any(p["current_hold_sec"] >= 6 for p in feedback))
+
+    def test_late_wakeup_still_breaks_hold_without_adding_a_rejected_eeg_window(self):
+        clock = VirtualClock()
+        r = self.runtime(clock, latency=.5)
+        late = False
+        def delayed_sleep(seconds):
+            nonlocal late
+            if r.index == 6 and not late:
+                late = True
+                clock.sleep(.5)
+            clock.sleep(seconds)
+        r._sleep_real = delayed_sleep
+        trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
+        with patched_clock(clock):
+            segment = training_round(r, trainer, self.base, 0, "t")
+        feedback = [p for name,p in r.bus.events if name == "feedback"]
+        self.assertEqual(segment["support_gap_count"], 1)
+        self.assertEqual(segment["excluded_windows"], 2)
+        self.assertEqual(feedback[6]["current_hold_sec"], 0)
+        self.assertAlmostEqual(segment["support_gap_interruptions"][0],
+                               feedback[5]["effective_time"]["elapsed_seconds"]+config.STEP_SEC)
+        self.assertEqual(segment["stats"]["valid_seconds"], 50)
+        self.assertTrue(segment["effective_time"]["timing_consistent"])
+        self.assertGreater(segment["unobserved_seconds"], .4)
+
+    def test_sudden_long_analysis_still_expires_the_previous_score(self):
+        clock = VirtualClock()
+        r = self.runtime(clock, latency=.5)
+        original = r.engine.step
+        def slow_once(state):
+            if r.index == 6:
+                clock.sleep(3)
+            return original(state)
+        r.engine.step = slow_once
+        trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
+        with patched_clock(clock):
+            segment = training_round(r, trainer, self.base, 0, "t")
+        feedback = [p for name,p in r.bus.events if name == "feedback"]
+        self.assertEqual(segment["support_gap_count"], 1)
+        self.assertEqual(segment["excluded_windows"], 2)
+        self.assertEqual(feedback[6]["current_hold_sec"], 0)
+        self.assertGreater(segment["unobserved_seconds"], 2.9)
+        self.assertEqual(segment["stats"]["valid_seconds"], 50)
+        self.assertTrue(segment["effective_time"]["timing_consistent"])
+
+    def test_feedback_uses_high_resolution_clock_when_tick_clock_is_coarse(self):
+        clock = VirtualClock()
+        r = self.runtime(clock, latency=.001)
+        r.scale = .01
+        trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
+        # Quantized GetTickCount64 would give the initial guided and accepted
+        # updates identical times. The entire feedback ledger uses QPC instead.
+        with patch("ningsi_studio.core.effective_time.time.monotonic", lambda: int(clock.now/.015625)*.015625), \
+             patch("ningsi_studio.core.effective_time.time.perf_counter", clock.monotonic):
+            segment = training_round(r, trainer, self.base, 0, "t")
+        self.assertTrue(segment["effective_time"]["timing_consistent"])
+        self.assertAlmostEqual(segment["effective_time"]["valid_seconds"], segment["stats"]["valid_seconds"])
+        self.assertTrue(segment["effective_time"]["completed"])
+        self.assertGreaterEqual(segment["stats"]["max_hold_sec"], 6)
+        self.assertEqual(segment["feedback_schedule"]["clock"], "perf_counter")
 
     def test_cancellation_during_expired_feedback_tail_retains_a_gap_but_not_a_bad_window(self):
         clock = VirtualClock()
@@ -310,24 +378,24 @@ class EffectiveTimeTests(unittest.TestCase):
         original = r.engine.step
         def cancelled_analysis(state):
             if r.index == 3:
-                clock.sleep(.5)
+                clock.sleep(3)
                 raise SessionCancelled()
             return original(state)
         r.engine.step = cancelled_analysis
         trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             with self.assertRaises(SessionCancelled):
                 training_round(r, trainer, self.base, 0, "t")
         partial = r.persisted[0]
-        self.assertEqual(partial["duration_sec"], 8)
+        self.assertAlmostEqual(partial["duration_sec"], 8.85)
         self.assertEqual(partial["stats"]["valid_seconds"], 2)
-        self.assertEqual(partial["support_gap_interruptions"], [7.5])
+        self.assertEqual(partial["support_gap_interruptions"], [6.4])
         self.assertEqual(partial["excluded_windows"], 2)
         self.assertEqual(partial["stats"]["current_hold_sec"], 0)
         self.assertTrue(partial["effective_time"]["timing_consistent"])
         self.assertEqual(partial["effective_time"]["completion_reason"], "cancelled")
 
-    def test_final_score_one_second_before_cap_cannot_support_past_cap(self):
+    def test_final_score_before_cap_cannot_support_past_cap(self):
         clock = VirtualClock()
         r = self.runtime(clock, pattern=lambda phase, index: index >= 26)
         original = r.engine.step
@@ -337,16 +405,16 @@ class EffectiveTimeTests(unittest.TestCase):
             return original(state)
         r.engine.step = first_offset
         def late_wakeup(seconds):
-            clock.sleep(3 if clock.now == 99 else seconds)
+            clock.sleep(seconds + 2 if clock.now > 99 else seconds)
         r._sleep_real = late_wakeup
         trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
-        with patch("ningsi_studio.core.effective_time.time.monotonic", clock.monotonic):
+        with patched_clock(clock):
             segment = training_round(r, trainer, self.base, 0, "t")
-        self.assertEqual(segment["samples"][-1][0], 99)
+        self.assertGreater(segment["samples"][-1][0], 99)
         self.assertEqual(segment["duration_sec"], 102)
         self.assertIn(100, segment["interruptions"])
-        self.assertEqual(segment["stats"]["valid_seconds"], 45)
-        self.assertEqual(segment["effective_time"]["valid_seconds"], 45)
+        self.assertAlmostEqual(segment["stats"]["valid_seconds"], 100-segment["samples"][0][0])
+        self.assertEqual(segment["effective_time"]["valid_seconds"], segment["stats"]["valid_seconds"])
         self.assertFalse(segment["effective_time"]["completed"])
         self.assertEqual(segment["excluded_windows"], 27)
         self.assertEqual(segment["support_gap_interruptions"], [100])

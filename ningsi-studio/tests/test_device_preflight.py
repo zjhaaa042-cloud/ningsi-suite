@@ -90,6 +90,7 @@ class PreflightPolicyTests(unittest.TestCase):
         self.assertEqual(result["scoring"]["attention_model"]["status"], "none")
         self.assertEqual(result["scoring"]["relative_indices"]["feedback_target"], "relative_focus_index")
         self.assertEqual(next(row for row in result["checks"] if row["key"] == "quality")["status"], "pending")
+        self.assertFalse(any(row["key"] == "device_profile" for row in result["checks"]))
 
     def test_unknown_units_need_explicit_confirmation_and_adc_requires_positive_factor(self):
         descriptor = {**DESCRIPTOR, "declared_units": [""]}

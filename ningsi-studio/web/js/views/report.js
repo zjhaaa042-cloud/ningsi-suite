@@ -109,6 +109,7 @@ function composeMarkdown(report) {
   const behavior = pick(report, 'behavior', null) || {};
   if (Object.keys(behavior).length) {
     for (const [name, result] of Object.entries(behavior)) {
+      if (!result || typeof result !== 'object') continue;
       if (name === 'sart') {
         lines.push(`- SART：${cell(fmtInt(pick(result, 'trials')))} 试次（No-Go ${cell(fmtInt(pick(result, 'nogo_trials')))}），正确率 ${cell(fmtPercent(pick(result, 'go_accuracy')))}，虚报率 ${cell(fmtPercent(pick(result, 'commission_rate')))}，漏报率 ${cell(fmtPercent(pick(result, 'omission_rate')))}，反应时 ${cell(fmtNum(pick(result, 'rt_mean'), 3))} ± ${cell(fmtNum(pick(result, 'rt_sd'), 3))} s`);
       } else if (name === 'pvt') {
@@ -159,20 +160,24 @@ function composeMarkdown(report) {
 
 /** 评估未完成时的进度展示。ctx 用于"刷新报告"——重建当前视图即可重新请求，不再整页刷新。 */
 function renderPartial(host, data, ctx) {
+  const ended = ['cancelled', 'failed', 'done'].includes(data.status);
   const bar = el('div', { class: 'progress' }, [
     el('div', {
       class: 'progress__bar',
       style: `width:${(Math.max(0, Math.min(1, Number(pick(data, 'progress', 0)) || 0)) * 100).toFixed(1)}%`,
     }),
   ]);
-  host.append(card('报告尚未生成', el('div', { class: 'stack' }, [
-    el('p', { text: `报告将在"报告与产物"阶段落盘。当前状态：${statusText(pick(data, 'status', null))}，阶段 ${pick(data, 'phase', DASH)}。` }),
+  host.append(card(ended ? '本次会话无完整报告' : '报告尚未生成', el('div', { class: 'stack' }, [
+    el('p', { text: ended
+      ? `会话${statusText(data.status)}。以下为已保存记录。`
+      : `报告将在"报告与产物"阶段落盘。当前状态：${statusText(pick(data, 'status', null))}，阶段 ${pick(data, 'phase', DASH)}。` }),
+    data.error ? el('p', { text: data.error }) : null,
     el('div', { class: 'row row--between' }, [
       el('span', { class: 'muted', text: '阶段进度' }),
       el('span', { class: 'mono', text: fmtPercent(pick(data, 'progress')) }),
     ]),
     bar,
-    button('刷新报告', () => (ctx && ctx.reload ? ctx.reload() : window.location.reload())),
+    ended ? null : button('刷新报告', () => (ctx && ctx.reload ? ctx.reload() : window.location.reload())),
   ])));
 
   const runs = list(pick(data, 'runs', []));
@@ -207,10 +212,11 @@ function renderPartial(host, data, ctx) {
 
 export async function render(container, ctx) {
   const uuid = ctx.params.get('session') || pick(ctx.store.state.currentSession, 'uuid', null);
+  const exportAction = el('span');
   const actions = uuid ? [
     button('流程视图', () => ctx.navigate(`#/flow?session=${uuid}`)),
     button('实时监测', () => ctx.navigate(`#/live?session=${uuid}`)),
-    el('a', { href: api.exportZipUrl(uuid), text: '导出 zip' }),
+    exportAction,
   ] : [];
   const host = pageFrame(container, '评估报告', actions);
 
@@ -277,10 +283,11 @@ export async function render(container, ctx) {
         host.append(card('改善建议', el('ul', {}, advice.map(item => el('li', { text: String(item) })))));
       }
       const observations = data.extras?.state_observations;
-      if (observations) {
+      const observationLines = list(observations?.summary_lines);
+      if (observationLines.length) {
         host.append(el('details', { class: 'result-details' }, [
           el('summary', { text: '查看当下压力与情绪' }),
-          ...observations.summary_lines.map(text => el('p', { text })),
+          ...observationLines.map(text => el('p', { text })),
         ]));
       }
       host.append(el('details', { class: 'result-details' }, [
@@ -308,6 +315,9 @@ export async function render(container, ctx) {
     const response = await api.artifacts(uuid);
     if (ctx.signal.aborted) return;
     const items = list(pick(response.data, 'items', []));
+    if (items.some(item => item.exists)) {
+      exportAction.append(el('a', { href: api.exportZipUrl(uuid), text: '导出 zip' }));
+    }
     artifactHost.textContent = '';
     if (!items.length) {
       artifactHost.append(empty('该会话还没有产物（报告 / 热力图 / 趋势 / 模型文件等）。'));

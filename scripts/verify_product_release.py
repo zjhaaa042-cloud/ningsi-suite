@@ -66,8 +66,11 @@ def main():
     index = request("/", binary=True).decode("utf-8")
     navigation = request("/js/main.js", binary=True).decode("utf-8")
     passed("product navigation has no competition route", "#/showcase" not in navigation and "A09" not in index)
-    for asset in ("/js/views/device-profile.js", "/js/views/session-preflight.js", "/js/views/state-heatmap.js", "/js/training-metrics.js", "/css/workspace.css"):
+    for asset in ("/js/views/session-preflight.js", "/js/views/blink-calibration.js", "/js/views/state-heatmap.js", "/js/training-metrics.js", "/css/workspace.css"):
         passed("packaged asset " + asset, len(request(asset, binary=True)) > 100)
+    request("/api/devices/blink-calibration", {"action": "start"}, expected=422)
+    passed("blink calibration requires an explicit participant without creating records",
+           request("/api/subjects")["total"] == subject_count)
     before = request("/api/sessions")["total"]
     device = "lsl:QA-SOFTWARE-FIXTURE-UNCONNECTED-" + uuid_module.uuid4().hex[:8]
     payload = {"device": device, "protocol": "ten_min"}

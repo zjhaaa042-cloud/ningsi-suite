@@ -387,16 +387,16 @@ export function render(container, ctx) {
       }
       case 'finished': {
         local.trainingEnded = true;
-        if (!local.finishedNoted) {
-          local.finishedNoted = true;
-          renderNote(card('会话结束', el('div', {}, [
-            el('p', { text: `最终状态：${statusText(payload.status)}` }),
-            el('div', { class: 'row' }, [
-              button('查看报告', () => ctx.navigate(`#/report?session=${uuid}`), { primary: true }),
-              el('a', { href: api.exportZipUrl(uuid), text: '下载全部产物（zip）' }),
-            ]),
-          ])));
-        }
+        if (local.finishedNoted) break;
+        local.finishedNoted = true;
+        stopUpdates();
+        renderGauge();
+        renderStatus();
+        renderNote(card('会话结束', el('div', {}, [
+          el('p', { text: `最终状态：${statusText(payload.status)}` }),
+          button(payload.status === 'done' ? '查看报告与产物' : '查看阶段记录',
+            () => ctx.navigate(`#/report?session=${uuid}`)),
+        ])));
         loadTraining();
         break;
       }
@@ -406,10 +406,12 @@ export function render(container, ctx) {
   };
 
   /* ------------------------------------------------------ 初次加载 */
+  let requestVersion = 0;
   const loadTraining = async () => {
+    const version = ++requestVersion;
     try {
       const response = await api.training(uuid);
-      if (ctx.signal.aborted) return;
+      if (ctx.signal.aborted || version !== requestVersion) return;
       const data = response.data || {};
       const segments = list(data.segments).map((segment) => ({
         ...segment,
@@ -433,7 +435,14 @@ export function render(container, ctx) {
       renderStatus();
       renderEffective();
     } catch (error) {
+      if (ctx.signal.aborted || version !== requestVersion) return;
       if (error && error.name === 'ApiError' && (error.status === 404 || error.status === 409)) {
+        if (local.finishedNoted && local.segments.length === 0) {
+          for (const node of [gaugeHost, statusHost, segmentHost, effectiveHost]) node.textContent = '';
+          baselineHost.textContent = '';
+          baselineHost.append(card('训练记录', [empty('会话已结束，没有已保存的训练分段。')]));
+          return;
+        }
         baselineHost.textContent = '';
         baselineHost.append(card('训练前后基线对比', [empty('该会话暂无训练记录（训练阶段尚未结束或未执行）。')]));
         return;
@@ -444,18 +453,33 @@ export function render(container, ctx) {
     }
   };
 
+  let events, timer;
+  function stopUpdates() {
+    events?.close();
+    window.clearInterval(timer);
+  }
+  ctx.onCleanup(stopUpdates);
+
   api.getSession(uuid).then((response) => {
     if (ctx.signal.aborted) return;
     const data = response.data || {};
     const session = data.session ? { ...data.session } : { ...data };
     session.uuid = uuid;
     ctx.store.setState({ currentSession: session });
+    if (session.protocol === 'short') {
+      host.textContent = '';
+      host.append(card('训练记录', [empty('短协议不包含反馈训练阶段。')]));
+      return;
+    }
     if (Number.isFinite(session.time_scale)) local.timeScale = session.time_scale;
     const runtime = data.runtime || {};
     if (runtime.latest_feedback) applyFeedback(runtime.latest_feedback, true);
     if (!local.hasLiveFeedback && session.phase === 'training' && effectiveTimeState(runtime.effective_time, 'training')) local.effectiveTime = runtime.effective_time;
-    if (['done', 'failed', 'cancelled'].includes(session.status)
-        || list(session.runs).some(run => run.phase === 'training' && run.status === 'done')) {
+    if (['done', 'failed', 'cancelled'].includes(session.status)) {
+      handleEvent('finished', {status: session.status});
+      return;
+    }
+    if (list(session.runs).some(run => run.phase === 'training' && run.status === 'done')) {
       local.trainingEnded = true;
       renderGauge();
       renderStatus();
@@ -464,24 +488,20 @@ export function render(container, ctx) {
     renderStatus();
     renderSegments();
     if (local.summary) renderBaseline(local.summary);
-  }).catch(() => {});
-
-  loadTraining();
-
-  const events = connectSessionEvents(uuid, {
-    onEvent: (type, frame) => {
-      if (ctx.signal.aborted) return;
-      handleEvent(type, frame && frame.data);
-    },
-  });
-  ctx.onCleanup(() => events.close());
-
-  // 兜底：SSE 断线时每 10 秒拉一次训练汇总
-  const timer = window.setInterval(() => {
-    if (document.hidden) return;
     loadTraining();
-  }, 10000);
-  ctx.onCleanup(() => window.clearInterval(timer));
+    events = connectSessionEvents(uuid, {
+      onEvent: (type, frame) => {
+        if (!ctx.signal.aborted) handleEvent(type, frame && frame.data);
+      },
+    });
+    timer = window.setInterval(() => {
+      if (!document.hidden) loadTraining();
+    }, 10000);
+  }).catch(error => {
+    if (ctx.signal.aborted) return;
+    host.textContent = '';
+    host.append(card('会话加载失败', [empty(describeError(error)), button('重试', () => ctx.reload())]));
+  });
 }
 
 export default render;

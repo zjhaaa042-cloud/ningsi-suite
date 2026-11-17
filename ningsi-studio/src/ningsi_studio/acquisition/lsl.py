@@ -19,6 +19,7 @@ import math
 import threading
 import time
 from collections import deque
+from itertools import count
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -104,6 +105,7 @@ class StreamDescriptor:
             "declared_units": list(self.declared_units),
             "source_id": self.source_id,
             "hostname": self.hostname,
+            "uid": self.uid,
             "label": self.label,
         }
 
@@ -171,15 +173,39 @@ def describe_stream(info: Any) -> StreamDescriptor | None:
 class StreamBuffer:
     """线程安全的环形缓冲：写入端是 LSL 拉取线程，读取端是信号处理链。"""
 
-    def __init__(self, descriptor: StreamDescriptor, buffer_seconds: float = 60.0) -> None:
+    _identifiers = count(1)
+
+    def __init__(self, descriptor: StreamDescriptor, buffer_seconds: float = 60.0,
+                 stale_timeout: float = 3.0) -> None:
         rate = descriptor.nominal_srate if descriptor.nominal_srate > 0 else 100.0
         capacity = int(min(max(math.ceil(rate * buffer_seconds * 1.25), 2048), 250_000))
         self.descriptor = descriptor
+        self.buffer_id = next(self._identifiers)
         self._timestamps: deque = deque(maxlen=capacity)
         self._samples: deque = deque(maxlen=capacity)
         self._lock = threading.Lock()
         self._count = 0
         self._last_monotonic: float | None = None
+        self._connection_generation = 0
+        self._stale_timeout = stale_timeout
+
+    @property
+    def connection_generation(self) -> int:
+        with self._lock:
+            return self._connection_generation
+
+    def begin_connection(self) -> int:
+        """Invalidate connection-scoped state even when a reconnect reuses this buffer."""
+        with self._lock:
+            self._reset_locked()
+            return self._connection_generation
+
+    def _reset_locked(self) -> None:
+        self._connection_generation += 1
+        self._timestamps.clear()
+        self._samples.clear()
+        self._count = 0
+        self._last_monotonic = None
 
     def append_chunk(self, samples, timestamps) -> int:
         rows = []
@@ -193,11 +219,14 @@ class StreamBuffer:
         if not rows:
             return 0
         with self._lock:
+            received = time.monotonic()
+            if self._last_monotonic is not None and received - self._last_monotonic > self._stale_timeout:
+                self._reset_locked()
             for stamp, row in rows:
                 self._timestamps.append(stamp)
                 self._samples.append(row)
             self._count += len(rows)
-            self._last_monotonic = time.monotonic()
+            self._last_monotonic = received
         return len(rows)
 
     def slice(self, seconds: float) -> tuple[list, list, int, float | None]:
@@ -247,9 +276,12 @@ class StreamBuffer:
             stamps = list(self._timestamps)[-count:]
             rows = list(self._samples)[-count:]
             total, last = self._count, self._last_monotonic
-        return {"timestamps": stamps, "samples": np.asarray(rows, dtype=float).T,
+            generation = self._connection_generation
+        samples = np.asarray(rows, dtype=float).reshape(-1, self.descriptor.channel_count).T
+        return {"timestamps": stamps, "samples": samples,
                 "total_samples": total, "age": None if last is None else time.monotonic() - last,
-                "buffer_id": id(self), "descriptor": self.descriptor.as_dict()}
+                "buffer_id": self.buffer_id, "connection_generation": generation,
+                "descriptor": self.descriptor.as_dict()}
 
     def stats(self) -> dict:
         with self._lock:
@@ -285,7 +317,9 @@ def _default_inlet(info: Any, buffer_seconds: float) -> Any:
     return StreamInlet(
         info,
         max_buflen=max(1, math.ceil(buffer_seconds)),
-        recover=bool(str(_safe(info, "source_id", "")).strip()),
+        # Let the manager observe loss and reopen the inlet with fresh metadata
+        # and samples. Transparent liblsl recovery hides the boundary.
+        recover=False,
         processing_flags=proc_clocksync | proc_dejitter | proc_monotonize,
     )
 
@@ -311,6 +345,7 @@ class _StreamWorker(threading.Thread):
         inlet = None
         error: str | None = None
         try:
+            self.buffer.begin_connection()
             inlet = self.inlet_factory(self.info, self.buffer_seconds)
             if hasattr(inlet, "info"):
                 # The resolver normally omits channel XML. Read the connected
@@ -339,8 +374,9 @@ class LiveStreamManager:
 
     def __init__(self, buffer_seconds: float = 60.0, *, resolver: Resolver | None = None,
                  inlet_factory: Callable | None = None, poll_interval: float = 2.0,
-                 wanted_kinds: Iterable[str] = ("eeg",), wanted_name: str = "") -> None:
+                 wanted_kinds: Iterable[str] = ("eeg",), wanted_name: str = "", stale_timeout: float = 3.0) -> None:
         self.buffer_seconds = float(buffer_seconds)
+        self.stale_timeout = float(stale_timeout)
         self.poll_interval = float(poll_interval)
         self.wanted_kinds = tuple(wanted_kinds)
         # 指定流名称时只连这一条流：现场常常同时存在多条 EEG 流（真机 + 自己的仿真 outlet），
@@ -359,25 +395,26 @@ class LiveStreamManager:
 
     # ------------------------------------------------------------------ 生命周期
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._discovery_loop, name="lsl-discovery", daemon=True)
-        self._thread.start()
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            thread = threading.Thread(target=self._discovery_loop, name="lsl-discovery", daemon=True)
+            thread.start()
+            self._thread = thread
 
     def stop(self) -> None:
-        self._stop_event.set()
-        self._refresh_event.set()
         with self._lock:
+            self._stop_event.set()
+            self._refresh_event.set()
             workers = tuple(self._workers.values())
+            discovery = self._thread
         for worker in workers:
             worker.stop()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        if discovery is not None:
+            discovery.join(timeout=2.0)
         for worker in workers:
             worker.join(timeout=1.0)
-        with self._lock:
-            self._workers.clear()
 
     @property
     def running(self) -> bool:
@@ -408,18 +445,18 @@ class LiveStreamManager:
             if self.wanted_name and descriptor.name != self.wanted_name:
                 continue                                   # 明确指定了流名：其余流一律不连
             with self._lock:
+                if self._stop_event.is_set():
+                    return
                 current = self._workers.get(descriptor.kind)
                 if current is not None and current.is_alive():
                     continue
-                buffer = self._buffers.get(descriptor.kind)
-                if buffer is None or buffer.descriptor != descriptor:
-                    buffer = StreamBuffer(descriptor, self.buffer_seconds)
-                    self._buffers[descriptor.kind] = buffer
+                buffer = StreamBuffer(descriptor, self.buffer_seconds, self.stale_timeout)
                 worker = _StreamWorker(info, buffer, self.buffer_seconds,
                                        self._inlet_factory, self._worker_stopped)
+                worker.start()
                 self._workers[descriptor.kind] = worker
+                self._buffers[descriptor.kind] = buffer
                 self._errors.pop(descriptor.kind, None)
-            worker.start()
             LOGGER.info("已连接 LSL 流：%s -> %s", descriptor.label, descriptor.kind)
 
     def _worker_stopped(self, kind: str, error: str | None) -> None:
@@ -427,6 +464,7 @@ class LiveStreamManager:
             if error:
                 self._errors[kind] = error
             self._workers.pop(kind, None)
+            self._buffers.pop(kind, None)
         if not self._stop_event.is_set():
             self._refresh_event.set()          # 立刻触发一轮重连
 

@@ -117,6 +117,17 @@ session = {status:'cancelled',phase:'cancelled',runs:[]};
 mount(); await settle();
 assert.equal(field('末段平均专注度'),'0.800');
 assert.equal(field('连续保持状态'),'达标');
+assert.equal(poll,undefined);
+assert.equal(events,undefined);
+''')
+
+    def test_short_protocol_does_not_subscribe_or_poll_for_training(self):
+        self.run_view(r'''
+session={status:'running',protocol:'short',phase:'qc',runs:[]};
+let requests=0;api.training=async()=>{requests++;return {data:{}};};
+mount();await settle();
+assert.ok(all(root).some(node=>node.textContent.includes('短协议不包含反馈训练阶段')));
+assert.equal(requests,0);assert.equal(poll,undefined);assert.equal(events,undefined);
 ''')
 
     def test_empty_last_segment_cannot_fall_back_to_session_average(self):

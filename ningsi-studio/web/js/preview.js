@@ -29,7 +29,11 @@ export function renderPreviewCard(ctx, host, options = {}) {
   let timer = null;
   let running = false;
   let busy = false;
+  let generation = 0;
+  let pendingRefresh = null;
   const selectedSource = () => options.getSource ? options.getSource() : null;
+  const relevant = payload => !options.getSource || payload?.source === selectedSource();
+  const current = version => !ctx.signal.aborted && version === generation;
 
   const stopPolling = () => {
     if (timer !== null) {
@@ -37,7 +41,11 @@ export function renderPreviewCard(ctx, host, options = {}) {
       timer = null;
     }
   };
-  ctx.onCleanup(stopPolling);
+  ctx.onCleanup(() => { generation++; stopPolling(); });
+
+  const startPolling = () => {
+    if (timer === null) timer = window.setInterval(refresh, POLL_MS);
+  };
 
   const paint = (payload) => {
     const selected = selectedSource();
@@ -47,7 +55,6 @@ export function renderPreviewCard(ctx, host, options = {}) {
       return;
     }
     const active = payload && payload.active === true;
-    const noSignal = !active || payload.no_signal === true;
     if (!active) {
       statusLine.textContent = payload && payload.note
         ? payload.note
@@ -60,7 +67,7 @@ export function renderPreviewCard(ctx, host, options = {}) {
     }
     const live = payload.live !== false && payload.no_signal !== true;
     statusLine.textContent = live
-      ? `正在接收信号：${payload.device || payload.source}（${payload.kind === 'sim' ? '仿真源，仅演示' : '实时设备'}）`
+      ? `正在接收信号：${payload.device || payload.source}（${payload.simulated || payload.kind === 'sim' ? '仿真源，仅演示' : '实时设备'}）`
       : `无信号：数据源 ${payload.source} 已连接但最近没有样本`
         + (payload.seconds_since_last === null || payload.seconds_since_last === undefined
           ? '' : `（最近一个样本 ${payload.seconds_since_last}s 前）`);
@@ -72,10 +79,17 @@ export function renderPreviewCard(ctx, host, options = {}) {
       payload.conditioning && payload.conditioning.spec ? `调理 ${payload.conditioning.spec}` : null,
     ].filter(Boolean).join('｜');
 
+    if (payload.window_error) {
+      statusLine.textContent = payload.window_error;
+      qualityLine.textContent = ''; waveHost.textContent = '';
+      return;
+    }
     const samples = list(payload.samples);
     if (!samples.length) {
       waveHost.textContent = '';
-      waveHost.append(el('p', { class: 'muted', text: '这一窗没有取到样本（设备可能刚接上，等一两秒）。' }));
+      if (Object.hasOwn(payload, 'samples')) {
+        waveHost.append(el('p', { class: 'muted', text: '这一窗没有取到样本。' }));
+      }
     } else {
       // 先清掉上一次的"没取到样本"提示或旧画布，否则会残留在新波形上方
       waveHost.textContent = '';
@@ -99,64 +113,95 @@ export function renderPreviewCard(ctx, host, options = {}) {
       qualityLine.textContent = `本窗质检：${label}`
         + `｜峰峰值 ${payload.peak_uv} µV｜均值标准差 ${payload.std_uv} µV`
         + (note ? `｜${note}` : '');
+      const blink = verdict.metrics?.artifact_control?.blink_control;
+      if (blink?.corrected_events > 0) qualityLine.textContent += `｜已局部校正 ${blink.corrected_events} 次眨眼`;
     } else {
       qualityLine.textContent = '';
     }
   };
 
+  const showState = payload => {
+    paint(payload);
+    running = payload?.active === true && relevant(payload);
+    if (running) startPolling(); else stopPolling();
+  };
+  const showError = message => {
+    paint({ active: false, note: message });
+  };
   const refresh = async () => {
+    if (busy || pendingRefresh?.generation === generation) return;
+    const request = { generation };
+    pendingRefresh = request;
     try {
       const response = running ? await api.devicePreviewWindow() : await api.devicePreview();
-      if (ctx.signal.aborted) return;
-      paint(response.data);
-      const active = pick(response.data, 'active', false) === true;
-      const real = pick(response.data, 'kind', null) === 'lsl';
-      if (active !== running || (active && real !== (actionHost.dataset.real === '1'))) {
-        running = active;
-        actionHost.dataset.real = real ? '1' : '0';
-        renderActions();
-      }
+      if (!current(request.generation)) return;
+      const wasRunning = running;
+      showState(response.data);
+      if (running !== wasRunning) renderActions();
     } catch (error) {
-      if (ctx.signal.aborted) return;
-      statusLine.textContent = `读取预览失败：${error && error.message ? error.message : error}`;
+      if (!current(request.generation)) return;
+      showError(`读取预览失败：${error.message || error}`);
+      startPolling();
+    } finally {
+      if (pendingRefresh === request) pendingRefresh = null;
     }
   };
 
+  // A lost POST/DELETE reply leaves the server state unknown. Read it back
+  // before changing the controls, and keep polling if that read also fails.
+  const reconcileFailure = async (version, message) => {
+    if (!current(version)) return;
+    showError(message);
+    try {
+      const { data } = await api.devicePreview();
+      if (!current(version)) return;
+      showState(data);
+      statusLine.textContent = message + ' ' + statusLine.textContent;
+    } catch {
+      if (current(version)) {
+        showError(message + ' 暂时无法确认后台状态，正在重试。');
+        startPolling();
+      }
+    }
+  };
+  const finishAction = version => {
+    busy = false;
+    if (ctx.signal.aborted) return;
+    renderActions();
+    if (version !== generation) refresh();
+  };
   const start = async (source) => {
     if (busy) return;
+    const version = ++generation;
+    stopPolling();
     busy = true; renderActions();
-    statusLine.textContent = '正在启动预览…';
+    showError('正在启动预览…');
     try {
       const response = await api.startDevicePreview(source);
-      if (ctx.signal.aborted) return;
-      running = true;
-      actionHost.dataset.real = pick(response.data, 'kind', null) === 'lsl' ? '1' : '0';
-      paint(response.data);
-      renderActions();
-      stopPolling();
-      timer = window.setInterval(refresh, POLL_MS);
+      if (!current(version)) return;
+      showState(response.data);
     } catch (error) {
-      // 没有实时信号时后端返回 409 与接入指引，直接展示给现场
-      statusLine.textContent = error && error.message ? error.message : String(error);
-      if (ctx.signal.aborted) return;
-      running = false;
+      await reconcileFailure(version, `启动请求未确认：${error.message || error}`);
     } finally {
-      busy = false;
-      if (!ctx.signal.aborted) renderActions();
+      finishAction(version);
     }
   };
 
   const stop = async () => {
+    if (busy) return;
+    const version = ++generation;
     stopPolling();
-    running = false;
+    busy = true;
+    renderActions();
+    showError('正在停止预览…');
     try {
       await api.stopDevicePreview();
+      if (current(version)) showState({ active: false, note: '预览已停止。' });
     } catch (error) {
-      // 停止失败不影响界面复原（后端是幂等的）
+      await reconcileFailure(version, `停止请求未确认：${error.message || error}`);
+    } finally {
+      finishAction(version);
     }
-    if (ctx.signal.aborted) return;
-    renderActions();
-    paint({ active: false, note: '预览已停止。' });
   };
 
   const renderActions = () => {
@@ -169,13 +214,13 @@ export function renderPreviewCard(ctx, host, options = {}) {
     }
     if (running) {
       actionHost.append(
-        button('停止预览', stop, { small: true }),
+        button('停止预览', stop, { small: true, disabled: busy }),
       );
       return;
     }
     actionHost.append(
-      button('开始预览（自动选检测到的设备）', () => start(null), { primary: true, small: true }),
-      button('预览仿真源（仅演示）', () => start('sim-bsense'), { small: true }),
+      button('开始预览（自动选检测到的设备）', () => start(null), { primary: true, small: true, disabled: busy }),
+      button('预览仿真源（仅演示）', () => start('sim-bsense'), { small: true, disabled: busy }),
     );
   };
 
@@ -191,7 +236,7 @@ export function renderPreviewCard(ctx, host, options = {}) {
   ]), { sub: '只读、不创建会话、不写入数据库' }));
   refresh();
   return { stopPolling, selectionChanged() {
-    stopPolling(); running = false;
+    generation++; stopPolling(); running = false;
     paint({ active: false, note: selectedSource() ? '设备已选择，请预览确认波形与信号质量。' : '请先选择设备。' });
     renderActions();
   } };

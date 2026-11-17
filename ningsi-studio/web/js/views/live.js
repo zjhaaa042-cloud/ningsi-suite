@@ -110,6 +110,7 @@ export function render(container, ctx) {
     scores: {},
     attentionModel: null,
     indicatorReason: '等待采集并建立个体基线',
+    blinkNote: '',
     signal: null,
     cells: [],
     legend: [],
@@ -324,6 +325,7 @@ export function render(container, ctx) {
     if (local.indicatorReason && !Object.values(local.scores).some(value => Number.isFinite(value))) {
       body.append(el('p', { class: 'muted', text: local.indicatorReason }));
     }
+    if (local.blinkNote) body.append(el('p', { class: 'muted', text: local.blinkNote }));
     body.append(el('p', { class: 'muted', text: '专注相关脑电指数表示相对个人基线的变化，不是专注概率。评分与预警阈值为工程设定，待验证。' }));
     body.append(metricBar('专注相关脑电指数', summaryStat('focus'), {
       threshold: pick(alerts, 'low_focus.threshold'),
@@ -641,6 +643,15 @@ export function render(container, ctx) {
           emg: '肌电干扰偏高，请放松面部和肩部。',
           muscle_burst: '检测到短时高频干扰，请放松下颌和额部。',
           ocular_transient: '检测到显著慢瞬态，请检查眼动和电极接触。',
+          blink_uncalibrated: '检测到疑似眨眼，本窗暂停更新；可在开始页完成个人眨眼校准。',
+          blink_boundary: '眨眼位于窗口边缘，数据不足以可信校正，本窗暂停更新。',
+          blink_dense: '眨眼密集或重叠，本窗暂停更新。',
+          blink_calibration_mismatch: '设备或校准配置已变化，请重新做个人眨眼校准。',
+          blink_shape_mismatch: '波形与个人眨眼模板不匹配，本窗暂停更新。',
+          blink_channel_mismatch: '两路幅度关系与个人眨眼校准不同，本窗暂停更新。',
+          blink_residual: '眨眼校正后仍有残留干扰，本窗暂停更新。',
+          blink_signal_fault: '原始信号存在接触或饱和异常，本窗暂停更新。',
+          contact_dropout: '原始信号疑似接触丢失或贴轨，本窗暂停更新。',
           electrode_step: '电极信号突跳，请保持静止并检查电极接触。',
           motion_reference_excursion: '同步加速度显示明显活动，本窗暂停评分。',
           motion_reference_unavailable: '所选动作参考缺失或未同步，请检查动作流名、单位及连接。',
@@ -650,6 +661,9 @@ export function render(container, ctx) {
         local.indicatorReason = Object.keys(payload.scores || {}).length ? ''
           : (payload.reasons?.length ? payload.reasons : [payload.indicator_reason || 'baseline_pending'])
             .map(reason => reasonLabels[reason] || `指标暂不可用：${reason}`).join(' ');
+        const blink = payload.quality?.metrics?.artifact_control?.blink_control;
+        local.blinkNote = blink?.corrected_events > 0
+          ? `本窗已局部校正 ${blink.corrected_events} 次可信眨眼；评分仍以校正后的质量检查为准。` : '';
         local.windowIndex = Number(payload.index ?? local.windowIndex);
         const scores = payload.scores || {};
         for (const item of INDICATORS) {

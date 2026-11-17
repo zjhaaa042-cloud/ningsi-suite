@@ -295,6 +295,19 @@ class SessionRuntime:
                 self.source.engine.research_profile = profile
             except ValueError as exc:
                 self.human_model_error = str(exc)
+        self.blink_calibration = (json.loads(self.session["blink_calibration"] or "null")
+                                  if "blink_calibration" in self.session.keys() else None)
+        if self.blink_calibration:
+            from ningsi_studio.core.blink_control import verify_binding
+            if self.blink_calibration.get("participant") != self.subject["public_id"]:
+                raise ValueError("眨眼校准不属于当前参与者")
+            verify_binding(self.blink_calibration, self.source.engine)
+            self.source.engine.blink_binding = self.blink_calibration
+            blink_buffer = self.source.engine._manager.buffer("eeg")
+            if blink_buffer is None:
+                raise ValueError("设备已断开，请重新连接并校准")
+            self.source.engine._blink_buffer_id = blink_buffer.buffer_id
+            self.source.engine._blink_connection_generation = blink_buffer.connection_generation
 
     @property
     def scale(self) -> float:
@@ -1033,8 +1046,10 @@ class SessionRuntime:
         with store.read_only(self.db_path) as conn:
             observations = state_checkins.report_data(conn, self.session["id"], self.diagnostic_windows)
         if self.eeg_calibration:
+            basis = ("按 BSense-R 产品手册配置" if self.eeg_calibration.get("origin") == "manufacturer_manual"
+                     else "本次由操作者确认")
             observations["summary_lines"].append(
-                f"本次由操作者确认 EEG 源单位为 {self.eeg_calibration['source_unit']}，"
+                f"{basis} EEG 源单位为 {self.eeg_calibration['source_unit']}，"
                 f"换算倍率为 {self.eeg_calibration['scale_to_uv']:g} µV/源单位。")
         band_z = {}
         for step in reversed(monitor["steps"]):
@@ -1053,6 +1068,7 @@ class SessionRuntime:
             extras={
                 "state_observations": observations,
                 "eeg_calibration": self.eeg_calibration,
+                "blink_calibration": getattr(self, "blink_calibration", None),
                 "attention_model": {"model_id": self.human_model.get("model_id") if self.human_model else None,
                                     "latest": self.latest_model_prediction, "error": self.human_model_error,
                                     "scope": "探针相关的任务专注/内部走神研究模型；其他阶段尚未独立验证"},

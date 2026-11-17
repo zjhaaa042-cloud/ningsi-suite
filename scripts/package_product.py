@@ -34,7 +34,8 @@ PUBLIC_JSON = {
 }
 REQUIRED_ASSETS = (
     "_internal/web/index.html", "_internal/web/js/main.js", "_internal/web/js/views/start.js",
-    "_internal/web/js/views/device-profile.js", "_internal/web/js/views/session-preflight.js",
+    "_internal/web/js/views/session-preflight.js",
+    "_internal/web/js/views/blink-calibration.js",
     "_internal/web/js/views/state-heatmap.js",
     "_internal/web/js/training-metrics.js",
     "_internal/web/css/workspace.css", "_internal/ningsi_studio/db/schema.sql",
@@ -198,12 +199,13 @@ Studio {versions['studio']} / Capture {versions['capture']}
 一、评估与训练
 1. 双击 01-Start-Studio.bat，程序启动本机服务并打开浏览器。端口以控制台地址为准。
 2. 主页面选择评估方案、参与者与 EEG 数据源。首次接入先在厂商软件开启 EEG 推流。
-3. 展开“设置与管理 → 设备连接”，核对来源并填写厂家、型号、电极、参考与单位依据。
-   档案保存为操作员声明，始终待现场核验；同名流的档案不能证明当前设备已经合规。
-   使用 BSense-R 时可查看手册参考，明确点选后仅补充空白资料草稿，核对后另行保存。
+3. 展开“设置与管理 → 设备连接”，选择 EEG 来源，直接检查波形与信号质量。
+   BSense-R 按手册内置 2 通道、250 Hz、µV 和倍率 1，不再重复填写档案或设备参数。
    接入步骤与资料边界见 BSENSE_R_DEVICE_GUIDE.md，原厂 PDF 不随包分发。
 4. 开始前查看“本次评分与模型适配”。基础指数与真人模型分别解释；质量和基线需采集后检查。
-   设备未声明单位时按本次配置明确确认；采用档案单位前仍需核对当前硬件与软件设置。
+   BSense-R 使用内置手册配置；其他设备单位缺失时沿用原有单位设置。
+   两路额头 EEG 可展开“减少眨眼干扰（双通道个人校准）”，按提示记录15–20次自然短眨眼，
+   点“结束并使用校准”后开始评估。重新佩戴、换人或重连后需重新校准，详见 BLINK_CONTROL.md。
 5. 跟随阶段引导完成任务与训练。缺失或不合格信号不填成低专注，调整后按提示继续或重采。
 6. 完成后查看评估报告、下载本次产物，在“历史与趋势”回顾可比较的同人记录。
 7. 无设备时仅使用“运行模拟演示”；模拟数据始终单独标记，不代表真人准确率。
@@ -289,6 +291,7 @@ def validate_inputs(args):
         "FIELD_ACCEPTANCE_CHECKLIST.txt": ROOT / "docs/FIELD_ACCEPTANCE_CHECKLIST.txt",
         "HUMAN_MODEL_TRAINING.md": ROOT / "ningsi-studio/docs/HUMAN_MODEL_TRAINING.md",
         "BSENSE_R_DEVICE_GUIDE.md": ROOT / "docs/BSENSE_R_DEVICE_GUIDE.md",
+        "BLINK_CONTROL.md": ROOT / "docs/BLINK_CONTROL.md",
         "LICENSE.txt": ROOT / "LICENSE",
     }
     for path in required_docs.values():

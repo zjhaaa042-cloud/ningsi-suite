@@ -1,163 +1,102 @@
-"""Manual references stay readable while declaration seeds remain explicit drafts."""
+"""Device connections use documented parameters without a second data-entry workflow."""
 import json
 from pathlib import Path
 import shutil
 import subprocess
 import unittest
 
-from ningsi_studio.domain.device_guides import device_guides
 from .test_readiness_frontend import DOM
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@unittest.skipUnless(shutil.which("node"), "Node required for device-guide DOM tests")
-class DeviceGuidesFrontendTests(unittest.TestCase):
+@unittest.skipUnless(shutil.which("node"), "Node required for device connection DOM tests")
+class DeviceConnectionsFrontendTests(unittest.TestCase):
     def node(self, body):
         program = DOM + r'''
 import assert from 'node:assert/strict';
-ClassList.prototype.add=function(...names){names.forEach(name=>this.toggle(name,true));};
-const {createDeviceProfile}=await import(PROFILE_URI);
-const guides=GUIDES_JSON;
-const at=(profile,name)=>id(profile.node,'device-profile-'+name);
-const apply=profile=>all(profile.node).find(node=>node.classList?.contains('device-guide-apply'));
-const feedback=profile=>all(profile.node).find(node=>node.classList?.contains('device-guide-feedback'));
-const record=(profile={},saved=false)=>({data:{profile,saved,missing_fields:[{key:'reference',label:'参考电极'},
-  {key:'source_unit',label:'源数值单位'}]}});
-const ctxFor=(config={device_guides:guides})=>{
-  const ctx=makeCtx();ctx.store.state.config=config;
-  const listeners=new Set();ctx.store.subscribe=(keys,fn)=>{assert.equal(keys,'config');listeners.add(fn);return ()=>listeners.delete(fn);};
-  ctx.config=next=>{ctx.store.state.config=next;for(const fn of [...listeners])fn(ctx.store.state,'config');};
-  return ctx;
-};
-const real=[{key:'lsl:A',device:'BioMulti Lite EEG',real:true,is_eeg:true},
-  {key:'lsl:B',device:'Another EEG',real:true,is_eeg:true}];
-let writes=[];
-api.saveDeviceProfile=async body=>{writes.push(body);return record(body.profile,true);};
+const {devices}=await import(PANELS_URI);
+const {createSessionPreflight}=await import(PREFLIGHT_URI);
+api.deviceProfile=async()=>{throw Error('Device connections no longer read operator profiles');};
+api.saveDeviceProfile=async()=>{throw Error('Device connections must not write operator profiles');};
+api.devicePreview=async()=>({data:{active:false,note:'未开始预览：当前没有脑机信号'}});
+const configured={id:'bsense-r',model:'BSense-R',channels:2,srate:250,source_unit:'uV',scale_to_uv:1};
+const source={key:'lsl:BioMulti Lite EEG-Review',device:'BioMulti Lite EEG-Review',
+  kind:'lsl',real:true,is_eeg:true,srate:250,channels:2,note:'EEG',device_configuration:configured};
+const response=sources=>({data:{devices:[],sources,active_sessions:[]}});
+const parameter=root=>all(root).find(node=>node.classList?.contains('device-parameters'));
 ''' + body
         for name, path in {
-            "API_URI": "web/js/api.js", "PROFILE_URI": "web/js/views/device-profile.js",
+            "API_URI": "web/js/api.js", "PANELS_URI": "web/js/views/panels.js",
+            "PREFLIGHT_URI": "web/js/views/session-preflight.js",
         }.items():
             program = program.replace(name, json.dumps((ROOT / path).as_uri()))
-        program = program.replace("GUIDES_JSON", json.dumps(device_guides(), ensure_ascii=False))
         result = subprocess.run(["node", "--input-type=module", "-e", program],
                                 capture_output=True, text=True, encoding="utf-8", timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_readable_without_a_source_and_old_or_late_config_is_supported(self):
+    def test_connections_show_waveform_and_one_parameter_line_without_profile_workflow(self):
         self.node(r'''
-api.deviceProfile=async()=>{throw Error('No source must be loaded automatically');};
-const ctx=ctxFor({});const profile=createDeviceProfile(ctx);
-assert.equal(apply(profile),undefined);
-ctx.config({device_guides:guides});
-assert.ok(text(profile.node).includes('BSense-R 手册参考'));
-assert.ok(text(profile.node).includes('2 通道 · 250 Hz · cf_float32'));
-assert.ok(text(profile.node).includes('不自动证明当前 LSL'));
-assert.ok(text(profile.node).includes('Filters'));
-assert.ok(text(profile.node).includes('不自动保存'));
-assert.ok(text(profile.node).includes('手册未说明参考/地'));
-assert.ok(text(profile.node).includes(guides[0].source.sha256));
-assert.ok(text(profile.node).includes('PDF 第 23 页'));
-assert.equal(apply(profile).disabled,true);
-await click(apply(profile));assert.equal(at(profile,'model').value,'');assert.equal(writes.length,0);
-ctx.config({});assert.equal(apply(profile),undefined);
+api.deviceStatus=async()=>response([source]);
+const ctx=makeCtx();const root=new StubNode('main');await devices.render(root,ctx);await flush();
+assert.equal(parameter(root).hidden,false);
+assert.equal(text(parameter(root)),'BSense-R · EEG 2 通道 · 250 Hz · µV');
+assert.ok(text(root).includes('设备实时预览'));assert.ok(text(root).includes('可用数据源'));
+assert.ok(byText(root,'开始预览（自动选检测到的设备）'));
+for(const label of ['设备档案','保存设备档案','待补资料','填写或修改设备资料','手册参考','补充草稿'])
+  assert.ok(!text(root).includes(label),label+' is absent');
+assert.ok(!all(root).some(node=>['FIELDSET','TEXTAREA','INPUT'].includes(node.tagName)));
+const headings=all(root).filter(node=>node.tagName==='H3').map(text);
+assert.ok(headings.indexOf('设备实时预览')<headings.indexOf('可用数据源'),'preview precedes source diagnostics');
+assert.ok(!text(root).includes('当前没有正在运行的会话占用信号源'),'no empty health card');
 ctx.cleanups.forEach(fn=>fn());
 ''')
 
-    def test_seed_is_explicit_whitelisted_and_requires_separate_save(self):
+    def test_unknown_simulated_or_mismatched_sources_are_not_labelled_as_documented_bsense(self):
         self.node(r'''
-guides[0].declaration_seed={...guides[0].declaration_seed,manufacturer:'Invented manufacturer',
-  electrodes:'Fp1,Fp2',reference:'A1',source_unit:'uV',scale_to_uv:1,srate:250,unit_basis:'Unverified'};
-api.deviceProfile=async()=>record();
-const ctx=ctxFor();const profile=createDeviceProfile(ctx);profile.setSources(real);await flush();
-assert.equal(at(profile,'model').value,'','a matching-looking stream never applies a guide');
-assert.equal(apply(profile).disabled,false);assert.equal(writes.length,0);
-await click(apply(profile));
-for(const key of ['model','document_reference','notes'])assert.equal(at(profile,key).value,guides[0].declaration_seed[key]);
-for(const key of ['manufacturer','electrodes','reference','source_unit','scale_to_uv','srate','unit_basis'])
-  assert.equal(at(profile,key).value,'',key+' remains unknown');
-assert.ok(text(feedback(profile)).includes('尚未保存'));
-assert.ok(text(profile.node).includes('尚未保存此设备的档案'));
-assert.ok(text(profile.node).includes('待补资料：参考电极、源数值单位'));
-assert.equal(writes.length,0);
-await click(byText(profile.node,'保存设备档案'));
-assert.equal(writes.length,1);assert.equal(writes[0].device,'lsl:A');
-assert.equal(writes[0].profile.source_unit,'');assert.equal(writes[0].profile.srate,null);
-assert.equal(writes[0].profile.reference,'');assert.equal(text(feedback(profile)),'');
-assert.ok(text(profile.node).includes('档案已保存 · 资料待核验'));
+const unconfigured={...source,device_configuration:null};
+for(const sources of [[],[{...unconfigured,simulated:true}],[{...unconfigured,srate:256}],
+  [{...unconfigured,channels:4}],[{...unconfigured,nominal_srate:0}],
+  [{...unconfigured,declared_units:['mV','mV']}],
+  [{...unconfigured,device:'Other EEG',key:'lsl:Other EEG'}]]){
+  api.deviceStatus=async()=>response(sources);
+  const ctx=makeCtx();const root=new StubNode('main');await devices.render(root,ctx);await flush();
+  assert.equal(parameter(root).hidden,true);assert.equal(text(parameter(root)),'');
+  assert.ok(text(root).includes('设备实时预览'));assert.ok(!text(root).includes('保存设备档案'));
+  ctx.cleanups.forEach(fn=>fn());
+}
+''')
+
+    def test_bsense_name_uses_the_same_backend_configuration_without_client_name_rules(self):
+        self.node(r'''
+api.deviceStatus=async()=>response([{...source,device:'BSense-R EEG-Review',key:'lsl:BSense-R EEG-Review'}]);
+const ctx=makeCtx();const root=new StubNode('main');await devices.render(root,ctx);await flush();
+assert.equal(parameter(root).hidden,false);
+assert.equal(text(parameter(root)),'BSense-R · EEG 2 通道 · 250 Hz · µV');
 ctx.cleanups.forEach(fn=>fn());
 ''')
 
-    def test_saved_measurements_and_unsaved_edits_survive_seed_and_config_refresh(self):
+    def test_connection_failure_does_not_resurrect_registration_or_fake_parameters(self):
         self.node(r'''
-const saved={manufacturer:'Actual manufacturer',model:'Actual BSense-R setup',electrodes:'Actual EEG placement',
-  reference:'Measured reference',srate:250,source_unit:'mV',scale_to_uv:1000,unit_basis:'Current firmware calibration',
-  document_reference:'Original source evidence',notes:'Original physical setup'};
-api.deviceProfile=async()=>record(saved,true);
-const ctx=ctxFor();const profile=createDeviceProfile(ctx);profile.setSources(real);await flush();
-at(profile,'notes').value='Unsaved contact adjustment';
-at(profile,'document_reference').value='Unsaved independent calibration';
-const snapshot=Object.fromEntries(Object.keys(saved).map(key=>[key,at(profile,key).value]));
-ctx.config({device_guides:JSON.parse(JSON.stringify(guides))});
-await click(apply(profile));
-assert.deepEqual(Object.fromEntries(Object.keys(saved).map(key=>[key,at(profile,key).value])),snapshot);
-assert.equal(writes.length,0);assert.ok(text(feedback(profile)).includes('已有填写已保留'));
-at(profile,'document_reference').value='';await click(apply(profile));
-assert.equal(at(profile,'document_reference').value,guides[0].declaration_seed.document_reference);
-assert.equal(at(profile,'notes').value,'Unsaved contact adjustment');
-assert.equal(at(profile,'model').value,'Actual BSense-R setup');
-assert.ok(text(feedback(profile)).includes('尚未保存'));
+api.deviceStatus=async()=>{throw Object.assign(Error('unavailable'),{status:401});};
+const ctx=makeCtx();const root=new StubNode('main');await devices.render(root,ctx);await flush();
+assert.equal(parameter(root).hidden,true);assert.ok(text(root).includes('没有权限读取设备状态'));
+assert.ok(!text(root).includes('设备档案'));assert.ok(!text(root).includes('待补资料'));
 ctx.cleanups.forEach(fn=>fn());
 ''')
 
-    def test_loading_failure_and_simulation_cannot_apply_a_draft(self):
+    def test_preflight_ignores_old_profile_actions_but_keeps_real_unit_and_model_gates(self):
         self.node(r'''
-let resolveLoad;api.deviceProfile=()=>new Promise(resolve=>{resolveLoad=resolve;});
-const ctx=ctxFor();const profile=createDeviceProfile(ctx);profile.setSources(real);
-assert.equal(apply(profile).disabled,true);await click(apply(profile));assert.equal(at(profile,'model').value,'');
-resolveLoad(record());await flush();assert.equal(apply(profile).disabled,false);
-profile.setSources([{...real[0],simulated:true}]);
-assert.equal(apply(profile).disabled,true);await click(apply(profile));assert.equal(at(profile,'model').value,'');
-api.deviceProfile=async()=>{throw Error('Profile read unavailable');};
-at(profile,'key').value='lsl:B';await click(byText(profile.node,'读取该设备档案'));
-assert.equal(apply(profile).disabled,true);await click(apply(profile));assert.equal(at(profile,'model').value,'');
-assert.ok(text(profile.node).includes('设备档案读取未完成'));assert.equal(writes.length,0);
-api.deviceProfile=async()=>record();
-at(profile,'key').value='sim-bsense';await click(byText(profile.node,'读取该设备档案'));
-assert.equal(apply(profile).disabled,true);await click(apply(profile));assert.equal(writes.length,0);
-assert.equal(at(profile,'model').value,'');ctx.cleanups.forEach(fn=>fn());
-''')
-
-    def test_source_changes_clear_draft_messages_and_ignore_stale_loads(self):
-        self.node(r'''
-const pending={};api.deviceProfile=key=>new Promise(resolve=>{pending[key]=resolve;});
-const ctx=ctxFor();const profile=createDeviceProfile(ctx);profile.setSources(real);
-at(profile,'source').value='lsl:B';const loadB=at(profile,'source').onchange();
-pending['lsl:B'](record({model:'Actual B model'},true));await loadB;
-await click(apply(profile));assert.ok(text(feedback(profile)).includes('尚未保存'));
-assert.equal(at(profile,'model').value,'Actual B model');
-pending['lsl:A'](record({model:'Stale A model'},true));await flush();
-assert.equal(at(profile,'model').value,'Actual B model','late load cannot replace the chosen source');
-at(profile,'source').value='lsl:A';const loadA=at(profile,'source').onchange();
-assert.equal(text(feedback(profile)),'');assert.equal(apply(profile).disabled,true);
-pending['lsl:A'](record());await loadA;
-assert.equal(at(profile,'notes').value,'','seeded notes do not leak to another source');
-assert.equal(at(profile,'document_reference').value,'');assert.equal(writes.length,0);
-ctx.cleanups.forEach(fn=>fn());
-''')
-
-    def test_saving_and_disposal_block_repeat_seed_actions(self):
-        self.node(r'''
-api.deviceProfile=async()=>record();
-let finishSave;api.saveDeviceProfile=body=>{writes.push(body);return new Promise(resolve=>{finishSave=resolve;});};
-const ctx=ctxFor();const profile=createDeviceProfile(ctx);profile.setSources(real);await flush();
-await click(apply(profile));const pendingSave=click(byText(profile.node,'保存设备档案'));
-assert.equal(apply(profile).disabled,true);
-at(profile,'model').value='';await click(apply(profile));assert.equal(at(profile,'model').value,'');
-finishSave(record(writes[0].profile,true));await pendingSave;
-assert.equal(at(profile,'model').value,'BSense-R');assert.equal(writes.length,1);
-ctx.cleanups.forEach(fn=>fn());at(profile,'model').value='';await click(apply(profile));
-assert.equal(at(profile,'model').value,'');
-const before=profile.node.children;ctx.config({device_guides:[]});
-assert.equal(profile.node.children,before,'a disposed view no longer receives configuration callbacks');
+api.sessionPreflight=async body=>({data:{ready:body.device==='lsl:documented',
+  device_profile:{saved:true,profile:{source_unit:'uV',scale_to_uv:1}},
+  scoring:{attention_model:{status:'incompatible',message:'模型配置不匹配'}},
+  checks:[{key:'device_profile',status:'warning',label:'设备资料',message:'请填写设备档案'},
+    {key:'units',status:body.device==='lsl:documented'?'pass':'fail',label:'单位与标定',message:'单位不一致'}]}});
+const ctx=makeCtx();const check=createSessionPreflight(ctx);
+await check.refresh({device:'lsl:documented'},{immediate:true});assert.equal(check.ready,true);
+assert.ok(text(check.node).includes('模型配置不匹配'));
+for(const label of ['采用档案单位','设备连接与档案','请填写设备档案'])assert.ok(!text(check.node).includes(label));
+assert.ok(all(check.node).some(node=>node.tagName==='A'&&text(node)==='设备连接'));
+await check.refresh({device:'lsl:other'},{immediate:true});assert.equal(check.ready,false);
+assert.ok(text(check.node).includes('单位不一致'));ctx.cleanups.forEach(fn=>fn());
 ''')

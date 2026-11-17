@@ -214,6 +214,38 @@ class SessionCancelTests(StudioTestCase):
 
     port_base = 18926
 
+    def test_history_uses_actual_files_and_preserves_partial_and_older_training(self):
+        from ningsi_studio.db import repository as repo, sqlite_store as store
+
+        participant = self.create_subject()['public_id']
+        with store.connect(self.db_path) as conn:
+            subject = repo.find_subject(conn, participant)
+            row = repo.create_session(conn, subject['id'], protocol='effective_time')
+            uuid = row['uuid']
+            repo.update_session(conn, uuid, status='failed', phase='failed')
+            repo.add_training_segment(conn, row['id'], 0, samples=[[0, .7]])
+            path = self.data_dir / f'{uuid}-partial.txt'
+            path.write_text('saved partial result', encoding='utf-8')
+            repo.add_artifact(conn, row['id'], 'history', str(path))
+            repo.add_artifact(conn, row['id'], 'report_json', str(self.data_dir / 'missing.json'))
+            old = repo.create_session(conn, subject['id'], protocol='full')
+            repo.update_session(conn, old['uuid'], status='done', phase='done')
+            run = repo.start_run(conn, old['id'], 'training')
+            repo.finish_run(conn, run, payload={'training': {'mean_focus': .7}})
+            short = repo.create_session(conn, subject['id'], protocol='short')
+        records = self.json_body(self.get(f'/api/sessions?participant={participant}'))['items']
+        by_id = {item['uuid']: item for item in records}
+        self.assertTrue(by_id[uuid]['has_artifacts'])
+        self.assertFalse(by_id[uuid]['has_report'])
+        self.assertTrue(by_id[uuid]['has_training'])
+        self.assertTrue(by_id[old['uuid']]['has_training'])
+        self.assertFalse(by_id[short['uuid']]['has_training'])
+        self.assert_status(self.get(f'/api/sessions/{uuid}/export.zip'), 200)
+        self.assertEqual(len(self.json_body(self.get(f'/api/sessions/{uuid}/training'))['segments']), 1)
+        path.unlink()
+        records = self.json_body(self.get(f'/api/sessions?participant={participant}'))['items']
+        self.assertFalse(next(item for item in records if item['uuid'] == uuid)['has_artifacts'])
+
     def test_cancel_running_session_then_second_cancel_conflicts(self) -> None:
         session = self.create_session("m31", time_scale=1.0)
         uuid = session["uuid"]
@@ -252,6 +284,14 @@ class SessionCancelTests(StudioTestCase):
                                 "按被试过滤应返回 200")
         self.assertEqual([item["phase"] for item in listed["items"]], ["cancelled"],
                          "列表页同一行也应给 cancelled")
+        item = listed["items"][0]
+        self.assertFalse(item["has_artifacts"])
+        self.assertFalse(item["has_report"])
+        self.assertFalse(item["has_training"])
+        self.assert_error(self.get(f"/api/sessions/{uuid}/export.zip"), 404)
+        partial = self.json_body(self.get(f"/api/sessions/{uuid}/report"))
+        self.assertTrue(partial["partial"])
+        self.assertEqual(partial["status"], "cancelled")
 
     def test_failed_session_phase_is_failed(self) -> None:
         """运行线程异常时 `phase` 写 failed（与 status 同一个词），不是 done，也不是 error。"""

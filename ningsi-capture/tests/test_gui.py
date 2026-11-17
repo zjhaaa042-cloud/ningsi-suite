@@ -8,7 +8,7 @@ import tkinter as tk
 import unittest
 from unittest.mock import Mock, patch
 
-from .test_support import FakeClock
+from .test_support import FakeClock, destroy_test_root
 from ningsi_capture.acquisition import simulation_source, synthetic_samples
 from ningsi_capture.gui import AUTO_REC, AUTO_UNIT, CaptureApp
 from ningsi_capture.live_quality import CaptureQuality, QualityMonitor
@@ -23,6 +23,23 @@ class GuiLayoutTests(unittest.TestCase):
         # Dispose Tk cycles on their owning thread before recorder/quality
         # workers in later tests can trigger Python's cyclic collector.
         gc.collect()
+
+    def test_destroy_cancels_poll_and_does_not_restart_callbacks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.withdraw()
+            app = CaptureApp(root, directory)
+            root.update_idletasks()
+            poll_job = app.poll_job
+            self.assertIn(poll_job, root.tk.call("after", "info"))
+            destroy_test_root(root)
+            self.assertTrue(app.closed)
+            self.assertIsNone(app.poll_job)
+            self.assertNotIn(poll_job, root.tk.call("after", "info"))
+            with patch.object(app, "_poll_once") as poll_once:
+                app.poll()
+                poll_once.assert_not_called()
+            self.assertIsNone(app.poll_job)
 
     def test_long_operator_diagnostics_keep_phase_clock_and_stop_visible(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -52,7 +69,7 @@ class GuiLayoutTests(unittest.TestCase):
                                              root.winfo_rooty() + height)
                     self.assertLessEqual(phase.winfo_rooty() + phase.winfo_height(), app.export_button.winfo_rooty())
             finally:
-                root.destroy()
+                destroy_test_root(root)
 
     def test_short_selection_reaches_recording_and_full_is_the_default(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -76,7 +93,7 @@ class GuiLayoutTests(unittest.TestCase):
                 if app.store:
                     app.store.close("aborted")
                 root.update_idletasks()
-                root.destroy()
+                destroy_test_root(root)
 
     def test_operator_preview_reports_live_quality_then_clears_on_disconnect(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -118,7 +135,7 @@ class GuiLayoutTests(unittest.TestCase):
                 app.quality_monitor.join(timeout=3)
                 app.store.close("aborted")
                 root.update_idletasks()
-                root.destroy()
+                destroy_test_root(root)
 
     def test_selected_biomulti_uses_inferred_unit_and_packet_clock_without_native_rec(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -154,7 +171,7 @@ class GuiLayoutTests(unittest.TestCase):
             finally:
                 if app.store:
                     app.store.close("aborted")
-                root.destroy()
+                destroy_test_root(root)
 
     def test_operator_can_recheck_a_flat_lsl_signal_before_task_starts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -175,7 +192,7 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertEqual(app.store.sample_count, len(times))
             finally:
                 app.store.close("aborted")
-                root.destroy()
+                destroy_test_root(root)
 
     def test_external_abort_clears_stale_stage_without_another_runner_tick(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -201,7 +218,7 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertFalse(app.store.closed)
             finally:
                 app.store.close("aborted")
-                root.destroy()
+                destroy_test_root(root)
 
     def test_both_windows_time_every_phase_including_untimed_practice(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -257,7 +274,7 @@ class GuiLayoutTests(unittest.TestCase):
             finally:
                 app.close_tasks(force=True)
                 app.store.close("aborted")
-                root.destroy()
+                destroy_test_root(root)
 
     def test_cancel_close_keeps_task_running_and_confirmed_close_is_explicit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -282,7 +299,7 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertIn("任务已中止", app.phase_text.get())
             finally:
                 app.store.close("aborted")
-                root.destroy()
+                destroy_test_root(root)
 
     def test_failed_timing_precheck_cannot_be_bypassed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -302,7 +319,7 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertIsNone(app.task_window)
             finally:
                 app.store.close("aborted")
-                root.destroy()
+                destroy_test_root(root)
 
     def test_fresh_pilot_records_tasks_despite_unit_and_packet_qc_reasons(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -330,7 +347,7 @@ class GuiLayoutTests(unittest.TestCase):
             finally:
                 app.close_tasks(force=True)
                 app.store.close("aborted")
-                root.destroy()
+                destroy_test_root(root)
 
     def test_formal_paired_start_requires_same_active_rec_but_accepts_deferred_units(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -356,7 +373,7 @@ class GuiLayoutTests(unittest.TestCase):
             finally:
                 app.close_tasks(force=True)
                 app.store.close("aborted")
-                root.destroy()
+                destroy_test_root(root)
 
     def test_callback_failure_stops_capture_and_saves_failed_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -382,7 +399,7 @@ class GuiLayoutTests(unittest.TestCase):
                     connection.close()
             finally:
                 root.update_idletasks()
-                root.destroy()
+                destroy_test_root(root)
 
     def test_callback_error_is_visible_and_does_not_escape_gui(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -394,7 +411,7 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertIn("程序异常", app.status.get())
             finally:
                 root.update_idletasks()
-                root.destroy()
+                destroy_test_root(root)
 
     def test_stop_controls_fit_at_minimum_supported_height(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -408,7 +425,7 @@ class GuiLayoutTests(unittest.TestCase):
                     self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), bottom)
             finally:
                 root.update_idletasks()
-                root.destroy()
+                destroy_test_root(root)
 
 
 if __name__ == "__main__":

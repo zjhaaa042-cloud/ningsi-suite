@@ -48,6 +48,8 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE sessions ADD COLUMN protocol TEXT NOT NULL DEFAULT 'full'")
     if "eeg_calibration" not in columns:
         conn.execute("ALTER TABLE sessions ADD COLUMN eeg_calibration TEXT")
+    if "blink_calibration" not in columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN blink_calibration TEXT")
 
 
 def initialize(path) -> Path:

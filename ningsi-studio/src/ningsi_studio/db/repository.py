@@ -105,17 +105,19 @@ def subject_session_counts(conn, subject_id: int) -> dict:
 
 def create_session(conn, subject_id: int, *, label=None, device="sim-bsense", srate=250.0,
                    channels=1, source="sim-bsense", time_scale=1.0,
-                   training_mode="quick", engine_versions=None, protocol="full", eeg_calibration=None) -> dict:
+                   training_mode="quick", engine_versions=None, protocol="full", eeg_calibration=None,
+                   blink_calibration=None) -> dict:
     session_uuid = uuid.uuid4().hex
     stamp = utcnow()
     cursor = conn.execute(
         """INSERT INTO sessions (uuid, subject_id, label, device, srate, channels, source,
                                  time_scale, training_mode, protocol, status, phase, progress,
-                                 engine_versions, started_at, created_at, eeg_calibration)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'qc', 0.0, ?, ?, ?, ?)""",
+                                 engine_versions, started_at, created_at, eeg_calibration, blink_calibration)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'qc', 0.0, ?, ?, ?, ?, ?)""",
         (session_uuid, subject_id, label, device, srate, channels, source,
          float(time_scale), training_mode, str(protocol or "full"), _dump(engine_versions),
-         stamp, stamp, _dump(eeg_calibration) if eeg_calibration is not None else None),
+         stamp, stamp, _dump(eeg_calibration) if eeg_calibration is not None else None,
+         _dump(blink_calibration) if blink_calibration is not None else None),
     )
     return get_session_pk(conn, int(cursor.lastrowid))
 
@@ -148,7 +150,14 @@ def list_sessions(conn, *, public_id=None, status=None, limit=50, offset=0) -> t
         f"SELECT COUNT(*) AS n FROM sessions {joins} {clause}", params
     ).fetchone()["n"]
     rows = conn.execute(
-        f"""SELECT sessions.*, s.public_id AS public_id, s.label AS subject_label
+        f"""SELECT sessions.*, s.public_id AS public_id, s.label AS subject_label,
+                   (SELECT json_group_object(kind, path) FROM artifacts
+                    WHERE session_id=sessions.id) AS artifact_paths,
+                   (EXISTS(SELECT 1 FROM training_segments WHERE session_id=sessions.id)
+                    OR EXISTS(SELECT 1 FROM runs WHERE session_id=sessions.id
+                              AND phase='training' AND status='done' AND json_valid(payload)
+                              AND json_type(payload, '$.training')='object'
+                              AND json_extract(payload, '$.training')!=json_object())) AS has_saved_training
             FROM sessions {joins} {clause}
             ORDER BY sessions.id DESC LIMIT ? OFFSET ?""",
         params + [limit, offset],
@@ -428,7 +437,8 @@ def session_points(conn, public_id=None, limit=500) -> list:
                 WHERE {' AND '.join(where)} ORDER BY sessions.id DESC LIMIT ?
             )
             SELECT sessions.uuid, sessions.created_at, sessions.device, sessions.srate,
-                   sessions.channels, s.public_id AS public_id,
+                   sessions.channels, sessions.protocol, sessions.training_mode,
+                   sessions.source, sessions.time_scale, s.public_id AS public_id,
                    m.name AS metric, m.mean AS value
             FROM selected sessions JOIN subjects s ON s.id = sessions.subject_id
             LEFT JOIN metrics m ON m.session_id = sessions.id AND m.kind = 'indicator_summary'
@@ -445,6 +455,10 @@ def session_points(conn, public_id=None, limit=500) -> list:
             "device": row["device"],
             "srate": row["srate"],
             "channels": row["channels"],
+            "protocol": row["protocol"],
+            "training_mode": row["training_mode"],
+            "source": row["source"],
+            "time_scale": row["time_scale"],
             "indicators": {},
         })
         if row["metric"]:
@@ -497,6 +511,10 @@ def all_sessions_for_ledger(conn) -> list:
             "device": row["device"],
             "srate": row["srate"],
             "channels": row["channels"],
+            "protocol": row["protocol"],
+            "training_mode": row["training_mode"],
+            "source": row["source"],
+            "time_scale": row["time_scale"],
             "indicators": {name: value["mean"] for name, value in summary.items()},
             "quality": {"valid_ratio": valid_ratio,
                         "passed": bool((valid_ratio or 0) >= config.ASSESS["min_valid_ratio"]

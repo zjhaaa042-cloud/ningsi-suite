@@ -20,6 +20,11 @@ from ningsi_studio.domain.results import training_indicator_overview
 from ningsi_studio.domain.training import StudioTraining
 
 SPEC = EFFECTIVE_POLICY["spec"]
+# Wake before the previous feedback expires, leaving time for the next analysis
+# and ordinary scheduler jitter. This changes no quality or support threshold.
+# Accelerated fixtures cap the lead at a quarter of one protocol update.
+SCHEDULING_MARGIN_WALL_SEC = .05
+SCHEDULING_MARGIN_STEP_FRACTION = .25
 
 
 def progress(*, target, valid, elapsed, maximum, paused=False, reason=None, eligible=True, scale=1):
@@ -142,11 +147,18 @@ def collect_baseline(r, key, run_id):
 
 
 def training_round(r, trainer, base, index, run_id):
-    begin, gate, smooth = time.monotonic(), FeedbackGate(), None
+    # GetTickCount64 (time.monotonic on Windows / Python 3.12) can quantize
+    # consecutive accelerated updates to one timestamp. QPC is also monotonic,
+    # and keeps publication order / interval reconciliation at full precision.
+    now = time.perf_counter
+    begin, gate, smooth = now(), FeedbackGate(), None
     clock = DisplayClock(EFFECTIVE_POLICY["segment_target_seconds"], EFFECTIVE_POLICY["segment_max_seconds"], r.scale)
     limit = clock.maximum if base.valid else clock.target
     support_gaps = []
     recorded_expiries = set()
+    next_analysis_at = None
+    processing_seconds = 0.0
+    analysis_durations, feedback_times, scheduling_margins = [], [], []
 
     def settle(elapsed):
         # The shared hold statistic tolerates timing jitter between samples.
@@ -164,7 +176,7 @@ def training_round(r, trainer, base, index, run_id):
     try:
         while True:
             r._check_cancel()
-            elapsed = (time.monotonic()-begin)/r.scale
+            elapsed = (now()-begin)/r.scale
             settle(elapsed)
             if clock.valid + 1e-6 >= clock.target:
                 reason = "target_reached"
@@ -172,10 +184,32 @@ def training_round(r, trainer, base, index, run_id):
             if elapsed >= limit:
                 reason = "max_duration" if base.valid else "baseline_invalid"
                 break
+            if next_analysis_at is not None:
+                wake = min(next_analysis_at, limit)
+                remaining = max(0.0, clock.target-clock.valid)
+                # If the currently published score can finish the target before
+                # another analysis is expected to finish, settle that real tail
+                # instead of doing an unnecessary analysis or pre-crediting it.
+                if clock.usable and remaining <= max(0.0, clock.until-clock.at) + 1e-9:
+                    goal_at = clock.at + remaining
+                    if goal_at <= next_analysis_at + processing_seconds:
+                        wake = min(goal_at, limit)
+                r._sleep_real(max(0.0, (wake-elapsed)*r.scale))
+                elapsed = (now()-begin)/r.scale
+                settle(elapsed)
+                if clock.valid + 1e-6 >= clock.target:
+                    reason = "target_reached"
+                    break
+                if elapsed >= limit:
+                    reason = "max_duration" if base.valid else "baseline_invalid"
+                    break
+            analysis_started = now()
             step = r.engine.step("focused")
             r._record_diagnostic(step, "training")
             heatmap = r._record_heatmap(step, "training")
-            elapsed = (time.monotonic()-begin)/r.scale
+            elapsed = (now()-begin)/r.scale
+            processing_seconds = (now()-analysis_started)/r.scale
+            analysis_durations.append(processing_seconds)
             settle(elapsed)
             if clock.valid + 1e-6 >= clock.target:
                 reason = "target_reached"
@@ -190,6 +224,7 @@ def training_round(r, trainer, base, index, run_id):
             smooth = None if score is None else score if smooth is None else .3*score+.7*smooth
             trainer.feed(smooth, elapsed, usable=smooth is not None)
             clock.display(elapsed, usable=smooth is not None, mode=mode)
+            feedback_times.append(elapsed)
             state = clock.snapshot(elapsed)
             state["baseline_valid"] = base.valid
             _emit_progress(r, "training", state, segment=index+1)
@@ -202,17 +237,20 @@ def training_round(r, trainer, base, index, run_id):
                        **trainer.feedback_status(elapsed)}
             r.latest_feedback = payload
             r.bus.publish("feedback", payload)
-            # Never pre-credit a final displayed value. Wait its actual supported
-            # interval; a late analysis cannot make the prior value last longer.
-            wait = min(config.STEP_SEC, limit-elapsed)
-            if smooth is not None:
-                wait = min(wait, max(0.0, clock.target-clock.valid))
-            r._sleep_real(max(0.0, wait*r.scale))
+            # Analyze ahead of the *actual* prior feedback expiry. Sleeping a
+            # full STEP before starting analysis creates a gap on every update.
+            # Slow analysis / late wakeups still expire normally in settle();
+            # neither planned deadlines nor missing intervals are credited.
+            margin = (min(config.STEP_SEC*SCHEDULING_MARGIN_STEP_FRACTION,
+                          SCHEDULING_MARGIN_WALL_SEC/r.scale)
+                      if processing_seconds > 1e-9 else 0.0)
+            scheduling_margins.append(margin)
+            next_analysis_at = elapsed + max(0.0, config.STEP_SEC-processing_seconds-margin)
     except SessionCancelled:
         reason = "cancelled"
         raise
     finally:
-        elapsed = (time.monotonic()-begin)/r.scale
+        elapsed = (now()-begin)/r.scale
         settle(elapsed)
         state = clock.snapshot(elapsed, reason)
         state["baseline_valid"] = base.valid
@@ -229,6 +267,18 @@ def training_round(r, trainer, base, index, run_id):
                        support_gap_count=len(support_gaps), support_gap_interruptions=support_gaps,
                        mode_seconds={k: round(v, 4) for k,v in clock.mode_seconds.items()},
                        unobserved_seconds=round(max(0, elapsed-sum(clock.mode_seconds.values())), 4))
+        intervals = [right-left for left, right in zip(feedback_times, feedback_times[1:])]
+        segment["feedback_schedule"] = {
+            "spec": "ahead-of-expiry-v1", "time_basis": "protocol_seconds", "time_scale": r.scale,
+            "clock": "perf_counter",
+            "nominal_step_seconds": config.STEP_SEC, "support_cap_seconds": config.STEP_SEC,
+            "scheduling_margin_seconds": max(scheduling_margins, default=0.0),
+            "actual_scheduling_margin_seconds": max(scheduling_margins, default=0.0)*r.scale,
+            "analysis_seconds_max": max(analysis_durations, default=0.0),
+            "feedback_interval_seconds_mean": sum(intervals)/len(intervals) if intervals else None,
+            "feedback_interval_seconds_max": max(intervals, default=None),
+            "note": "按上次处理耗时提前分析并留少量调度余量；反馈时刻取实际时钟，更新可略早于名义2秒，超时仍记缺口。",
+        }
         r._persist_training_segment(segment)
         r.effective_time_result["segments"].append(segment)
         r._merge_run_payload(run_id, {"segments": r.effective_time_result["segments"], "effective_time": state})
@@ -294,7 +344,7 @@ def _run(r, auto, started):
                 r.bus.publish("behavior", {"task": "pvt", "result": pvt})
     trainer = StudioTraining(r.subject["public_id"], "01", "001", base, mode="ten_min")
     with r._phase("training") as ctx:
-        training_run_id, begin = ctx["run_id"], time.monotonic()
+        training_run_id, begin = ctx["run_id"], time.perf_counter()
         r.bus.publish("training_start", {**trainer.describe(), "mode": "effective_time", "effective_time": dict(EFFECTIVE_POLICY)})
         for index in range(EFFECTIVE_POLICY["segments"]):
             segment = training_round(r, trainer, base, index, training_run_id)
@@ -305,7 +355,7 @@ def _run(r, auto, started):
             r.bus.publish("feedback", rest_payload)
             r._sleep(EFFECTIVE_POLICY["rest_seconds"])
             r._progress("training", (index+1)/EFFECTIVE_POLICY["segments"])
-        elapsed = (time.monotonic()-begin)/r.scale
+        elapsed = (time.perf_counter()-begin)/r.scale
         segments = result["segments"]
         completed = all(s["effective_time"]["completed"] for s in segments)
         completion_reason = ("timing_issue" if any(not s["effective_time"]["timing_consistent"] for s in segments) else

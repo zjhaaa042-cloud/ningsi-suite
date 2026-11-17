@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 import math
 import re
 
@@ -15,6 +16,38 @@ from ningsi.models.human import explain, validate_model
 from ningsi.models.logistic import FEATURE_NAMES
 from ningsi.models.research_features import aggregate_probe, engine_fingerprint
 from ningsi.signal import conditioning
+from ningsi.signal.artifacts import Verdict
+from ningsi.signal.blinks import process_blinks
+
+
+def veto_live_blinks(row, snap, profile, end):
+    """Reject raw dual-channel transients without changing frozen model features.
+
+    This is an extra live eligibility check, outside snapshot_window's training
+    contract. A personal correction used by the relative-index path must never
+    be silently substituted into a previously trained classifier's input.
+    """
+    if not row["window"].usable:
+        return row
+    values = np.asarray(snap["samples"], dtype=float)
+    if values.ndim != 2 or values.shape[0] != 2:
+        return row
+    rate = float(profile["srate"])
+    offset = snap["total_samples"] - values.shape[1]
+    first = end - round(4 * rate) - offset
+    last = end - offset
+    if first < 0 or last > values.shape[1]:
+        return row
+    # The generic detector handles per-channel DC and never subtracts one EEG
+    # from the other. It sees only the samples belonging to this model window.
+    result = process_blinks(values[:, first:last] * float(profile["scale_to_uv"]), rate,
+                            channel_labels=tuple(profile.get("channel_labels") or ("Ch1", "Ch2")))
+    if not result.reasons:
+        return row
+    quality = row["window"].quality
+    reasons = tuple(dict.fromkeys((*quality.reasons, *result.reasons)))
+    verdict = Verdict(False, reasons, {**quality.metrics, "live_blink_veto": result.as_dict()})
+    return {**row, "window": replace(row["window"], quality=verdict), "features": {}}
 
 
 def snapshot_window(snap, profile, end, *, traces=False):
@@ -54,6 +87,7 @@ class HumanAttentionPredictor:
         self.windows = deque(maxlen=24)
         self.processed = 0
         self.buffer_id = None
+        self.connection_generation = None
         self.phase = None
         self.phase_start = math.inf
 
@@ -103,11 +137,14 @@ class HumanAttentionPredictor:
         if stamps.size < round(4 * rate) or values.ndim != 2 or not np.isfinite(stamps[-1]):
             return self.unavailable("insufficient_raw_history")
         onset = float(stamps[-1] + 1 / rate)
-        if self.buffer_id != snap["buffer_id"] or snap["total_samples"] < self.processed:
+        if (self.buffer_id != snap["buffer_id"]
+                or self.connection_generation != snap.get("connection_generation")
+                or snap["total_samples"] < self.processed):
             self.windows.clear()
             self.processed = 0
             self.phase = None
             self.buffer_id = snap["buffer_id"]
+            self.connection_generation = snap.get("connection_generation")
         if self.phase != phase:
             self.windows.clear()
             self.phase = phase
@@ -121,7 +158,7 @@ class HumanAttentionPredictor:
             self.processed = end
             row = snapshot_window(snap, profile, end)
             if row is not None:
-                self.windows.append(row)
+                self.windows.append(veto_live_blinks(row, snap, profile, end))
         summary = aggregate_probe(self.windows, onset, baseline_valid=baseline_valid, phase_start=self.phase_start)
         if summary["reasons"]:
             return {**self.unavailable("|".join(summary["reasons"])), **{k: v for k, v in summary.items() if k != "features"}}

@@ -2,6 +2,11 @@ import { card, el, fmtNum, fmtPercent } from '../util.js';
 
 const labels = { amplitude: '幅值超限', eog: '低频占比偏高（眼电/漂移代理）', emg: '高频占比偏高（肌电代理）', channel_span: '通道差异过大', flat_channel: '平直通道', signal_too_short: '未满4秒', no_data: '无样本', non_finite_signal: '非有限值', electrode_step: '电极突跳或移动', ocular_transient: '显著慢瞬态', muscle_burst: '短时高频肌电代理', emg_reference_burst: '同步肌电参考活动', motion_reference_excursion: '同步加速度参考活动', motion_reference_unavailable: '动作参考缺失或未同步' };
 
+Object.assign(labels, { blink_uncalibrated: '疑似眨眼（未校准）', blink_boundary: '边界眨眼，支持不足',
+  blink_dense: '密集或重叠眨眼', blink_calibration_mismatch: '个人眨眼配置已变化',
+  blink_shape_mismatch: '眨眼形状不匹配', blink_channel_mismatch: '双通道眨眼关系不匹配',
+  blink_residual: '眨眼校正残留', blink_signal_fault: '眨眼路径检测到信号异常', contact_dropout: '接触丢失或贴轨' });
+
 function bar(label, value, max, rejected = false) {
   const number = Number.isFinite(value) ? value : 0;
   return el('div', { class: 'diagnostic-bar' }, [
@@ -18,7 +23,7 @@ export function renderDiagnostics(report) {
   const accepted = d?.accepted ?? quality.windows_usable ?? 0;
   const root = el('div', { class: 'stack' });
   if (d?.scope) root.append(el('p', { text: d.scope }));
-  root.append(el('p', { text: `严格合格 ${accepted}/${total} 窗。${d ? d.note : '旧版本未保存完整逐窗信号；可查看已有质量与行为汇总，不能事后重建频谱。'}` }));
+  root.append(el('p', { text: `严格合格 ${accepted}/${total} 窗。${d ? (d.note || '质量统计按已保存结果展示；缺失的诊断项目不补算。') : '旧版本未保存完整逐窗信号；可查看已有质量与行为汇总，不能事后重建频谱。'}` }));
   root.append(bar('严格合格窗', accepted, total), bar('排除窗', total - accepted, total, true));
   const ten = report.extras?.ten_min;
   if (ten) {

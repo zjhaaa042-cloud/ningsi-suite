@@ -262,6 +262,37 @@ class HumanTrainingTests(unittest.TestCase):
                                      "nominal_srate": 100., "channel_labels": ["Fp1"], "declared_units": ["V"]})
         self.assertFalse(predictor.update(source, "training", baseline_valid=True)["available"])
 
+    def test_same_buffer_reconnect_discards_pre_connection_model_history(self):
+        rate = 100
+        stamps = np.arange(3600) / rate
+        raw = sum(amplitude * np.sin(2*np.pi*frequency*stamps)
+                  for frequency, amplitude in ((6, 8), (10, 10), (20, 12)))[None, :]
+        predictor = HumanAttentionPredictor(self.model)
+
+        class Source:
+            count = 400
+            generation = 1
+
+            def model_snapshot(self):
+                return {"samples": raw[:, :self.count], "timestamps": stamps[:self.count],
+                        "total_samples": self.count, "buffer_id": 1,
+                        "connection_generation": self.generation, "age": .01, "research_timing": True,
+                        "descriptor": {"name": "FixtureEEG", "source_id": "qa-software-fixture",
+                                       "channel_count": 1, "nominal_srate": rate, "channel_labels": ["Fp1"]}}
+
+        source = Source()
+        for source.count in range(400, 1801, 200):
+            result = predictor.update(source, "sart", baseline_valid=True)
+        self.assertTrue(result["available"], result)
+        source.generation += 1
+        result = predictor.update(source, "sart", baseline_valid=True)
+        self.assertFalse(result["available"], "重连后不能复用旧连接的模型输出")
+        self.assertIn("lookback_crosses_phase", result["reason"])
+        for source.count in range(2000, 3001, 200):
+            result = predictor.update(source, "sart", baseline_valid=True)
+        self.assertTrue(result["available"], result)
+        self.assertGreaterEqual(result["window_start_lsl"], 18.)
+
     def test_causal_filter_import_training_and_live_features(self):
         from ningsi.signal import conditioning
         files = fixture_files(preprocessing_policy=conditioning.POLICY)

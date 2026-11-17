@@ -33,8 +33,9 @@ const byText=(root,label)=>all(root).find(node=>node.tagName==='BUTTON'&&text(no
 const click=async node=>{if(!node)throw Error('Missing button');for(const listener of node.listeners.click||[])await listener({preventDefault(){}});};
 const flush=()=>new Promise(resolve=>setTimeout(resolve,8));
 document.querySelector=()=>null;
-globalThis.window={setTimeout:(fn,ms)=>setTimeout(fn,ms===250?0:ms),clearTimeout,location:{search:''}};
-const makeCtx=()=>{const cleanups=[];return {params:new URLSearchParams(),signal:{aborted:false},cleanups,
+globalThis.window={setTimeout:(fn,ms)=>setTimeout(fn,ms===250?0:ms),clearTimeout,setInterval,clearInterval,location:{search:''}};
+const makeCtx=()=>{const controller=new AbortController();const cleanups=[()=>controller.abort()];
+  return {params:new URLSearchParams(),signal:controller.signal,cleanups,
   store:{state:{},setState(patch){Object.assign(this.state,patch);}},
   onCleanup(fn){cleanups.push(fn);},navigate(hash){this.destination=hash;},reload(){}};};
 const {api}=await import(API_URI);
@@ -47,7 +48,7 @@ class ReadinessFrontendTests(unittest.TestCase):
         program = DOM + body
         for name, path in {
             "API_URI": "web/js/api.js", "PREFLIGHT_URI": "web/js/views/session-preflight.js",
-            "PROFILE_URI": "web/js/views/device-profile.js", "START_URI": "web/js/views/start.js",
+            "START_URI": "web/js/views/start.js",
         }.items():
             program = program.replace(name, json.dumps((ROOT / path).as_uri()))
         result = subprocess.run(["node", "--input-type=module", "-e", program],
@@ -89,31 +90,7 @@ assert.ok(text(check.node).includes('训练反馈沿用相对基线专注指数'
 ctx.cleanups.forEach(fn=>fn());
 ''')
 
-    def test_device_profile_isolation_saves_selected_source_and_keeps_drafts_on_poll(self):
-        self.node(r'''
-import assert from 'node:assert/strict';
-const {createDeviceProfile}=await import(PROFILE_URI);
-const ctx=makeCtx();const completions={};const writes=[];
-api.deviceProfile=key=>new Promise(resolve=>{completions[key]=resolve;});
-api.saveDeviceProfile=async body=>{writes.push(body);return {data:{saved:true,profile:body.profile,missing_fields:[]}};};
-const profile=createDeviceProfile(ctx);const sources=[{key:'lsl:A',real:true,is_eeg:true},{key:'lsl:B',real:true,is_eeg:true}];
-profile.setSources(sources);
-const source=id(profile.node,'device-profile-source');source.value='lsl:B';const selected=source.onchange();
-completions['lsl:B']({data:{saved:true,profile:{manufacturer:'B厂商',source_unit:'uV',scale_to_uv:1},missing_fields:[]}});await selected;
-completions['lsl:A']({data:{saved:true,profile:{manufacturer:'A厂商'},missing_fields:[]}});await flush();
-assert.equal(id(profile.node,'device-profile-manufacturer').value,'B厂商');
-const notes=id(profile.node,'device-profile-notes');notes.value='尚未保存的现场备注';profile.setSources(sources);
-assert.equal(notes.value,'尚未保存的现场备注');
-const unit=id(profile.node,'device-profile-source_unit');unit.value='ADC';unit.onchange();
-await click(byText(profile.node,'保存设备档案'));assert.equal(writes.length,0);
-assert.ok(text(profile.node).includes('必须填写校准后的'));
-id(profile.node,'device-profile-scale_to_uv').value='0.5';await click(byText(profile.node,'保存设备档案'));
-assert.equal(writes.length,1);assert.equal(writes[0].device,'lsl:B');assert.equal(writes[0].profile.scale_to_uv,.5);
-assert.equal(writes[0].profile.notes,'尚未保存的现场备注');assert.ok(text(profile.node).includes('资料待核验'));
-assert.ok(!text(profile.node).includes('验收通过'));ctx.cleanups.forEach(fn=>fn());
-''')
-
-    def test_start_waits_for_checks_and_requires_explicit_use_of_profile_units(self):
+    def test_unknown_device_keeps_existing_explicit_unit_selection(self):
         self.node(r'''
 import assert from 'node:assert/strict';
 const {render}=await import(START_URI);const ctx=makeCtx();const bodies=[],sessions=[];
@@ -128,7 +105,7 @@ api.createSession=async body=>{sessions.push(body);return {data:{session:{uuid:'
 const root=new StubNode('main');await render(root,ctx);await flush();
 assert.equal(byText(root,'开始评估').disabled,true);
 assert.equal(id(root,'eeg-source-unit').value,'');assert.ok(text(root).includes('模型暂停'));
-await click(byText(root,'采用档案单位'));await flush();
+id(root,'eeg-source-unit').value='uV';id(root,'eeg-source-unit').onchange();await flush();
 assert.equal(id(root,'eeg-source-unit').value,'uV');assert.equal(byText(root,'开始评估').disabled,false);
 await click(byText(root,'开始评估'));
 assert.equal(sessions.length,1);assert.deepEqual(sessions[0].eeg_calibration,{source_unit:'uV'});
@@ -149,6 +126,76 @@ const root=new StubNode('main');await render(root,ctx);await flush();
 assert.equal(byText(root,'开始评估').disabled,true);assert.equal(byText(root,'运行模拟演示').disabled,false);
 await click(byText(root,'运行模拟演示'));
 assert.equal(sessions[0].device,'sim-bsense');assert.equal(sessions[0].eeg_calibration,null);
+ctx.cleanups.forEach(fn=>fn());
+''')
+
+    def test_personal_calibration_subject_creation_preserves_later_selection(self):
+        self.node(r'''
+import assert from 'node:assert/strict';
+const {render}=await import(START_URI);const ctx=makeCtx();const calibrations=[];
+api.devices=async()=>({data:{sources:[{key:'lsl:headset',device:'Headset',real:true,is_eeg:true}]}});
+api.listSubjects=async()=>({data:{items:[{public_id:'existing-person'}],total:1}});
+api.config=async()=>({data:{profiles:[{key:'ten_min',total_sec:600},{key:'short',total_sec:960}]}});
+api.sessionPreflight=async body=>({data:{ready:true,checks:[],calibration:body.eeg_calibration}});
+let resolveSubject;
+api.createSubject=()=>new Promise(resolve=>{resolveSubject=resolve;});
+api.blinkCalibration=async body=>{calibrations.push(body);return {data:{token:'existing-token',state:'collecting',count:0}};};
+const root=new StubNode('main');await render(root,ctx);await flush();
+id(root,'alias').value='requested label';
+const pending=click(byText(root,'开始个人眨眼校准'));await flush();
+id(root,'participant').value='existing-person';id(root,'participant').onchange();
+id(root,'alias').value='later label';
+resolveSubject({data:{public_id:'created-person'}});await pending;
+assert.equal(id(root,'participant').value,'existing-person','subject creation must not replace the selection made while waiting');
+assert.equal(calibrations.length,0,'a changed selection requires a new explicit calibration start');
+const created=id(root,'participant').options.find(item=>item.value==='created-person');
+assert.ok(text(created).includes('requested label'));assert.ok(!text(created).includes('later label'));
+await click(byText(root,'开始个人眨眼校准'));
+assert.equal(calibrations.length,1);assert.equal(calibrations[0].participant,'existing-person');
+ctx.cleanups.forEach(fn=>fn());
+''')
+
+    def test_documented_device_uses_server_units_and_does_not_leak_them_to_another_source(self):
+        self.node(r'''
+import assert from 'node:assert/strict';
+const {render}=await import(START_URI);const ctx=makeCtx();const checks=[],sessions=[];
+const vendor='lsl:BioMulti Lite EEG-Documented';
+api.devices=async()=>({data:{sources:[{key:vendor,device:'BioMulti Lite EEG-Documented',real:true,is_eeg:true},
+  {key:'lsl:OtherEEG',device:'Other EEG',real:true,is_eeg:true}]}});
+api.listSubjects=async()=>({data:{items:[{public_id:'p01'}],total:1}});
+api.config=async()=>({data:{profiles:[{key:'ten_min',total_sec:600},{key:'short',total_sec:960}]}});
+api.sessionPreflight=async body=>{checks.push(body);return {data:{device:body.device,ready:body.device===vendor,
+  calibration:body.device===vendor?{source_unit:'uV',scale_to_uv:1,origin:'manufacturer_manual'}:null,
+  checks:[],scoring:{attention_model:{status:'none'}}}};};
+api.createSession=async body=>{sessions.push(body);return {data:{session:{uuid:'manual-session'},phases:[],runtime:{}}};};
+const root=new StubNode('main');await render(root,ctx);await flush();
+const unitPanel=all(root).find(node=>node.tagName==='DETAILS'&&text(node).includes('单位与标定设置'));
+id(root,'participant').value='p01';id(root,'participant').onchange();await flush();
+assert.equal(unitPanel.hidden,true,'documented hardware does not ask the operator to re-enter units');
+assert.equal(byText(root,'开始评估').disabled,false);
+await click(byText(root,'开始评估'));
+assert.deepEqual(sessions[0].eeg_calibration,{source_unit:'uV',scale_to_uv:1,origin:'manufacturer_manual'});
+id(root,'device').value='lsl:OtherEEG';id(root,'device').onchange();await flush();
+assert.equal(checks.at(-1).eeg_calibration,null,'manual units stay bound to their matching device');
+assert.equal(unitPanel.hidden,false);assert.equal(byText(root,'开始评估').disabled,true);
+ctx.cleanups.forEach(fn=>fn());
+''')
+
+    def test_rescan_rechecks_configuration_for_same_device_name(self):
+        self.node(r'''
+import assert from 'node:assert/strict';
+const {render}=await import(START_URI); const ctx=makeCtx(), root=new StubNode('main');
+const source={key:'lsl:BioMulti Lite EEG', device:'BioMulti Lite EEG', real:true, is_eeg:true};
+let probes=0;
+api.devices=async()=>{probes++;return {data:{sources:[source]}};};
+api.listSubjects=async()=>({data:{items:[],total:0}});
+api.config=async()=>({data:{profiles:[{key:'ten_min',total_sec:600}]}});
+api.sessionPreflight=async body=>({data:{device:body.device,ready:probes===1,
+  calibration:probes===1?{source_unit:'uV',scale_to_uv:1,origin:'manufacturer_manual'}:null,checks:[]}});
+await render(root,ctx);await flush();
+assert.equal(byText(root,'开始评估').disabled,false);
+await click(byText(root,'重新扫描'));await flush();
+assert.equal(byText(root,'开始评估').disabled,true,'a changed device can reuse the same stream name');
 ctx.cleanups.forEach(fn=>fn());
 ''')
 

@@ -103,3 +103,19 @@ class LiveArtifactTests(unittest.TestCase):
                          "acceleration_unit_conflict")
         self.assertEqual(check_motion_reference(snap, self.t+10, [0,1,2], "mg")["detail"],
                          "motion_clock_coverage")
+
+    def test_frozen_model_blink_gate_uses_only_the_scored_window(self):
+        from ningsi.signal import conditioning
+        source = ManagedLslSource('headset', device='headset', fill_timeout=0, research_timing=True)
+        source.research_profile = {'srate': self.rate, 'scale_to_uv': 1., 'preprocessing_policy': conditioning.POLICY}
+        stamps = np.arange(7.5*self.rate) / self.rate
+        for peak, veto in ((1., False), (4., True), (7., False)):
+            with self.subTest(peak=peak):
+                buffer = StreamBuffer(StreamDescriptor('eeg','headset','EEG',2,self.rate,('Fp1','Fp2'),declared_units=('uV','uV')))
+                blink = 145*np.exp(-((stamps-peak)/.14)**2)
+                channels = np.stack([8*np.sin(2*np.pi*10*stamps)+blink, 7*np.sin(2*np.pi*10*stamps+.25)+.8*blink])
+                buffer.append_chunk(channels.T, stamps)
+                source._manager._buffers['eeg'] = buffer
+                _, evidence = source.analysis_window()
+                self.assertEqual(evidence['sample_end_index'], 1499)  # [2,6)s is scored at 7.5s.
+                self.assertEqual(bool(evidence['blink_control']['reasons']), veto, evidence)

@@ -16,7 +16,6 @@ import { api } from '../api.js';
 import { describeError } from '../store.js';
 import { renderPreviewCard } from '../preview.js';
 import { renderHumanModels } from './human-models.js';
-import { createDeviceProfile } from './device-profile.js';
 import {
   DASH, button, card, el, empty, field, fmtInt, fmtNum, fmtPercent, fmtSeconds,
   list, pageFrame, pick, table,
@@ -295,14 +294,14 @@ export const devices = {
     ]);
 
     const statusHost = el('p', { class: 'muted', text: '正在读取设备状态…' });
+    const parametersHost = el('p', { class: 'muted device-parameters', hidden: true });
     const bodyHost = el('div');
-    host.append(statusHost, bodyHost);
-    const deviceProfile = createDeviceProfile(ctx);
-    host.append(deviceProfile.node);
-    // 实时预览放在最前：现场第一步就是"现在到底有没有信号、波形正不正常"，
-    // 不需要先建会话（2026-10-07 需求）。
+    host.append(parametersHost, statusHost);
+    // 连接后直接看波形和质量，不再让用户填写设备档案。
     const previewHost = el('div');
-    host.append(previewHost);
+    host.append(previewHost, el('details', { class: 'device-diagnostics' }, [
+      el('summary', { text: '查看数据源与连接诊断' }), bodyHost,
+    ]));
     renderPreviewCard(ctx, previewHost);
 
     async function loadDeviceStatus(showErrors = true) {
@@ -312,20 +311,23 @@ export const devices = {
         const data = response.data || {};
         const devices = list(pick(data, 'devices', []));
         const sources = list(pick(data, 'sources', []));
-        deviceProfile.setSources(sources);
+        const documented = sources.find(row => row?.device_configuration?.id === 'bsense-r')?.device_configuration;
+        parametersHost.textContent = documented
+          ? `${documented.model} · EEG ${fmtInt(documented.channels)} 通道 · ${fmtNum(documented.srate, 0)} Hz · ${documented.source_unit === 'uV' ? 'µV' : documented.source_unit}` : '';
+        parametersHost.hidden = !documented;
         const conditionNote = pick(data, 'condition_note', null);
         const active = list(pick(data, 'active_sessions', []));
         statusHost.textContent = `运行中会话 ${active.length} 个｜可用数据源 ${sources.length} 个｜更新时间 ${new Date().toLocaleTimeString('zh-CN')}`;
         bodyHost.textContent = '';
-        bodyHost.append(
-          renderSources(pick(data, 'sources', []), pick(data, 'sources_error', null), conditionNote),
-          renderDeviceHealth(devices, pick(sources.find((row) => pick(row, 'hardware_note', null)) || {}, 'hardware_note', null)),
-        );
+        bodyHost.append(renderSources(pick(data, 'sources', []), pick(data, 'sources_error', null), conditionNote));
+        if (devices.length) bodyHost.append(renderDeviceHealth(devices,
+          pick(sources.find((row) => pick(row, 'hardware_note', null)) || {}, 'hardware_note', null)));
       } catch (error) {
         if (ctx.signal.aborted) return;
         const status = pick(error, 'status', null);
         if (status === 401 || status === 404) {
           statusHost.textContent = '';
+          parametersHost.textContent = ''; parametersHost.hidden = true;
           bodyHost.textContent = '';
           bodyHost.append(card('无法读取设备状态', [
             empty(status === 401
@@ -337,6 +339,7 @@ export const devices = {
         }
         if (!showErrors) return;
         statusHost.textContent = '';
+        parametersHost.textContent = ''; parametersHost.hidden = true;
         bodyHost.textContent = '';
         bodyHost.append(card('设备状态读取失败', [
           empty(`设备状态读取失败：${describeError(error)}`),

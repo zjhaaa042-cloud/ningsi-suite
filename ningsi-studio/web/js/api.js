@@ -153,6 +153,7 @@ export const api = {
   deviceProfile: (device) => get('/api/device-profile', { device }),
   saveDeviceProfile: (body) => post('/api/device-profile', body),
   sessionPreflight: (body) => post('/api/sessions/preflight', body),
+  blinkCalibration: (body) => post('/api/devices/blink-calibration', body),
   // 无会话的设备实时预览：状态 / 一窗波形 / 启动 / 停止
   devicePreview: () => get('/api/devices/preview'),
   devicePreviewWindow: () => get('/api/devices/preview', { window: 1 }),

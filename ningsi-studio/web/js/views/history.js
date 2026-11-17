@@ -99,7 +99,7 @@ export async function render(container, ctx) {
       view.period = periodSelect.value;
       applyFilters();
     }),
-  ]), { sub: '可按被试选择趋势。脑电指标按设备配置筛选，压力自评取现场会话中本人填写的分数。' });
+  ]), { sub: '脑电趋势仅聚合同一协议、训练模式、来源、倍率与设备配置；压力自评取本人填写的分数。' });
   host.append(filterCard);
 
   /* -------------------------------------------------------- 会话表格 */
@@ -154,9 +154,13 @@ export async function render(container, ctx) {
       },
       { title: '被试', render: (row) => (row.participant ? `sub-${row.participant}` : DASH) },
       { title: '状态', render: (row) => statusText(row.status) },
+      { title: '方案', render: (row) => row.protocol_label || DASH },
       { title: '阶段', render: (row) => phaseText(row.phase, row.phase_label) },
       { title: '进度', align: 'right', render: (row) => fmtPercent(row.progress) },
-      { title: '设备', render: (row) => pick(row, 'device', DASH) || DASH },
+      { title: '数据来源', render: (row) => {
+        const source = row.source || row.device || '';
+        return source.startsWith('sim') ? `模拟 · ${source}` : source || DASH;
+      } },
       { title: '时间倍率', align: 'right', render: (row) => fmtNum(row.time_scale, 2) },
       { title: '预警', align: 'right', render: (row) => fmtInt(row.alert_count) },
       { title: '开始时间', render: (row) => fmtTime(row.started_at) },
@@ -166,7 +170,7 @@ export async function render(container, ctx) {
           // 三个链接的可见文字（导出 zip / 报告 / 训练）每行都一样，
           // 读屏无法区分是哪条会话：aria-label 带上完整 uuid 与动作。
           // 原生 <a href> 本身就在 Tab 顺序里且 Enter 可激活，无需额外 keydown。
-          el('a', {
+          row.has_artifacts && el('a', {
             href: api.exportZipUrl(row.uuid),
             text: '导出 zip',
             attrs: {
@@ -176,10 +180,10 @@ export async function render(container, ctx) {
           }),
           el('a', {
             href: `#/report?session=${row.uuid}`,
-            text: '报告',
-            attrs: { 'aria-label': `查看会话 ${row.uuid} 的评估报告` },
+            text: row.has_report ? '报告' : '阶段记录',
+            attrs: { 'aria-label': `查看会话 ${row.uuid} 的${row.has_report ? '评估报告' : '阶段记录'}` },
           }),
-          el('a', {
+          row.has_training && el('a', {
             href: `#/training?session=${row.uuid}`,
             text: '训练',
             attrs: { 'aria-label': `查看会话 ${row.uuid} 的神经反馈训练视图` },
@@ -209,8 +213,11 @@ export async function render(container, ctx) {
 
     trendHost.append(el('p', {
       class: 'muted',
-      text: `指标 ${pick(data, 'field', view.field)}｜周期 ${pick(data, 'period', view.period)}｜参与聚合会话 ${fmtInt(data.sessions)} 次（台账点 ${fmtInt(ledgerPoints.length)} 个）`,
+      text: `指标 ${pick(data, 'field', view.field)}｜周期 ${pick(data, 'period', view.period)}｜参与聚合 ${fmtInt(data.comparable ?? data.sessions)} 次 / 已完成 ${fmtInt(data.sessions)} 次`,
     }));
+    const group = data.comparison_group;
+    if (group) trendHost.append(el('p', { class: 'muted', text:
+      `当前分组：${group.protocol_label || group.protocol || DASH} · ${{ quick: '简短训练', full: '标准训练' }[group.training_mode] || group.training_mode || DASH} · ${group.source_kind === 'sim' ? '模拟数据' : group.source_kind === 'lsl' ? '实时设备' : '来源待确认'} · 时间倍率 ${fmtNum(group.time_scale, 2)}` }));
     if (points.length) {
       const chartHost = el('div');
       drawLineChart(chartHost, points.map((point) => ({ label: point.label, values: { value: point.value } })), {
@@ -228,7 +235,7 @@ export async function render(container, ctx) {
       ], points));
     } else {
       trendHost.append(empty(view.field === 'stress'
-        ? '暂无已完成现场会话的压力自评。' : '暂无趋势点（会话尚未完成，或因跨设备不可比被排除）。'));
+        ? '暂无已完成现场会话的压力自评。' : '暂无可比趋势点（缺少该指标，或协议、来源与采集配置不一致）。'));
     }
     if (data.note) {
       trendHost.append(el('p', { class: 'muted', text: `不可比说明：${data.note}` }));

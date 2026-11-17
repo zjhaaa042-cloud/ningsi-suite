@@ -12,8 +12,11 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 import numpy as np
 
@@ -25,6 +28,7 @@ from ningsi_studio.acquisition.lsl import (
     StreamDescriptor,
     canonical_kind,
     describe_stream,
+    _StreamWorker,
 )
 from ningsi_studio.core.live_source import ManagedLslSource
 
@@ -142,6 +146,7 @@ class DescriptorTest(unittest.TestCase):
         self.assertEqual(descriptor.kind, "eeg")
         self.assertEqual(descriptor.channel_count, 2)
         self.assertEqual(tuple(descriptor.channel_labels), ("Ch1", "Ch2"))
+        self.assertEqual(descriptor.as_dict()["uid"], info.uid())
 
     def test_describe_stream_rejects_unsupported_and_empty(self):
         self.assertIsNone(describe_stream(FakeStreamInfo("Marker", stream_type="Markers")))
@@ -165,12 +170,56 @@ class WindowLengthTest(unittest.TestCase):
         self.assertEqual(tail[0].tolist(), [15.0, 16.0, 17.0, 18.0, 19.0])
         self.assertEqual(tail[1].tolist(), [150.0, 160.0, 170.0, 180.0, 190.0])
 
+    def test_same_buffer_reconnect_changes_connection_generation(self):
+        class LostInlet:
+            def pull_chunk(self, **kwargs):
+                raise RuntimeError("fixture connection lost")
+
+            def close_stream(self):
+                pass
+
+        buffer = StreamBuffer(self.descriptor)
+        original_identity = buffer.buffer_id
+        self.assertEqual(buffer.model_snapshot(5)["connection_generation"], 0)
+        for expected in (1, 2):
+            worker = _StreamWorker(None, buffer, 60., lambda *_: LostInlet(), lambda *_: None)
+            worker.run()
+            snapshot = buffer.model_snapshot(5)
+            self.assertEqual(snapshot["connection_generation"], expected)
+            self.assertEqual(buffer.connection_generation, expected)
+            self.assertEqual(snapshot["buffer_id"], original_identity)
+
     def test_samples_count_clamps_and_handles_empty(self):
         buffer = StreamBuffer(self.descriptor, buffer_seconds=5.0)
         self.assertEqual(buffer.samples_count(100).shape, (2, 0))
         self.assertEqual(buffer.samples_count(0).shape, (2, 0))
         buffer.append_chunk([[1.0, 2.0]], [0.0])
         self.assertEqual(buffer.samples_count(100).shape, (2, 1))
+
+    def test_reconnect_starts_with_empty_amplitudes_timestamps_and_age(self):
+        buffer = StreamBuffer(self.descriptor)
+        buffer.begin_connection()
+        buffer.append_chunk([[11., 12.]] * 1000, np.arange(1000)/SRATE)
+        buffer.begin_connection()
+        self.assertFalse(buffer.stats()['live'])
+        self.assertIsNone(buffer.model_snapshot(1000)['age'])
+        buffer.append_chunk([[21., 22.]], [100.])
+        snap = buffer.model_snapshot(1000)
+        self.assertEqual(snap['timestamps'], [100.])
+        self.assertEqual(snap['total_samples'], 1)
+        np.testing.assert_array_equal(buffer.samples_count(1000), [[21.], [22.]])
+
+    def test_first_chunk_after_stale_interval_starts_a_new_history(self):
+        source = ManagedLslSource('fake', device='fake', channels=2, fill_timeout=0)
+        buffer = StreamBuffer(self.descriptor)
+        source._manager._buffers['eeg'] = buffer
+        with patch('time.monotonic', return_value=10.) as clock:
+            buffer.append_chunk([[10., 11.]] * 1000, np.arange(1000)/SRATE)
+            clock.return_value = 14.
+            buffer.append_chunk([[5., 6.]], [80.])
+            self.assertEqual(buffer.model_snapshot(1000)['timestamps'], [80.])
+            self.assertEqual(buffer.connection_generation, 1)
+            self.assertLess(source.window(wait=False).shape[1], 1000)
 
     def test_timestamp_slice_can_exceed_requested_span(self):
         """同一段缓冲：按时间戳切片拿到 12 点，按点数切片稳定拿到 4 点。"""
@@ -185,6 +234,65 @@ class WindowLengthTest(unittest.TestCase):
 
 class StreamNamePinningTest(unittest.TestCase):
     """显式指定流名时，管理线程只能连到这条流。"""
+
+    def test_start_failures_allow_cleanup(self):
+        manager = LiveStreamManager()
+        with patch('threading.Thread.start', side_effect=RuntimeError('fixture thread limit')):
+            with self.assertRaisesRegex(RuntimeError, 'fixture thread limit'):
+                manager.start()
+            manager.stop()
+        manager = LiveStreamManager()
+        with patch.object(_StreamWorker, 'start', side_effect=RuntimeError('fixture thread limit')):
+            with self.assertRaisesRegex(RuntimeError, 'fixture thread limit'):
+                manager._connect_new([FakeStreamInfo('EEG')])
+            manager.stop()
+
+    def test_stop_during_worker_start_closes_the_inlet(self):
+        inlet = FakeInlet([[1., 2.]], [0.])
+        manager = LiveStreamManager(inlet_factory=lambda *_: inlet)
+        entered, release = threading.Event(), threading.Event()
+        original_start = _StreamWorker.start
+
+        def delayed_start(worker):
+            entered.set()
+            release.wait(3)
+            original_start(worker)
+
+        with patch.object(_StreamWorker, 'start', delayed_start):
+            connect = threading.Thread(target=manager._connect_new, args=([FakeStreamInfo('EEG')],))
+            connect.start()
+            self.assertTrue(entered.wait(2))
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                stopped = pool.submit(manager.stop)
+                release.set()
+                stopped.result(timeout=3)
+            connect.join(2)
+        self.assertTrue(inlet.closed)
+        self.assertIsNone(manager.buffer('eeg'))
+
+    def test_worker_loss_removes_signal_before_the_next_discovery(self):
+        manager = LiveStreamManager()
+        info = FakeStreamInfo('EEG')
+        first_read, drop = threading.Event(), threading.Event()
+
+        class Inlet(FakeInlet):
+            def pull_chunk(self, **kwargs):
+                if self._rows:
+                    return super().pull_chunk(**kwargs)
+                first_read.set()
+                drop.wait(2)
+                raise RuntimeError('fixture lost')
+
+        manager._inlet_factory = lambda *_: Inlet([[5., 6.]], [1.])
+        manager._connect_new([info])
+        self.assertTrue(first_read.wait(2))
+        self.assertTrue(manager.buffer('eeg').stats()['live'])
+        worker = manager._workers['eeg']
+        drop.set()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertIsNone(manager.buffer('eeg'))
+        self.assertEqual(manager.errors()['eeg'], 'fixture lost')
 
     def test_only_the_requested_stream_is_connected(self):
         wanted = FakeStreamInfo("BioMulti Lite EEG-00cde1", channels=2)

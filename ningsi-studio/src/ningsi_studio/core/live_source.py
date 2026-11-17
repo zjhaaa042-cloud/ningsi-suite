@@ -165,19 +165,11 @@ def rejected_kind(row: dict) -> str | None:
 
 
 def detected_source(sources: list[dict] | None = None, probe_seconds: float = 0.4) -> dict | None:
-    """当前**真正检测到**的实时数据源；一个都没有就返回 None（界面据此显示"无信号"）。
-
-    优先级（实测踩过坑，顺序很重要）：
-    1. 标有模拟来源的 LSL 流仅供显式选择；
-    2. **脑电流优先**：同一台设备常常同时推 EEG / Metric / Heart Rate / Motion 多条流，
-       直接取"发现的第一条"很可能拿到 Metric（实测就是如此，那条流还没有样本，
-       于是预览/建会话都会报"没有收到样本"）。所以按流类型排序，EEG 排最前。
-    仿真脑电源 sim-bsense 永远不在此列：它必须被显式选择。
-    """
+    """自动选择已发现并标记为脑电的真实 LSL 流。只有辅助流或模拟源时返回 None。"""
     rows = sources if sources is not None else cached_sources(probe_seconds)
-    candidates = (row for row in rows if row.get("kind") == "lsl" and not row.get("simulated")
-                  and not str(row.get("key", "")).startswith("unsupported:"))
-    return min(candidates, key=lambda row: str(row.get("stream_kind") or "").lower() != "eeg", default=None)
+    return next((row for row in rows if row.get("kind") == "lsl" and is_eeg_stream(row)
+                 and not row.get("simulated") and row.get("real") is not False
+                 and str(row.get("key", "")).startswith("lsl:")), None)
 
 
 def detected_source_fields(sources: list[dict] | None = None, probe_seconds: float = 0.4) -> dict:
@@ -237,6 +229,13 @@ def list_available(probe_seconds: float = 2.0) -> list[dict]:
             continue
         name = item["name"]
         simulated = _is_sim_outlet(item.get("source_id"), name)
+        from ningsi_studio.domain import bsense_device
+        try:
+            device_configuration = bsense_device.configuration(item)
+        except (ValueError, TypeError, OverflowError):
+            # Preserve conflicting live metadata for preflight to explain; it
+            # must not receive a successful documented-parameter badge.
+            device_configuration = None
         sources.append({
             "key": f"lsl:{name}",
             "kind": "lsl",
@@ -257,7 +256,10 @@ def list_available(probe_seconds: float = 2.0) -> list[dict]:
             "is_eeg": str(item.get("kind") or "").strip().lower() == "eeg",
             "usable": str(item.get("kind") or "").strip().lower() not in NON_EEG_STREAM_KINDS,
             "channel_labels": item.get("channel_labels", []),
+            "declared_units": item.get("declared_units", []),
+            "nominal_srate": item.get("nominal_srate"),
             "source_id": item.get("source_id", ""),
+            "device_configuration": device_configuration,
         })
 
     # 脑电流排到最前：前端"缺省预填第一个 real 源"与 detected_source() 都据此取值
@@ -297,7 +299,7 @@ class ManagedLslSource:
         self.device = device
         self.stream_name = stream_name
         self._research_timing = bool(research_timing)
-        kwargs = {}
+        kwargs = {"stale_timeout": stale_timeout}
         if research_timing:
             # Clock correction is allowed; timestamp smoothing/monotonization must
             # not conceal gaps and backwards samples from the research QC gate.
@@ -335,6 +337,9 @@ class ManagedLslSource:
         self.research_scale_to_uv = 1.0
         self.research_profile = None
         self.operator_eeg_scale_to_uv = None
+        self.blink_binding = None
+        self._blink_buffer_id = None
+        self._blink_connection_generation = None
 
 
     # ------------------------------------------------------------------ 生命周期
@@ -423,14 +428,51 @@ class ManagedLslSource:
         同一段数据的 peak 落到 44~53 µV、可用（同文件的 E/F 组）。
         """
         raw = np.atleast_2d(np.asarray(data, dtype=float))
-        if raw.size == 0:
-            return (raw, {}) if return_artifacts else raw
+        if raw.shape[1] < 2:  # A single new sample cannot be zero-phase filtered.
+            empty = np.empty((self.channels, 0))
+            return (empty, {"reasons": ["preprocessing_warmup"]}) if return_artifacts else empty
         descriptor = self._manager.descriptor("eeg")
         labels = descriptor.channel_labels if descriptor else ()
         units = descriptor.declared_units if descriptor else ()
+        if descriptor is not None:
+            from ningsi_studio.domain.eeg_units import resolve_calibration
+            documented = resolve_calibration(None, descriptor.as_dict())
+            if documented:
+                if self.operator_eeg_scale_to_uv not in (None, documented["scale_to_uv"]):
+                    raise ValueError("当前 EEG 换算倍率与 BSense-R 手册配置不一致")
+                self.operator_eeg_scale_to_uv = documented["scale_to_uv"]
         pick, _ = channel_layout(labels, len(raw))
         scales = voltage_scales(units, len(raw), self.research_scale_to_uv, pick, self.operator_eeg_scale_to_uv)
         x = raw * np.asarray(scales)[:, None]
+        blink_evidence = {}
+        if len(pick) == 2:
+            from ningsi.signal.blinks import process_blinks
+            calibration, montage = None, ""
+            selected_labels = [labels[i] if i < len(labels) else f"Ch{i+1}" for i in pick]
+            try:
+                if self.blink_binding:
+                    from .blink_control import verify_binding
+                    calibration, _, _, selected_labels, montage = verify_binding(self.blink_binding, self)
+                    buffer = self._manager.buffer("eeg")
+                    if buffer is None:
+                        raise ValueError("设备已断开，请重新连接并校准")
+                    buffer_id = buffer.buffer_id
+                    generation = buffer.connection_generation
+                    if self._blink_buffer_id is not None and self._blink_buffer_id != buffer_id:
+                        raise ValueError("设备已重连，请重新做个人眨眼校准")
+                    if self._blink_connection_generation is not None and self._blink_connection_generation != generation:
+                        raise ValueError("设备已重连，请重新做个人眨眼校准")
+                    self._blink_buffer_id = buffer_id
+                    self._blink_connection_generation = generation
+                blink = process_blinks(x[pick], self.srate, calibration,
+                                       channel_labels=selected_labels, montage_id=montage)
+                x[pick] = blink.cleaned_uv
+                # Fit with all acquired conditioning context; eligibility and
+                # coverage describe only the same suffix returned for scoring.
+                blink_evidence = blink.as_dict(start_index=max(0, x.shape[1] - expected))
+            except ValueError as exc:
+                blink_evidence = {"state": "invalid", "reasons": ["blink_calibration_mismatch"],
+                                  "detail": str(exc), "corrected_events": 0}
         x = x - x.mean(axis=1, keepdims=True)
         filtered = []
         log = None
@@ -438,7 +480,8 @@ class ManagedLslSource:
             out, log = run_preprocess(channel, self.srate)
             filtered.append(out)
         y, evidence = process_live_artifacts(np.vstack(filtered), raw, self.srate, expected, labels,
-                                             units, self.research_scale_to_uv, self.operator_eeg_scale_to_uv)
+                                             units, self.research_scale_to_uv, self.operator_eeg_scale_to_uv,
+                                             blink_evidence=blink_evidence)
         self._last_condition = {
             "spec": CONDITION_SPEC,
             "dc_removal": DC_REMOVAL,
@@ -453,6 +496,7 @@ class ManagedLslSource:
             "scale_to_uv": self.research_scale_to_uv,
             "channel_scale_to_uv": [scales[i] for i in evidence["eeg_source_indices"]],
             "artifact_spec": ARTIFACT_SPEC,
+            "blink_control": blink_evidence,
         }
         return (y, evidence) if return_artifacts else y
 
@@ -490,6 +534,7 @@ class ManagedLslSource:
             age = stats.get("seconds_since_last")
             fresh = age is None or age <= self.stale_timeout
             buffer = self._manager.buffer("eeg")
+            generation = buffer.connection_generation if buffer is not None else None
             eeg_times = ()
             if return_artifacts and self._motion_manager and buffer is not None:
                 eeg = buffer.model_snapshot(wanted)
@@ -523,6 +568,22 @@ class ManagedLslSource:
                     evidence = {"spec": self.research_profile["preprocessing_policy"],
                                 "sample_end_index": end-1, "reasons": list(row["window"].quality.reasons)}
                     wave = row["filtered_uv"]
+                    # The frozen human-model pipeline stays training-aligned.
+                    # Additional raw dual-channel detection may only veto a contaminated window.
+                    if len(self.channel_labels) == 2:
+                        from ningsi.signal.blinks import process_blinks
+                        snap_raw = np.asarray(snap["samples"], dtype=float)
+                        desc = snap["descriptor"]
+                        picks, _ = channel_layout(desc.get("channel_labels", ()), len(snap_raw))
+                        scales = voltage_scales(desc.get("declared_units", ()), len(snap_raw),
+                                                self.research_scale_to_uv, picks, self.operator_eeg_scale_to_uv)
+                        # Use the same end index as the filtered model window.
+                        # The buffer may already hold nearly two seconds more.
+                        stop = end - (snap["total_samples"] - snap_raw.shape[1])
+                        blink = process_blinks(snap_raw[picks, stop-expected:stop] * np.asarray(scales)[picks, None],
+                                               self.srate, channel_labels=self.channel_labels)
+                        evidence["blink_control"] = {**blink.as_dict(), "scope": "veto_only_frozen_model"}
+                        evidence["reasons"] = list(dict.fromkeys(evidence["reasons"] + list(blink.reasons)))
                     result = (wave if wave is not None else np.zeros((self.channels, 0)), evidence)
                 else:
                     result = self._condition(data, expected, stats.get("observed_srate"), **options)
@@ -541,6 +602,9 @@ class ManagedLslSource:
                     record["motion_reference"] = motion
                     if motion["reason"] and motion["reason"] not in record["reasons"]:
                         record["reasons"].append(motion["reason"])
+                if self._manager.buffer("eeg") is not buffer or buffer.connection_generation != generation:
+                    empty = np.zeros((self.channels, 0))
+                    return (empty, {"reasons": ["signal_stale"]}) if return_artifacts else empty
                 return result
             time.sleep(0.1)
 
@@ -556,19 +620,17 @@ def build_source(device: str = SIM_SOURCE, *, channels: int = 1, srate: float = 
     """
     if device and device.startswith("lsl:"):
         name = device.split(":", 1)[1]
+        from ningsi_studio.domain import bsense_device
+        if bsense_device.is_bsense_eeg({"kind": "eeg", "name": name}):
+            srate, channels = bsense_device.SRATE, bsense_device.CHANNELS
         source = ManagedLslSource(name, device=name, srate=srate, channels=channels,
                                   ready_timeout=ready_timeout, **({"research_timing": True} if research_timing else {}))
-        if not wait_ready:
-            try:
-                source.start(wait=False)
-            except Exception:                            # noqa: BLE001 - 未就绪交给 status() 报
-                pass
-            return SourceInfo(
-                key=device, kind="lsl", srate=source.srate, channels=source.channels,
-                device=name, note=_lsl_note(source.descriptor_dict(), name, source.srate),
-                engine=source,
-            )
-        if not source.start():
+        try:
+            ready = source.start(wait=wait_ready)
+        except Exception:
+            source.stop()
+            raise
+        if wait_ready and not ready:
             status = source.status()
             source.stop()
             detail = status.get("errors") or "缓冲里还没有样本"
@@ -643,16 +705,16 @@ class PreviewStream:
 
     def stop(self) -> None:
         with self._lock:
-            source = self._source
+            engine = getattr(self._source, "engine", None)
+            if engine is not None and hasattr(engine, "stop"):
+                try:
+                    engine.stop()
+                except Exception as exc:
+                    raise RuntimeError(f"停止预览失败：{exc}") from exc
             self._source = None
             self._key = None
             self._started_at = None
-        engine = getattr(source, "engine", None) if source is not None else None
-        if engine is not None and hasattr(engine, "stop"):
-            try:
-                engine.stop()
-            except Exception:                            # noqa: BLE001 - 停止失败不影响接口
-                pass
+            self._error = None
 
     @property
     def active(self) -> bool:
@@ -663,9 +725,11 @@ class PreviewStream:
         with self._lock:
             source = self._source
             key = self._key
+            started_at = self._started_at
+            error = self._error
         if source is None:
             return {"active": False, "source": None, "kind": None, "device": None,
-                    "no_signal": True, "note": self._error or "未开始预览：当前没有脑机信号",
+                    "no_signal": True, "note": error or "未开始预览：当前没有脑机信号",
                     "started_at": None}
         engine = source.engine
         stats: dict = {}
@@ -697,13 +761,15 @@ class PreviewStream:
                 conditioning = engine.conditioning() or {}
             except Exception:                            # noqa: BLE001
                 conditioning = {}
+        srate = round(float(getattr(engine, "srate", source.srate) or 0.0), 3)
         return {
             "active": True,
             "source": key,
             "kind": source.kind,
+            "simulated": source.kind == "sim" or _is_sim_outlet(descriptor.get("source_id"), source.device),
             "device": source.device,
-            "srate": round(float(source.srate or 0.0), 3),
-            "channels": int(source.channels or 1),
+            "srate": srate,
+            "channels": int(getattr(engine, "channels", source.channels) or 1),
             "channel_labels": list(getattr(source, "channel_labels", []) or []),
             "ready": bool(live),
             # live=False 就是界面上的"无信号"：流在，但最近没有样本（设备没开推 / 线掉了）
@@ -712,8 +778,8 @@ class PreviewStream:
             "buffered_samples": stream.get("buffered_samples"),
             "conditioning": conditioning,
             "errors": stats.get("errors") or {},
-            "note": _lsl_note(descriptor, source.device, source.srate) if descriptor else source.note,
-            "started_at": self._started_at,
+            "note": _lsl_note(descriptor, source.device, srate) if descriptor else source.note,
+            "started_at": started_at,
             "no_signal": bool(no_signal),
         }
 
@@ -721,12 +787,12 @@ class PreviewStream:
         """取一窗调理后的真实波形 + 质检判定（预览用，不落库）。"""
         with self._lock:
             source = self._source
-        if source is None:
-            return {"active": False, "no_signal": True, "samples": [], "seconds": 0.0,
-                    "note": self._error or "未开始预览：当前没有脑机信号"}
+            if source is None:
+                return {**self.status(), "samples": [], "seconds": 0.0}
         engine = source.engine
         window_sec = min(self.window_seconds, float(getattr(engine, "condition_seconds", 0.0) or self.window_seconds))
         artifact_record = {}
+        read_error = None
         try:
             # 真机（ManagedLslSource）支持 wait=False 关掉"有限等待"，预览才能按刷新率出帧；
             # 仿真源（SyntheticEEG）即时生成，接口不带该参数（与会话 /signal 通道同一处理）。
@@ -737,17 +803,24 @@ class PreviewStream:
             else:
                 data = engine.window("rest", seconds=window_sec)
         except Exception as exc:                         # noqa: BLE001 - 预览不阻塞界面
-            return {**self.status(), "samples": [], "seconds": 0.0, "no_signal": True,
-                    "note": f"读取失败：{exc}"}
+            read_error = f"读取失败：{exc}"
+        # A slow frame can finish after another client switched or stopped the
+        # preview. Never label that frame or its quality verdict as the new source.
+        with self._lock:
+            status = self.status()
+            if self._source is not source:
+                return {**status, "samples": [], "seconds": 0.0}
+        if read_error:
+            return {**status, "samples": [], "seconds": 0.0, "window_error": read_error}
         arr = np.atleast_2d(np.asarray(data, dtype=float))
-        if arr.size == 0 or arr.shape[1] == 0:
-            return {**self.status(), "samples": [], "seconds": 0.0, "no_signal": True}
+        if not arr.size or status["no_signal"]:
+            return {**status, "samples": [], "seconds": 0.0}
         from ningsi.signal.artifacts import check_channels
 
         # 刚接上流时缓冲里可能只有一两百点，而 Welch 分段需要 segment_sec × srate 点
         # （250 Hz 时 500 点）——直接算会抛"样本数不足"并把预览接口打成 500。
         # 预览是"看一眼现场信号"的工具，**绝不能因为样本不够而失败**：如实报"样本不足"。
-        srate = float(source.srate or 250.0)
+        srate = float(status["srate"])
         required = int(round(float(config.WELCH.get("segment_sec", 2.0)) * srate))
         if arr.shape[1] < required:
             quality = {"ok": None, "reasons": ["insufficient_samples"],
@@ -766,8 +839,7 @@ class PreviewStream:
             step = int(np.ceil(arr.shape[1] / 2400))
             payload_arr = arr[:, ::step]
         return {
-            **self.status(),
-            "no_signal": False,
+            **status,
             "seconds": round(float(arr.shape[1]) / srate, 3),
             "samples": [[round(float(value), 3) for value in channel] for channel in payload_arr],
             "peak_uv": round(float(np.max(np.abs(arr))), 2),

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import ipaddress
 import logging
+import math
 from pathlib import Path
 
 from ningsi import config as engine_config
@@ -129,6 +130,8 @@ def session_public(row, *, extra: dict | None = None) -> dict:
         "channels": row["channels"],
         "source": row["source"],
         "eeg_calibration": _decode_payload(row["eeg_calibration"]) if "eeg_calibration" in row.keys() else None,
+        "blink_calibration": ({"configured": True, "scope": "personal_session"}
+                              if "blink_calibration" in row.keys() and row["blink_calibration"] else None),
         "time_scale": row["time_scale"],
         "training_mode": row["training_mode"],
         # 协议档（full / short）：老库的行在迁移里补成 'full'；未知值按完整协议展示
@@ -147,6 +150,14 @@ def session_public(row, *, extra: dict | None = None) -> dict:
         "created_at": row["created_at"],
         "engine_versions": json.loads(row["engine_versions"] or "{}"),
     }
+    if "artifact_paths" in row.keys():
+        paths = json.loads(row["artifact_paths"] or "{}")
+        available = {kind for kind, path in paths.items() if path and Path(path).is_file()}
+        payload["has_artifacts"] = bool(available)
+        payload["has_report"] = "report_json" in available
+        payload["has_training"] = bool(row["has_saved_training"]) or (
+            payload["status"] in ("running", "queued")
+            and phase_module.phase_index("training", payload["protocol"]) >= 0)
     if extra:
         payload.update(extra)
     return jsonable(payload)
@@ -428,6 +439,20 @@ def build_router(settings: Settings) -> Router:
         return Response.json(result)
 
     # ------------------------------------------------- 无会话的设备实时预览
+    @router.post(r"/api/devices/blink-calibration")
+    def blink_calibration_action(request: Request) -> Response:
+        from ningsi_studio.core.blink_control import SERVICE
+        payload = schemas.typed(request.json())
+        participant = payload.get("participant")
+        with store.read_only(db_path) as conn:
+            if not isinstance(participant, str) or repo.find_subject(conn, participant) is None:
+                raise ValidationError("请先创建或选择本次参与者")
+        try:
+            result = SERVICE.action(payload, live_source.preview_stream())
+        except (ValueError, RuntimeError) as exc:
+            raise ValidationError(str(exc)) from exc
+        return Response.json(result)
+
     @router.get(r"/api/devices/preview")
     def preview_status(request: Request) -> Response:
         """预览状态；`?window=1` 时顺带返回一窗真实波形（前端按 1~2 秒轮询）。"""
@@ -443,7 +468,7 @@ def build_router(settings: Settings) -> Router:
         device = schemas.optional_text(payload.get("source") or payload.get("device"),
                                       max_len=120, name="数据源")
         device = (device or "").strip() or None
-        if device and device != live_source.SIM_SOURCE and not device.startswith("lsl:"):
+        if device and device != live_source.SIM_SOURCE and not (device.startswith("lsl:") and device[4:].strip()):
             raise ValidationError(
                 f"数据源只能是 lsl:<流名称> 或 {live_source.SIM_SOURCE}，收到 {device!r}", detail=device)
         try:
@@ -454,7 +479,10 @@ def build_router(settings: Settings) -> Router:
 
     @router.delete(r"/api/devices/preview")
     def preview_stop(request: Request) -> Response:
-        live_source.preview_stream().stop()
+        try:
+            live_source.preview_stream().stop()
+        except RuntimeError as exc:
+            raise Conflict(str(exc)) from exc
         return Response.json({"active": False, "stopped": True})
 
     @router.get(r"/api/devices/status")
@@ -625,10 +653,12 @@ def build_router(settings: Settings) -> Router:
         #   · 不传 device / 传 auto ⇒ 用当前检测到的实时源；一个都没有就 409，让用户去接设备；
         #   · 传 lsl:<流名> ⇒ 先确认这条流现在真的可见，避免"建好会话才发现没信号"；
         #   · 传 sim-bsense ⇒ 允许，但这是**显式**选择（演示/自测），界面与报告都会标注仿真。
+        source_rows = []
         device_raw = schemas.optional_text(payload.get("device"), max_len=120, name="设备")
         device = (device_raw or "").strip()
         if not device or device.lower() in ("auto", "default", "any"):
             sources = live_source.list_available(1.0)
+            source_rows = sources
             device = live_source.default_device(sources) or ""
             if not device:
                 raise Conflict(
@@ -637,6 +667,7 @@ def build_router(settings: Settings) -> Router:
         elif device.startswith("lsl:"):
             stream_name = device.split(":", 1)[1]
             rows = live_source.list_available(1.0)
+            source_rows = rows
             keys = {row.get("key") for row in rows}
             if device not in keys:
                 visible = sorted(key for key in keys if str(key).startswith("lsl:"))
@@ -667,11 +698,20 @@ def build_router(settings: Settings) -> Router:
         if device.startswith("lsl:") and time_scale != 1.0:
             raise ValidationError("真实脑电采集必须使用真实节奏（时间倍率1.0）；快速演示请显式选择仿真源 sim-bsense")
         try:
-            calibration = eeg_units.confirmation(payload.get("eeg_calibration"))
+            descriptor = next((item for item in source_rows if item.get("key") == device), None)
+            calibration = eeg_units.resolve_calibration(payload.get("eeg_calibration"), descriptor)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
         if calibration and not device.startswith("lsl:"):
             raise ValidationError("仅 LSL 设备可确认 EEG 源单位")
+        blink_binding = None
+        if payload.get("blink_calibration_token"):
+            from ningsi_studio.core.blink_control import SERVICE
+            try:
+                blink_binding = SERVICE.binding(payload["blink_calibration_token"], public_id, device,
+                                                live_source.preview_stream())
+            except (ValueError, TypeError) as exc:
+                raise ValidationError(str(exc)) from exc
 
         with store.connect(db_path) as conn:
             subject = repo.find_subject(conn, public_id)
@@ -689,7 +729,7 @@ def build_router(settings: Settings) -> Router:
                 device=device, srate=srate, channels=channels,
                 source="lsl" if device.startswith("lsl:") else "sim-bsense",
                 time_scale=time_scale, training_mode=training_mode,
-                protocol=protocol, eeg_calibration=calibration,
+                protocol=protocol, eeg_calibration=calibration, blink_calibration=blink_binding,
                 engine_versions=bootstrap.engine_versions(),
             )
         # 注意：这里必须已经退出 `with store.connect(...)`（事务提交、连接释放），
@@ -1044,10 +1084,12 @@ def build_router(settings: Settings) -> Router:
                 return Response.json(state_checkins.stress_trend(conn, row["public_id"], period))
             records = repo.session_points(conn, public_id=row["public_id"])
         from ningsi.monitoring import history as history_module
-        usable, rejected = _comparable(records, history_module)
+        reference = _trend_context(dict(row))
+        usable, rejected = _comparable(records, history_module, reference=reference, field=field)
         points = history_module.aggregate(usable, field, period)
         return Response.json({"field": field, "period": period, "points": jsonable(points),
                               "sessions": len(records), "comparable": len(usable),
+                              "comparison_group": reference,
                               "rejected": len(rejected),
                               "rejected_reasons": _reason_counts(rejected)})
 
@@ -1234,14 +1276,14 @@ def build_router(settings: Settings) -> Router:
             return Response.json(payload)
         # 未落盘时给出可解释的部分结果，而不是空响应
         partial = {"uuid": uuid, "status": row["status"], "phase": row["phase"],
-                   "progress": row["progress"], "partial": True,
+                   "progress": row["progress"], "partial": True, "error": row["error"],
                    "runs": jsonable([{"phase": item["phase"], "status": item["status"],
                                       "error": item["error"]} for item in runs])}
         with store.read_only(db_path) as conn:
             partial["indicator_summary"] = jsonable(repo.latest_metric_summary(conn, row["id"]))
             partial["alerts"] = jsonable(schemas.rows_to_dicts(repo.list_alerts(conn, row["id"])))
             partial["state_observations"] = state_checkins.summary(conn, row["id"])
-        return Response.json(partial, status=202)
+        return Response.json(partial, status=202 if row["status"] in ("running", "queued") else 200)
 
     @router.get(r"/api/sessions/{uuid}/artifacts")
     def session_artifacts(request: Request) -> Response:
@@ -1394,7 +1436,8 @@ def build_router(settings: Settings) -> Router:
                 return Response.json(state_checkins.stress_trend(conn, public_id, period))
             records = repo.session_points(conn, public_id=public_id)
         from ningsi.monitoring import history as history_module
-        usable, rejected = _comparable(records, history_module)
+        reference = _trend_reference(records, field)
+        usable, rejected = _comparable(records, history_module, reference=reference, field=field)
         points = history_module.aggregate(usable, field, period)
         # 台账按会话分别写在 <runs_root>/<uuid>/history/sessions.jsonl，
         # 这里汇总全部会话的台账再聚合（旧实现读 <runs_root>/history 那个不存在的共享文件）。
@@ -1403,16 +1446,17 @@ def build_router(settings: Settings) -> Router:
             ledger_records = [record for record in ledger_records
                               if record.get("participant") == public_id]
         ledger_points = _ledger_trend(ledger_records, field, period,
-                                      reference=records[0] if records else None)
+                                      reference=reference, contexts=records)
         return Response.json({
             "field": field, "period": period,
             "points": jsonable(points),
             "ledger_points": jsonable(ledger_points),
             "sessions": len(records),
             "comparable": len(usable),
+            "comparison_group": reference,
             "rejected": len(rejected),
             "rejected_reasons": _reason_counts(rejected),
-            "note": "设备、采样率或通道数变化的记录不参与趋势聚合（可比性保护）。",
+            "note": "按最新含该指标的已完成会话分组，仅聚合同一协议、训练模式、数据来源、时间倍率及设备配置；缺少该指标的会话不参与均值。",
         })
 
     # ------------------------------------------------------------ 总览
@@ -1450,20 +1494,60 @@ def _require_runtime(uuid: str, manager: SessionManager):
     return runtime
 
 
-def _comparable(records, history_module) -> tuple[list, list]:
-    """趋势聚合前先做可比性过滤：设备、采样率或通道数变化即排除。"""
+def _has_trend_value(record, field):
+    value = (record.get("indicators") or {}).get(field)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _trend_context(record):
+    source = record.get("source") or record.get("device")
+    protocol = phase_module.normalize_profile(record.get("protocol"))
+    return {"device": record.get("device"), "srate": record.get("srate"),
+            "channels": record.get("channels"), "protocol": protocol,
+            "protocol_label": phase_module.PROFILES[protocol]["label"],
+            "training_mode": record.get("training_mode") or "quick",
+            "source": source, "source_kind": _source_kind_from_key(source),
+            "time_scale": record.get("time_scale", 1.0)}
+
+
+def _trend_reference(records, field):
+    # session_points is newest first. An assessment without a monitor metric
+    # must not silently choose the comparison group for unrelated scores.
+    record = next((record for record in records if _has_trend_value(record, field)), None)
+    return _trend_context(record) if record else None
+
+
+def _comparable(records, history_module, *, reference=None, field=None) -> tuple[list, list]:
+    """Only combine the same acquisition and protocol context, with a real metric."""
     if not records:
         return [], []
-    reference = records[0]
+    reference = reference or (_trend_reference(records, field) if field else _trend_context(records[0]))
+    candidates, rejected = [], []
+    for record in records:
+        context = _trend_context(record)
+        reason = "metric_unavailable" if field and not _has_trend_value(record, field) else ""
+        if not reason and reference:
+            for key, reject in (("protocol", "protocol_changed"),
+                                ("training_mode", "training_mode_changed"),
+                                ("source_kind", "source_kind_changed"),
+                                ("source", "source_changed"),
+                                ("time_scale", "time_scale_changed")):
+                if context[key] != reference.get(key):
+                    reason = reject
+                    break
+        if reason:
+            rejected.append((record, reason))
+        else:
+            candidates.append(record)
+    if not reference:
+        return [], rejected
     try:
-        return history_module.comparable(
-            records,
-            reference.get("device"),
-            reference.get("srate"),
-            reference.get("channels"),
-        )
-    except Exception:  # noqa: BLE001 - 聚合失败不应让接口 500
-        return list(records), []
+        usable, mismatches = history_module.comparable(
+            candidates, reference.get("device"), reference.get("srate"), reference.get("channels"))
+    except (TypeError, ValueError, OverflowError):
+        # A damaged context cannot make the entire dataset comparable.
+        return [], rejected + [(record, "invalid_configuration") for record in candidates]
+    return usable, rejected + mismatches
 
 
 def _reason_counts(rejected) -> dict:
@@ -1507,16 +1591,23 @@ def _ledger_records(settings: Settings) -> list:
     return records
 
 
-def _ledger_trend(records, field: str, period: str, *, reference=None) -> list:
+def _ledger_trend(records, field: str, period: str, *, reference=None, contexts=()) -> list:
     """把台账记录聚合成趋势点（与 `paired_ledger.trend_points` 同一口径）。"""
     if not records:
         return []
     from ningsi.monitoring import history as history_module
 
     try:
-        reference = reference or max(records, key=lambda record: record.get("recorded_at", ""))
-        usable, rejected = history_module.comparable(
-            records, reference.get("device"), reference.get("srate"), reference.get("channels"))
+        # Legacy JSONL rows lack protocol/source fields. SQLite is authoritative;
+        # enrich only rows linked to completed sessions, excluding orphan or
+        # cancelled exports instead of letting them change the comparison group.
+        by_uuid = {record["uuid"]: record for record in contexts}
+        linked = []
+        for record in records:
+            context = by_uuid.get(record.get("session_uuid"))
+            if context is not None:
+                linked.append({**record, **_trend_context(context)})
+        usable, rejected = _comparable(linked, history_module, reference=reference, field=field)
         points = history_module.aggregate(usable, field, period)
     except Exception as exc:  # noqa: BLE001 - 聚合失败不应让接口 500
         LOGGER.warning("台账趋势聚合失败：%s", exc)
@@ -1571,6 +1662,7 @@ _PATH_SPECS = [
     ("get", "/api/devices", "可用数据源（实时 LSL 流在前，仿真源可显式选择）", "probe"),
     ("get", "/api/devices/status", "运行中会话的设备健康状况（是否在收数、实测采样率）", None),
     ("get", "/api/devices/preview", "无会话的设备实时预览状态与一窗波形（?window=1）", "window"),
+    ("post", "/api/devices/blink-calibration", "个人双通道眨眼校准：start/mark/finish/status/clear", None),
     ("post", "/api/devices/preview", "启动设备实时预览（不传 source 时自动选检测到的实时源）", None),
     ("delete", "/api/devices/preview", "停止设备实时预览", None),
     ("get", "/api/overview", "首页总览统计", None),

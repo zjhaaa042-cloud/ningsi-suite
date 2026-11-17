@@ -3,6 +3,7 @@ import { describeError } from '../store.js';
 import { button, el, field } from '../util.js';
 import { renderPreviewCard } from '../preview.js';
 import { createSessionPreflight } from './session-preflight.js';
+import { createBlinkCalibration } from './blink-calibration.js';
 
 const option = (value, text) => el('option', { value, text });
 
@@ -14,7 +15,8 @@ export async function render(container, ctx) {
   const participant = el('select', { id: 'participant' }, [option('', '新参与者（自动分配编号）')]);
   const alias = el('input', { id: 'alias', type: 'text', placeholder: '可留空', maxLength: 80 });
   const aliasField = field('参与者别名', alias);
-  participant.onchange = () => { aliasField.hidden = Boolean(participant.value); update(); };
+  let participantRevision = 0;
+  participant.onchange = () => { participantRevision += 1; aliasField.hidden = Boolean(participant.value); update(); };
   const device = el('select', { id: 'device' });
   const unit = el('select', { id: 'eeg-source-unit' }, [
     option('', '使用设备声明'), ...['uV','mV','V','nV','ADC'].map(u => option(u, u === 'ADC' ? 'ADC 计数' : u)),
@@ -46,13 +48,7 @@ export async function render(container, ctx) {
   const scanButton = button('重新扫描', scan, { small: true });
   const start = button('开始评估', () => launch(false), { primary: true });
   const demo = button('运行模拟演示', () => launch(true));
-  const preflight = createSessionPreflight(ctx, { onChange: () => update(false), onUseProfile: profile => {
-    if (!Array.from(unit.options).some(item => item.value === profile.source_unit)) return;
-    unit.value = profile.source_unit;
-    factor.value = profile.scale_to_uv ?? '';
-    calibration.open = true;
-    update();
-  } });
+  const preflight = createSessionPreflight(ctx, { onChange: () => update(false) });
   const choices = [
     ['ten_min', '轻量体验', '十分钟测试与训练', '快速了解本次状态，体验反馈训练。', '约 10 分钟'],
     ['effective_time', '质量中断时补足', '有效时长训练', '4 轮各累计 50 秒有效反馈；坏窗暂停累计，达到上限后如实报告数据不足。', '约 10 分钟起 · 补采上限约 17 分 20 秒'],
@@ -72,6 +68,20 @@ export async function render(container, ctx) {
   const calibration = el('details', { class: 'setup-details' }, [
     el('summary', { text: '单位与标定设置' }), unitField, factorField,
   ]);
+  const blinkCalibration = createBlinkCalibration(ctx, {
+    getSettings: () => ({ participant: participant.value, device: device.value, eeg_calibration: calibrationSelection() }),
+    ensureParticipant: async () => {
+      if (participant.value) return;
+      const requestedRevision = participantRevision;
+      const requestedLabel = alias.value.trim();
+      const { data } = await api.createSubject({ auto_id: true, label: requestedLabel || null });
+      if (ctx.signal.aborted) return false;
+      participant.add(option(data.public_id, data.public_id + (requestedLabel ? ' · ' + requestedLabel : '')));
+      if (participantRevision !== requestedRevision || participant.value) return false;
+      participant.value = data.public_id;
+      participant.onchange();
+    },
+  });
   const protocolDetails = el('details', { class: 'setup-details' }, [
     el('summary', { text: '查看本方案的流程与时长' }), plan, modeField,
   ]);
@@ -82,15 +92,17 @@ export async function render(container, ctx) {
     el('div', { class: 'setup-fields' }, [field('参与者', participant), aliasField]),
     el('div', { class: 'device-setup' }, [
       el('div', { class: 'device-setup__head' }, [el('strong', { text: '脑电设备' }), scanButton]),
-      field('选择 EEG 数据流', device), deviceNote, calibration, preview,
+      field('选择 EEG 数据流', device), deviceNote, calibration, preview, blinkCalibration.node,
     ]),
     preflight.node,
   ]);
   function calibrationSelection() {
+    const documented = preflight.data?.calibration;
+    if (preflight.data?.device === device.value && documented?.origin === 'manufacturer_manual') return documented;
     return unit.value ? { source_unit: unit.value,
       ...(unit.value === 'ADC' ? { scale_to_uv: Number.isFinite(factor.valueAsNumber) ? factor.valueAsNumber : null } : {}) } : null;
   }
-  function update(refreshCheck = true) {
+  function update(refreshCheck = true, forceCheck = false) {
     const full = purpose.value === 'full';
     const profile = profiles.find(row => row.key === purpose.value);
     modeField.hidden = !full;
@@ -109,13 +121,15 @@ export async function render(container, ctx) {
     form.disabled = submitting;
     scanButton.disabled = scanning || submitting;
     preview.hidden = !device.value;
-    unitField.hidden = !device.value;
+    const documented = preflight.data?.device === device.value && preflight.data?.calibration?.origin === 'manufacturer_manual';
+    unitField.hidden = !device.value || documented;
     factorField.hidden = unitField.hidden || unit.value !== 'ADC';
-    calibration.hidden = !device.value;
+    calibration.hidden = !device.value || documented;
+    blinkCalibration.update();
     if (refreshCheck && !scanning && !submitting) preflight.refresh({
       device: device.value, protocol: purpose.value, participant: participant.value,
-      eeg_calibration: calibrationSelection(),
-    });
+      eeg_calibration: unit.value ? calibrationSelection() : null,
+    }, { force: forceCheck });
     const calibrationReady = unit.value !== 'ADC' || (Number.isFinite(factor.valueAsNumber) && factor.valueAsNumber > 0);
     readiness.textContent = scanning ? '正在扫描设备' : !device.value ? '等待连接脑电设备'
       : !calibrationReady ? '请补充有效的 ADC 校准倍率' : !subjectsReady || !profile ? '正在加载评估设置'
@@ -156,7 +170,7 @@ export async function render(container, ctx) {
           unit.value = ''; factor.value = '';
           previewController?.selectionChanged();
         }
-        update();
+        update(true, true);
       }
     }
   }
@@ -186,6 +200,7 @@ export async function render(container, ctx) {
         protocol: purpose.value, training_mode: isDemo ? 'quick' : mode.value,
         time_scale: isDemo ? 0.05 : 1,
         eeg_calibration: checkedCalibration,
+        blink_calibration_token: isDemo ? null : blinkCalibration.token,
       });
       if (ctx.signal.aborted) return;
       ctx.store.setState({ currentSession: data.session, phases: data.phases, sessionRuntime: data.runtime });

@@ -10,7 +10,7 @@ const MODEL_LABELS = {
 const CHECK_LABELS = { pass: '通过', warning: '需留意', fail: '待处理', pending: '采集后检查' };
 
 /** Read-only configuration checks; quality and baseline remain acquisition-time gates. */
-export function createSessionPreflight(ctx, { onChange = () => {}, onUseProfile = () => {} } = {}) {
+export function createSessionPreflight(ctx, { onChange = () => {} } = {}) {
   const body = el('div');
   const summary = el('span', { class: 'preflight-state', role: 'status', text: '等待选择设备' });
   const node = el('section', { class: 'session-preflight', 'aria-label': '本次评分与模型适配' }, [
@@ -37,7 +37,7 @@ export function createSessionPreflight(ctx, { onChange = () => {}, onUseProfile 
     ]));
     body.append(el('p', { class: 'preflight-note', text: '本检查只核对配置。信号质量、基线及实时数据是否有效，需要开始采集后确认；训练反馈沿用相对基线专注指数。' }));
     if (error) body.append(el('p', { class: 'preflight-error', role: 'alert', text: `开始前检查失败：${error}` }));
-    const checks = list(data?.checks);
+    const checks = list(data?.checks).filter(check => check.key !== 'device_profile');
     if (checks.length) {
       const unresolved = checks.filter(check => check.status === 'fail' || check.status === 'warning').length;
       body.append(el('details', { class: 'preflight-checks', open: checks.some(check => check.status === 'fail') }, [
@@ -49,18 +49,11 @@ export function createSessionPreflight(ctx, { onChange = () => {}, onUseProfile 
       ]));
     }
     const actions = el('div', { class: 'preflight-actions' }, [
-      el('a', { href: '#/devices' + (lastBody?.device ? `?device=${encodeURIComponent(lastBody.device)}` : ''), text: '设备连接与档案' }),
+      el('a', { href: '#/devices' + (lastBody?.device ? `?device=${encodeURIComponent(lastBody.device)}` : ''), text: '设备连接' }),
       el('a', { href: '#/models', text: '管理真人模型' }),
     ]);
     if (lastBody?.device) actions.append(button('重新检查', () => refresh(lastBody, { force: true, immediate: true }), { small: true, disabled: pending }));
     body.append(actions);
-    const profile = data?.device_profile?.profile;
-    if (profile?.source_unit && !pending) {
-      body.append(el('div', { class: 'preflight-profile-unit' }, [
-        el('p', { text: `该设备档案记录单位 ${profile.source_unit}${profile.scale_to_uv != null ? `，换算倍率 ${profile.scale_to_uv} µV/输入单位` : ''}。请核对本次实际配置后使用。` }),
-        button('采用档案单位', () => onUseProfile({ source_unit: profile.source_unit, scale_to_uv: profile.scale_to_uv }), { small: true }),
-      ]));
-    }
   }
 
   async function run(bodyToCheck, currentTicket) {

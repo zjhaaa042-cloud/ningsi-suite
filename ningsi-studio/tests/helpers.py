@@ -155,10 +155,10 @@ class StudioTestCase(unittest.TestCase):
     # ------------------------------------------------------------ 服务生命周期
     @classmethod
     def make_settings(cls, data_dir) -> Settings:
-        """构造注入式设置：临时数据目录 + 探测到的空闲端口。"""
+        """构造注入式设置：临时数据目录 + 由操作系统原子分配的空闲端口。"""
         return Settings(
             data_dir=Path(data_dir),
-            port=AppServer.free_port(cls.port_base),
+            port=0,
             max_active_sessions=cls.max_active_sessions,
             open_browser=False,
         )

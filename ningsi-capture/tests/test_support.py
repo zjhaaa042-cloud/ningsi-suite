@@ -7,6 +7,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ningsi" / "src"))
 from ningsi_capture.clock import Stamp
 
 
+def destroy_test_root(root):
+    # GUI fixtures often skip mainloop. Flush ttk's queued theme update before
+    # destroying its interpreter, so later tests do not dispatch orphan events.
+    root.update_idletasks()
+    root.destroy()
+
+
 class FakeClock:
     domain = "synthetic_test_clock"
 

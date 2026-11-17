@@ -11,7 +11,7 @@ import math
 from ningsi.acquisition.eeg import UNIT_FACTORS, normalize_unit
 from ningsi_studio.core import live_source, phases
 from ningsi_studio.core.human_inference import HumanAttentionPredictor
-from ningsi_studio.domain import eeg_units
+from ningsi_studio.domain import bsense_device, eeg_units
 
 
 MODEL_REASONS = {
@@ -106,10 +106,11 @@ def evaluate_preflight(payload, *, descriptors=(), device_profile=None, active_m
             add("device", "fail", "数据来源", "流的采样率或通道数无效，请核对厂商发布设置。", "#/devices")
     calibration = None
     calibration_error = None
+    device_configuration = None
     try:
-        calibration = eeg_units.confirmation(payload.get("eeg_calibration"))
-        if calibration and descriptor:
-            eeg_units.verify_descriptor(calibration, descriptor)
+        if descriptor is not None and not simulated:
+            device_configuration = bsense_device.configuration(descriptor)
+        calibration = eeg_units.resolve_calibration(payload.get("eeg_calibration"), descriptor)
     except (ValueError, TypeError, OverflowError) as error:
         calibration_error = str(error)
         calibration = None
@@ -120,6 +121,8 @@ def evaluate_preflight(payload, *, descriptors=(), device_profile=None, active_m
         add("units", "fail", "单位与标定", calibration_error, "#/devices")
     elif descriptor is None or simulated:
         add("units", "pending", "单位与标定", "连接真实设备后，核对 EEG 单位和 ADC 换算倍率。", "#/devices")
+    elif calibration and device_configuration:
+        add("units", "pass", "设备参数", "BSense-R：2 通道 · 250 Hz · µV，换算倍率 1（按产品手册）。")
     elif calibration:
         add("units", "pass", "单位与标定", "本次确认的 EEG 单位与设备声明未冲突；实际标定依据仍需操作者核对。")
     else:
@@ -134,10 +137,6 @@ def evaluate_preflight(payload, *, descriptors=(), device_profile=None, active_m
             add("units", "fail", "单位与标定", "设备未完整声明 EEG 电压单位，或输出为 ADC 计数；请在本次单位设置中显式确认，ADC 必须有校准倍率。", "#/devices")
 
     profile = device_profile or {"saved": False, "profile": {}, "missing_fields": [], "status": "pending_verification"}
-    missing = profile.get("missing_fields") or []
-    add("device_profile", "warning" if not profile.get("saved") or missing else "pass", "设备资料",
-        "设备资料尚不完整，请在设备连接页保存型号、导联、参考和标定依据。" if not profile.get("saved") or missing
-        else "所选来源的设备资料已保存为操作员声明，仍需现场核对。", "#/devices")
     add("attention_model", "pass" if model["status"] in ("compatible", "none") else "warning",
         "真人专注模型", model["message"], "#/models")
     if active_model and protocol in ("ten_min", "effective_time"):
@@ -146,6 +145,7 @@ def evaluate_preflight(payload, *, descriptors=(), device_profile=None, active_m
     ready = not any(row["status"] == "fail" for row in checks) and descriptor is not None and not simulated
     return {"schema": "ningsi-session-preflight-v1", "device": device, "protocol": protocol,
             "ready": ready, "checks": checks, "device_profile": profile, "calibration": calibration,
+            "device_configuration": device_configuration,
             "descriptor": descriptor,
             "scoring": {"relative_indices": {"status": "pending" if ready else "blocked",
                 "message": "专注、放松与负荷为相对个人基线指数；合格后按原指数提供预警与反馈。",

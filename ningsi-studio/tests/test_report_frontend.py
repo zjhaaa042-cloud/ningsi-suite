@@ -44,6 +44,20 @@ assert.ok(text(insufficient).includes('本协议未采集独立任务态评分')
 assert.ok(text(insufficient).includes('采集不足：流程已结束'));
 assert.ok(text(insufficient).includes('不能据此判断训练效果'));
 assert.ok(!text(insufficient).includes('指标为本次有效脑电窗口的均值'));
+report={participant:'p01',extras:{state_observations:{}},behavior:{pvt:null,sart:null},
+  indicators:{summary:{}}};
+const sparse=new StubNode('main');await render(sparse,ctx);
+assert.ok(!text(sparse).includes('报告加载失败'),'partial legacy observations and null behavior must not hide the report');
+assert.ok(all(sparse).some(n=>n.tagName==='H2'&&text(n)==='一、状态评分'));
+report={partial:true,status:'failed',phase:'failed',error:'模拟连接中断',
+  runs:[{phase:'qc',status:'done'}]};
+const ended=new StubNode('main');await render(ended,ctx);
+assert.ok(text(ended).includes('本次会话无完整报告'));
+assert.ok(text(ended).includes('模拟连接中断')&&text(ended).includes('阶段执行情况'));
+assert.ok(!text(ended).includes('刷新报告')&&!text(ended).includes('导出 zip'));
+report={...report,status:'running',phase:'qc',error:null};
+const running=new StubNode('main');await render(running,ctx);
+assert.ok(text(running).includes('刷新报告'));
 '''
         program = program.replace('API_URI', json.dumps((ROOT/'web/js/api.js').as_uri()))
         program = program.replace('VIEW_URI', json.dumps((ROOT/'web/js/views/report.js').as_uri()))

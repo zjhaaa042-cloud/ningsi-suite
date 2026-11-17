@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from .test_support import FakeClock
+from .test_support import FakeClock, destroy_test_root
 from ningsi_capture.acquisition import simulation_source
 from ningsi_capture.clock import Stamp
 from ningsi_capture.markers import MarkerPublisher, marker_sample
@@ -227,7 +227,7 @@ class MarkerGuiTests(unittest.TestCase):
             finally:
                 if app and app.store:
                     app.store.close("aborted")
-                root.destroy()
+                destroy_test_root(root)
                 gc.collect()
 
 

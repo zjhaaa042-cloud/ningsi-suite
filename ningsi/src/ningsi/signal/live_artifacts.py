@@ -137,7 +137,7 @@ def _muscle_burst(row, rate, *, reference=False):
 
 
 def process_live_artifacts(filtered, source, rate, expected, labels=(), units=(), fallback_scale=1.,
-                           operator_eeg_scale=None):
+                           operator_eeg_scale=None, *, blink_evidence=None):
     """Return EEG-only window and per-window evidence. References share the EEG sample clock.
 
     filtered contains DC-removed, filtered source channels in µV for voltage channels.
@@ -161,7 +161,7 @@ def process_live_artifacts(filtered, source, rate, expected, labels=(), units=()
             a, b = mapping[plus], mapping[minus]
             eog.append((uv[a] - uv[b], filtered[a] - filtered[b]))
     eeg, corrected = _correct_eyes(filtered[pick], uv[pick], eog, rate, count)
-    reasons = []
+    reasons = list((blink_evidence or {}).get("reasons", ()))
     if not np.isfinite(eeg).all():
         reasons.append("non_finite_signal")
     else:
@@ -191,4 +191,6 @@ def process_live_artifacts(filtered, source, rate, expected, labels=(), units=()
     info = {"spec": SPEC, "ocular_reference_axes": len(eog),
             "ocular_corrected_channels": [pick[i] for i in corrected],
             "eeg_source_indices": pick, "reasons": list(dict.fromkeys(reasons))}
+    if blink_evidence:
+        info["blink_control"] = blink_evidence
     return eeg, info

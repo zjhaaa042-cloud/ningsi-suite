@@ -115,11 +115,27 @@ class CaptureApp:
         self.quality_monitor = None
         self.callback_error = None
         self.task_close_pending = False
+        self.closed = False
+        self.poll_job = None
         self.initial_lsl_markers = bool(lsl_markers)
         self._build()
         root.report_callback_exception = self.on_callback_error
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        root.after(50, self.poll)
+        root.bind("<Destroy>", self._on_destroy, add="+")
+        self.poll_job = root.after(50, self.poll)
+
+    def _on_destroy(self, event):
+        if event.widget is not self.root:
+            return
+        self.closed = True
+        for name in ("poll_job", "focus_check"):
+            job = getattr(self, name)
+            setattr(self, name, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
 
     def _build(self):
         root = self.root
@@ -811,13 +827,17 @@ class CaptureApp:
         self.status.set("程序异常，已停止本次实验。请查看日志；已写入的数据保留。")
 
     def poll(self):
+        self.poll_job = None
+        if self.closed:
+            return
         try:
             self._poll_once()
         except Exception:
             self.on_callback_error(*sys.exc_info())
         finally:
             try:
-                self.root.after(20, self.poll)
+                if not self.closed:
+                    self.poll_job = self.root.after(20, self.poll)
             except tk.TclError:
                 pass
 
