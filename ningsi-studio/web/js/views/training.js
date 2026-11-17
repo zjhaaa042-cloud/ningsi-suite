@@ -81,14 +81,13 @@ export function render(container, ctx) {
     holdSec: pick(trainingConfig(), 'hold_sec', null),
     segments: [],
     summary: null,
+    trainingEnded: false,
     title: '训练进行中',
   };
 
   /**
-   * 会话结束后 `feedback` 不再推送，local.score/target/onTarget 会被清空，
-   * 于是"专注度仪表 / 达标状态"整片显示 "—"、仪表变灰。
-   * 这里用 GET /api/sessions/{uuid}/training 的最终段 + summary 兜底：
-   * 优先取实时值（正在训练时），没有实时值才回落到落库的最终口径。
+   * 会话结束后 `feedback` 不再推送，使用已保存的最终段 + summary 展示结果。
+   * 训练结束后才显示落库结果；实时缺测必须保持缺测，不能借用上一段成绩。
    */
   const finalView = () => {
     const summarySegments = list(pick(local.summary, 'segments', []));
@@ -96,25 +95,32 @@ export function render(container, ctx) {
     const seg = local.segments.length ? local.segments[local.segments.length - 1] : summarySeg;
     const stats = (seg && seg.stats) || {};
     const firstDefined = (...values) => values.find((value) => value !== null && value !== undefined);
+    const saved = local.trainingEnded;
+    const emptySegment = stats.n === 0;
     return {
-      usingFallback: typeof local.score !== 'number' || typeof local.target !== 'number',
+      usingFallback: saved,
       hasData: Boolean(seg),
-      score: typeof local.score === 'number' ? local.score : firstDefined(pick(stats, 'mean'), pick(local.summary, 'mean_focus')),
-      target: typeof local.target === 'number'
-        ? local.target
-        : firstDefined(seg && seg.target, pick(local.summary, 'final_target'), pick(local.summary, 'initial_target')),
-      achieved: local.onTarget !== null
-        ? local.onTarget
-        : (typeof pick(stats, 'achieved') === 'boolean' ? pick(stats, 'achieved') : null),
-      seq: local.segment !== null ? local.segment : (seg ? (typeof seg.seq === 'number' ? seg.seq + 1 : seg.index) : null),
-      currentHold: firstDefined(local.currentHold, pick(stats, "current_hold_sec")),
-      maxHold: firstDefined(local.maxHold, pick(stats, "max_hold_sec")),
-      holdSec: !local.summary && local.holdSec !== null && local.holdSec !== undefined
+      score: saved
+        ? (seg ? (emptySegment ? null : pick(stats, 'mean')) : pick(local.summary, 'mean_focus'))
+        : local.score,
+      target: saved
+        ? firstDefined(seg && seg.target, pick(local.summary, 'final_target'), pick(local.summary, 'initial_target'))
+        : local.target,
+      achieved: saved
+        ? (!emptySegment && typeof stats.achieved === 'boolean' ? stats.achieved : null)
+        : local.onTarget,
+      seq: saved ? (seg ? (typeof seg.seq === 'number' ? seg.seq + 1 : seg.index) : null) : local.segment,
+      currentHold: saved ? pick(stats, 'current_hold_sec') : local.currentHold,
+      maxHold: saved ? pick(stats, 'max_hold_sec') : local.maxHold,
+      holdSec: !saved && local.holdSec !== null && local.holdSec !== undefined
         ? local.holdSec
         : firstDefined(pick(seg, 'hold_sec'), pick(seg, 'hold_after'), pick(trainingConfig(), 'hold_sec')),
       mode: local.mode || pick(local.summary, 'mode'),
-      ratio: firstDefined(pick(stats, 'on_target_ratio'), pick(local.summary, 'on_target_ratio')),
-      n: pick(stats, 'n'),
+      ratio: saved ? (seg ? (emptySegment ? null : pick(stats, 'on_target_ratio')) : pick(local.summary, 'on_target_ratio')) : null,
+      n: saved ? pick(stats, 'n') : null,
+      coverage: saved ? pick(stats, 'valid_time_ratio') : null,
+      validRatio: saved ? pick(stats, 'on_target_valid_ratio') : null,
+      timingSpec: saved ? pick(stats, 'timing_spec') : null,
       segmentCount: local.segments.length || summarySegments.length || null,
     };
   };
@@ -141,7 +147,7 @@ export function render(container, ctx) {
   const renderGauge = () => {
     gaugeHost.textContent = '';
     const view = finalView();
-    if (local.feedbackMode && local.feedbackMode !== 'eeg' && !local.summary) {
+    if (local.feedbackMode && local.feedbackMode !== 'eeg' && !local.trainingEnded) {
       gaugeHost.append(card('当前反馈模式', el('p', { text: local.modeLabel })));
       return;
     }
@@ -168,16 +174,19 @@ export function render(container, ctx) {
       : (view.achieved ? '达标' : '未达标');
     const ratioText = view.ratio === null || view.ratio === undefined
       ? DASH
-      : `${fmtPercent(view.ratio)}（有效点 n=${fmtInt(view.n)}）`;
+      : view.timingSpec ? `${fmtPercent(view.ratio)}（整段时间）`
+        : `旧版：${fmtPercent(view.ratio)}（有效样本）`;
     statusHost.append(card(local.modeLabel || '达标状态', el('div', { class: 'training-stats' }, [
       el('div', {}, [el('p', { class: 'muted', text: view.usingFallback ? '末段平均专注度' : '当前专注度' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.score, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '目标线' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.target, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '达标状态' }), el('p', { class: 'kpi__value', text: achieved })]),
       el('div', {}, [el('p', { class: 'muted', text: '当前段' }), el('p', { class: 'mono', text: fmtInt(view.seq) })]),
-      el('div', {}, [el('p', { class: 'muted', text: '训练模式' }), el('p', { text: ({ quick: '简短训练', full: '标准训练' })[view.mode] || DASH })]),
+      el('div', {}, [el('p', { class: 'muted', text: '训练模式' }), el('p', { text: ({ quick: '简短训练', full: '标准训练', ten_min: '十分钟分级训练' })[view.mode] || DASH })]),
       el('div', {}, [el('p', { class: 'muted', text: '保持时长要求' }), el('p', { class: 'mono', text: fmtDuration(view.holdSec) })]),
       el('div', {}, [el('p', { class: 'muted', text: '当前连续保持 / 本段最长' }), el('p', { class: 'mono', text: `${fmtDuration(view.currentHold)} / ${fmtDuration(view.maxHold)}` })]),
       el('div', {}, [el('p', { class: 'muted', text: '本段达标时间占比' }), el('p', { class: 'mono', text: ratioText })]),
+      el('div', {}, [el('p', { class: 'muted', text: '有效时间覆盖率' }), el('p', { class: 'mono', text: fmtPercent(view.coverage) })]),
+      el('div', {}, [el('p', { class: 'muted', text: '有效时间内达标率' }), el('p', { class: 'mono', text: fmtPercent(view.validRatio) })]),
       el('div', { class: 'training-hold' }, [
         el('span', { class: 'muted', text: view.usingFallback ? '末段最长保持 / 目标要求' : '连续保持进度' }),
         el('progress', { max: 1, value: typeof view.holdSec === 'number' && view.holdSec > 0 ? Math.min(1, Math.max(0, Number(view.usingFallback ? view.maxHold : view.currentHold) || 0) / view.holdSec) : 0, 'aria-label': '连续保持进度' }),
@@ -205,12 +214,18 @@ export function render(container, ctx) {
       { title: '保持（前→后）', render: (row) => `${fmtDuration(row.hold_sec)} → ${fmtDuration(row.hold_after)}` },
       { title: '均值', align: 'right', render: (row) => fmtNum(pick(row, '__stats.mean'), 3) },
       { title: '达标占比', align: 'right', render: (row) => fmtPercent(pick(row, '__stats.on_target_ratio')) },
+      { title: '有效覆盖', align: 'right', render: (row) => fmtPercent(pick(row, '__stats.valid_time_ratio')) },
+      { title: '有效时间内达标', align: 'right', render: (row) => fmtPercent(pick(row, '__stats.on_target_valid_ratio')) },
+      { title: '调整依据', render: (row) => row.adaptation_reason || DASH },
       { title: '最长保持', render: (row) => fmtDuration(pick(row, '__stats.max_hold_sec')) },
       { title: '连续达标', render: (row) => typeof pick(row, '__stats.achieved') === 'boolean' ? (row.__stats.achieved ? '达标' : '未达标') : DASH },
       { title: '波动', align: 'right', render: (row) => fmtNum(pick(row, '__stats.volatility'), 3) },
       { title: '有效点', align: 'right', render: (row) => fmtInt(pick(row, '__stats.n')) },
       { title: '排除窗', align: 'right', render: (row) => fmtInt(row.excluded_windows) },
     ], rows));
+    body.append(el('p', { class: 'muted', text: rows.some(row => !row.__stats.timing_spec)
+      ? '含旧版记录：旧版达标占比按有效样本计算，不能与新版整段时间占比直接比较。'
+      : '达标时间占比以整段时长为分母；有效覆盖不足60%时保持目标。缺失时间不补零、不计达标。' }));
     body.append(el('h4', { style: 'margin:16px 0 6px', text: '各段达标时间占比' }));
     body.append(chartHost);
     segmentHost.append(card('训练分段', body));
@@ -231,14 +246,17 @@ export function render(container, ctx) {
         { title: '可用窗', align: 'right', render: (row) => row[1] },
         { title: '设备 / 采样率', render: (row) => row[2] },
         { title: '有效性', render: (row) => row[3] },
-        { title: '指标均值（专注 / 放松 / 负荷）', render: (row) => row[4] },
+        { title: '基线对数特征（专注 / 放松 / 负荷）', render: (row) => row[4] },
       ], rows));
+      body.append(el('p', { class: 'muted', text: '上表为对数频带比值的基线参照，允许负数或大于1，不是0–1评分。' }));
     } else {
       body.append(empty('尚无训练前后基线记录。'));
     }
     body.append(el('div', { class: 'grid grid--3', style: 'margin-top:12px' }, [
       el('div', {}, [el('p', { class: 'muted', text: '训练平均专注度' }), el('p', { class: 'mono', text: fmtNum(pick(summary, 'mean_focus'), 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '达标时间占比' }), el('p', { class: 'mono', text: fmtPercent(pick(summary, 'on_target_ratio')) })]),
+      el('div', {}, [el('p', { class: 'muted', text: '有效时间覆盖率' }), el('p', { class: 'mono', text: fmtPercent(pick(summary, 'valid_time_ratio')) })]),
+      el('div', {}, [el('p', { class: 'muted', text: '有效时间内达标率' }), el('p', { class: 'mono', text: fmtPercent(pick(summary, 'on_target_valid_ratio')) })]),
       el('div', {}, [el('p', { class: 'muted', text: '首末变化' }), el('p', { class: 'mono', text: fmtNum(pick(summary, 'first_to_last_change'), 4) })]),
     ]));
     if (comparable === false) {
@@ -271,15 +289,16 @@ export function render(container, ctx) {
         break;
       }
       case 'feedback': {
+        const usable = payload.usable !== false && Number.isFinite(payload.score);
         local.feedbackMode = payload.feedback_mode;
         local.modeLabel = payload.mode_label;
         local.segment = payload.segment;
-        local.currentHold = payload.usable === false ? 0 : payload.current_hold_sec ?? null;
+        local.currentHold = usable ? payload.current_hold_sec ?? null : 0;
         local.maxHold = payload.max_hold_sec ?? null;
         local.holdSec = payload.hold_sec ?? local.holdSec;
-        local.target = typeof payload.target === 'number' ? payload.target : local.target;
-        local.score = typeof payload.score === 'number' ? payload.score : null;
-        local.onTarget = payload.usable === false ? null : typeof payload.achieved === 'boolean' ? payload.achieved : null;
+        local.target = Number.isFinite(payload.target) ? payload.target : null;
+        local.score = usable ? payload.score : null;
+        local.onTarget = usable && typeof payload.achieved === 'boolean' ? payload.achieved : null;
         renderGauge();
         renderStatus();
         break;
@@ -302,12 +321,15 @@ export function render(container, ctx) {
       }
       case 'phase': {
         if (payload.key === 'training' && payload.state === 'done') {
+          local.trainingEnded = true;
           local.title = '训练阶段已结束';
+          renderGauge();
           renderStatus();
         }
         break;
       }
       case 'finished': {
+        local.trainingEnded = true;
         if (!local.finishedNoted) {
           local.finishedNoted = true;
           renderNote(card('会话结束', el('div', {}, [
@@ -341,9 +363,9 @@ export function render(container, ctx) {
         },
       }));
       if (segments.length) local.segments = segments;
-      local.summary = data.summary || null;
+      local.summary = data.summary && Object.keys(data.summary).length ? data.summary : null;
       if (local.summary) {
-        local.score = local.target = local.onTarget = local.currentHold = local.maxHold = local.segment = null;
+        local.trainingEnded = true;
       }
       renderSegments();
       renderBaseline(data.summary || {});
@@ -368,6 +390,12 @@ export function render(container, ctx) {
     const session = data.session ? { ...data.session } : { ...data };
     session.uuid = uuid;
     ctx.store.setState({ currentSession: session });
+    if (['done', 'failed', 'cancelled'].includes(session.status)
+        || list(session.runs).some(run => run.phase === 'training' && run.status === 'done')) {
+      local.trainingEnded = true;
+      renderGauge();
+      renderStatus();
+    }
   }).catch(() => {});
 
   loadTraining();

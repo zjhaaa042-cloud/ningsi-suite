@@ -162,6 +162,14 @@ class DemoFlowTests(StudioTestCase):
             self.assertLessEqual(segment["stats"]["max_hold_sec"], 120.0, "连续保持不得超出段时长")
             self.assertGreaterEqual(segment["on_target_ratio"], 0.0, "达标时间占比不应为负")
             self.assertLessEqual(segment["on_target_ratio"], 1.0, "达标时间占比不应大于 1")
+            stats = segment['stats']
+            self.assertEqual(stats['timing_spec'], 'neurofeedback-v3')
+            self.assertLessEqual(stats['on_target_ratio'], stats['valid_time_ratio'])
+            self.assertAlmostEqual(stats['on_target_ratio'], stats['on_target_seconds'] / 120, places=4)
+            self.assertIn('interruptions', segment)
+            self.assertIn('adaptation_reason', segment)
+            if not stats['coverage_sufficient']:
+                self.assertEqual(segment['target'], segment['target_after'])
 
         summary = training["summary"]
         for key in ("mean_focus", "on_target_ratio", "first_to_last_change", "baseline_before",

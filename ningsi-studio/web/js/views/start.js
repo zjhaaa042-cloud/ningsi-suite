@@ -1,6 +1,6 @@
 import { api } from '../api.js';
 import { describeError } from '../store.js';
-import { button, card, el, field } from '../util.js';
+import { button, el, field } from '../util.js';
 import { renderPreviewCard } from '../preview.js';
 
 const option = (value, text) => el('option', { value, text });
@@ -10,10 +10,16 @@ export async function render(container, ctx) {
     option('ten_min', '十分钟测试＋训练'), option('short', '评估专注力'), option('full', '评估并进行反馈训练'),
   ]);
   const participant = el('select', { id: 'participant' }, [option('', '新参与者（自动分配编号）')]);
-  const alias = el('input', { id: 'alias', placeholder: '可留空', maxLength: 80 });
+  const alias = el('input', { id: 'alias', type: 'text', placeholder: '可留空', maxLength: 80 });
   const aliasField = field('参与者别名', alias);
   participant.onchange = () => { aliasField.hidden = Boolean(participant.value); };
   const device = el('select', { id: 'device' });
+  const unit = el('select', { id: 'eeg-source-unit' }, [
+    option('', '使用设备声明'), ...['uV','mV','V','nV','ADC'].map(u => option(u, u === 'ADC' ? 'ADC 计数' : u)),
+  ]);
+  const factor = el('input', { id: 'eeg-scale', type: 'number', min: 0, step: 'any' });
+  const unitField = field('确认 EEG 源单位', unit, '设备未声明单位时，请按厂商配置或标定结果选择。');
+  const factorField = field('校准倍率（µV/计数）', factor);
   const mode = el('select', { id: 'training-length' }, [
     option('quick', '2 段，约 4 分钟'), option('full', '4 段，约 8 分钟'),
   ]);
@@ -21,6 +27,7 @@ export async function render(container, ctx) {
   const plan = el('p', { class: 'muted' });
   const message = el('p', { role: 'alert' });
   const deviceNote = el('p', { class: 'muted', role: 'status' });
+  const readiness = el('span', { class: 'setup-readiness', role: 'status', text: '正在检查设备' });
   const previewHost = el('div');
   const preview = el('details', {}, [el('summary', { text: '预览脑电波形' }), previewHost]);
   let previewController;
@@ -37,26 +44,70 @@ export async function render(container, ctx) {
   const scanButton = button('重新扫描', scan, { small: true });
   const start = button('开始评估', () => launch(false), { primary: true });
   const demo = button('运行模拟演示', () => launch(true));
+  const choices = [
+    ['ten_min', '轻量体验', '十分钟测试与训练', '快速了解本次状态，体验反馈训练。', '约 10 分钟'],
+    ['short', '标准评估', '专注力综合评估', '结合脑电、量表与行为任务建立评估。', '按协议计算'],
+    ['full', '完整流程', '评估与反馈训练', '完成综合评估后，继续进行专注训练。', '按协议计算'],
+  ];
+  const planCards = choices.map(([value, tag, title, detail, duration]) => {
+    const input = el('input', { type: 'radio', name: 'assessment-plan', value, checked: value === purpose.value });
+    input.onchange = () => { purpose.value = value; update(); };
+    const time = el('span', { class: 'plan-choice__duration', text: duration });
+    const tile = el('label', { class: 'plan-choice' }, [
+      el('div', { class: 'plan-choice__top' }, [el('span', { text: tag }), input]),
+      el('strong', { text: title }), el('p', { text: detail }), time,
+    ]);
+    return { value, input, time, tile };
+  });
+  const calibration = el('details', { class: 'setup-details' }, [
+    el('summary', { text: '单位与标定设置' }), unitField, factorField,
+  ]);
+  const protocolDetails = el('details', { class: 'setup-details' }, [
+    el('summary', { text: '查看本方案的流程与时长' }), plan, modeField,
+  ]);
   const form = el('fieldset', { class: 'assessment-form' }, [
-    field('检测目的', purpose), plan, modeField, field('参与者', participant), aliasField,
-    field('脑电设备', device), deviceNote, el('div', { class: 'row' }, [scanButton]), preview,
+    el('div', { class: 'setup-step-heading' }, [el('span', { text: '01' }), el('h2', { text: '选择本次方案' })]),
+    el('div', { class: 'plan-choices' }, planCards.map(item => item.tile)), protocolDetails,
+    el('div', { class: 'setup-step-heading' }, [el('span', { text: '02' }), el('h2', { text: '确认参与者与设备' })]),
+    el('div', { class: 'setup-fields' }, [field('参与者', participant), aliasField]),
+    el('div', { class: 'device-setup' }, [
+      el('div', { class: 'device-setup__head' }, [el('strong', { text: '脑电设备' }), scanButton]),
+      field('选择 EEG 数据流', device), deviceNote, calibration, preview,
+    ]),
   ]);
   function update() {
     const full = purpose.value === 'full';
     const profile = profiles.find(row => row.key === purpose.value);
     modeField.hidden = !full;
-    const minutes = profile && Math.round((profile.total_sec + (full ? 30 + (mode.value === 'full' ? 240 : 0) : 0)) / 60);
+    const minutes = profile && Math.round((profile.total_sec_by_training_mode?.[mode.value] ?? profile.total_sec) / 60);
     plan.textContent = profile ? '约 ' + minutes + ' 分钟。记录睁眼和闭眼时的脑电，填写量表，完成数字判断和反应速度任务。'
       + (full ? '随后根据实时专注度反馈练习。' : '') : '';
     if (purpose.value === 'ten_min') plan.textContent = '10分钟采集：质检30秒、睁眼60秒、练习30秒、PVT3分钟、训练4分钟、训练后60秒。报告生成另计；质量不足时自动切换为质量反馈或固定引导，不追加基线时间。';
+    for (const item of planCards) {
+      item.input.checked = item.value === purpose.value;
+      const itemProfile = profiles.find(row => row.key === item.value);
+      const seconds = itemProfile?.total_sec_by_training_mode?.[mode.value] ?? itemProfile?.total_sec;
+      if (Number.isFinite(seconds)) item.time.textContent = `约 ${Math.round(seconds / 60)} 分钟`;
+    }
+    if (full) protocolDetails.open = true;
     form.disabled = submitting;
     scanButton.disabled = scanning || submitting;
     preview.hidden = !device.value;
-    start.disabled = submitting || scanning || !subjectsReady || !device.value || !profile;
+    unitField.hidden = !device.value;
+    factorField.hidden = unitField.hidden || unit.value !== 'ADC';
+    calibration.hidden = !device.value;
+    const calibrationReady = unit.value !== 'ADC' || (Number.isFinite(factor.valueAsNumber) && factor.valueAsNumber > 0);
+    readiness.textContent = scanning ? '正在扫描设备' : !device.value ? '等待连接脑电设备'
+      : !calibrationReady ? '请补充有效的 ADC 校准倍率' : !subjectsReady || !profile ? '正在加载评估设置'
+      : submitting ? '正在创建评估会话' : '设备已选择 · 可开始评估';
+    readiness.dataset.ready = String(Boolean(device.value && calibrationReady && subjectsReady && profile));
+    start.disabled = submitting || scanning || !subjectsReady || !device.value || !profile
+      || (unit.value === 'ADC' && !(Number.isFinite(factor.valueAsNumber) && factor.valueAsNumber > 0));
     start.textContent = submitting ? '正在启动…' : (full ? '开始评估与训练' : '开始评估');
     demo.disabled = submitting || !profiles.some(row => row.key === 'short');
   }
   purpose.onchange = mode.onchange = update;
+  unit.onchange = factor.oninput = update;
   async function scan() {
     scanning = true;
     deviceNote.textContent = '正在扫描脑电设备…';
@@ -65,7 +116,7 @@ export async function render(container, ctx) {
     try {
       const response = await api.devices(1.2);
       if (ctx.signal.aborted) return;
-      const rows = response.data.sources.filter(row => row.real && row.is_eeg && row.usable !== false && row.key.startsWith('lsl:'));
+      const rows = response.data.sources.filter(row => (row.real || row.simulated) && row.is_eeg && row.usable !== false && row.key.startsWith('lsl:'));
       device.replaceChildren(...rows.map(row => option(row.key, (row.device || row.key) + (row.simulated ? '（模拟流）' : ''))));
       if (rows.some(row => row.key === previous)) device.value = previous;
       else device.value = rows.find(row => !row.simulated)?.key || '';
@@ -77,12 +128,15 @@ export async function render(container, ctx) {
     } finally {
       scanning = false;
       if (!ctx.signal.aborted) {
-        if (device.value !== previous) previewController?.selectionChanged();
+        if (device.value !== previous) {
+          unit.value = ''; factor.value = '';
+          previewController?.selectionChanged();
+        }
         update();
       }
     }
   }
-  device.onchange = () => { previewController?.selectionChanged(); update(); };
+  device.onchange = () => { unit.value = ''; factor.value = ''; previewController?.selectionChanged(); update(); };
 
   async function launch(isDemo) {
     if (submitting || (isDemo ? demo.disabled : start.disabled)) return;
@@ -106,6 +160,8 @@ export async function render(container, ctx) {
         participant: id, create_subject: false, device: isDemo ? 'sim-bsense' : device.value,
         protocol: purpose.value, training_mode: isDemo ? 'quick' : mode.value,
         time_scale: isDemo ? 0.05 : 1,
+        eeg_calibration: !isDemo && unit.value ? { source_unit: unit.value,
+          ...(unit.value === 'ADC' ? { scale_to_uv: factor.valueAsNumber } : {}) } : null,
       });
       if (ctx.signal.aborted) return;
       ctx.store.setState({ currentSession: data.session, phases: data.phases, sessionRuntime: data.runtime });
@@ -117,13 +173,33 @@ export async function render(container, ctx) {
       if (!ctx.signal.aborted) update();
     }
   }
-  container.append(el('div', { class: 'wizard stack' }, [
-    el('h1', { text: '专注力评估' }),
-    el('p', { text: '结合脑电、量表和按键表现，查看本次专注度、放松度与认知负荷。' }),
-    card(null, el('div', { class: 'stack' }, [form, message, el('div', { class: 'row' }, [start])])),
-    card('无设备演示', el('div', { class: 'stack' }, [
-      el('p', { class: 'muted', text: '用模拟脑电和自动作答生成一份示例报告，单独保存演示记录。' }), demo,
-    ])),
+  container.append(el('div', { class: 'assessment-page' }, [
+    el('header', { class: 'assessment-heading' }, [
+      el('span', { class: 'eyebrow', text: '专注，从了解自己开始' }),
+      el('h1', { text: '开启一次专注力评估' }),
+      el('p', { text: '连接脑电设备，结合量表与行为任务，了解本次状态并进行反馈训练。' }),
+    ]),
+    el('div', { class: 'assessment-layout' }, [
+      el('section', { class: 'card setup-card', 'aria-label': '评估设置' }, [form,
+        el('div', { class: 'setup-submit' }, [el('div', {}, [readiness,
+          el('p', { class: 'muted', text: '开始后将先检查信号质量，再进入引导流程。' })]), message, start]),
+      ]),
+      el('aside', { class: 'assessment-aside', 'aria-label': '评估说明与演示' }, [
+        el('section', { class: 'journey-card' }, [
+          el('span', { class: 'eyebrow', text: '本次体验' }), el('h2', { text: '让每一步都清晰' }),
+          el('ol', { class: 'assessment-journey' }, [
+            ['连接与质检', '确认设备与信号质量'], ['采集与评估', '建立基线，完成当前方案任务'],
+            ['反馈与练习', '按所选方案进行反馈训练'], ['结果与回顾', '查看报告，追踪历史变化'],
+          ].map(([title, note]) => el('li', {}, [el('strong', { text: title }), el('span', { text: note })]))),
+          el('p', { class: 'journey-note', text: '信号质量不足时会暂停评分，并给出调整提示。' }),
+        ]),
+        el('section', { class: 'demo-card' }, [el('span', { class: 'demo-label', text: '无设备也能了解流程' }),
+          el('h2', { text: '先体验，再开始' }),
+          el('p', { text: '使用模拟脑电与自动作答，体验评估流程。演示记录单独标记。' }), demo,
+        ]),
+      ]),
+    ]),
+    el('p', { class: 'assessment-footnote', text: '脑电指数反映相对个人基线的变化；模型估计、自评与信号质量分别呈现。产品用于研究与训练，不能替代医学诊断。' }),
   ]));
   update();
   const loadSubjects = async () => {

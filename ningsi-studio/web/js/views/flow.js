@@ -514,13 +514,10 @@ export function render(container, ctx) {
     const elapsed = startedAt ? Math.max(0, (local.now - startedAt) / 1000) : null;
     const scale = Number(pick(ctx.store.state.currentSession, 'time_scale', 1)) || 1;
     let shown = expected * scale;
-    if (phase.key === 'training') {
-      const mode = pick(ctx.store.state.currentSession, 'training_mode', 'quick');
-      const plan = pick(ctx.store.state.config, `training.${mode}`, {}) || {};
-      const segments = Number(plan.segments) || (mode === 'full' ? 4 : 2);
-      const segmentSec = Number(plan.segment_sec) || 120;
-      expected = segments * segmentSec + 30;
-      shown = segments * Math.max(4, segmentSec * scale) + 30 * scale;
+    if (phase.key === 'training' && phase.training_plan) {
+      const plan = phase.training_plan;
+      shown = plan.segments * (Math.max(plan.min_wall_segment_sec, plan.segment_sec * scale)
+        + plan.rest_sec * scale) + plan.baseline_after_sec * scale;
     }
     if (state === 'running' && elapsed !== null) {
       const left = Math.max(0, shown - elapsed);
@@ -562,7 +559,10 @@ export function render(container, ctx) {
     const session = ctx.store.state.currentSession || {};
     const status = pick(session, 'status', 'done');
     const failed = status === 'failed' || status === 'cancelled';
-    const summary = pick(local.detail, 'indicator_summary', {}) || {};
+    const overview = pick(local.detail, 'result_overview', null);
+    const trainingResult = pick(overview, 'source_phase') === 'training';
+    const summary = trainingResult ? pick(overview, 'summary', {}) : pick(local.detail, 'indicator_summary', {}) || {};
+    const resultQuality = trainingResult ? pick(overview, 'quality', {}) : null;
     const quality = qualityStats();
     const scales = [...local.scaleResults.values()];
     const reason = pick(session, 'error', null) || pick(local.detail, 'error', null);
@@ -580,12 +580,28 @@ export function render(container, ctx) {
       ? `这次检测${statusText(status)}${reason ? `：${reason}` : ''}`
       : '检测完成，数据与报告已生成' }));
     body.push(el('div', { class: 'done__metrics' }, [
-      metric('专注相关指数', fmtNum(pick(summary, 'focus.mean')), '指标均值 0–1'),
-      metric('放松度', fmtNum(pick(summary, 'relax.mean')), '指标均值 0–1'),
-      metric('认知负荷', fmtNum(pick(summary, 'load.mean')), '指标均值 0–1'),
-      metric('采集质量', quality ? `${fmtInt(quality.usable)}/${fmtInt(quality.windows)} 窗` : DASH,
-        quality ? (quality.passed ? '达到门槛' : '低于门槛，解释需谨慎') : '没有质检记录'),
+      ...['focus', 'relax', 'load'].map((key) => metric(
+        { focus: '专注相关指数', relax: '放松度', load: '认知负荷' }[key],
+        fmtNum(pick(summary, `${key}.mean`)),
+        Number.isFinite(pick(summary, `${key}.mean`))
+          ? `${trainingResult ? '训练均值' : '监测均值'} 0–1 · n=${fmtInt(pick(summary, `${key}.n`))}`
+          : '无法评分（见下方原因）')),
+      metric(trainingResult ? '训练可评分窗' : '启动质检',
+        trainingResult ? `${fmtInt(resultQuality.windows_scored)}/${fmtInt(resultQuality.windows_total)} 窗`
+          : quality ? `${fmtInt(quality.usable)}/${fmtInt(quality.windows)} 窗` : DASH,
+        trainingResult ? `严格合格 ${fmtInt(resultQuality.windows_usable)} 窗；评分还需A级与有效基线`
+          : quality ? (quality.passed ? '启动质检达到门槛' : '启动质检低于门槛') : '没有质检记录'),
     ]));
+    if (trainingResult) {
+      body.push(el('p', { class: 'muted', text: overview.reason || overview.note }));
+      if (quality) body.push(el('p', { class: 'muted', text: `启动质检 ${fmtInt(quality.usable)}/${fmtInt(quality.windows)} 窗，仅代表最初质检阶段。` }));
+    } else if (!Object.keys(summary).length) {
+      body.push(el('p', { class: 'muted', text: '本次没有可用的监测阶段指数；请在报告中核对睁眼基线、监测窗口质量及未评分原因。' }));
+    }
+    const sourceKind = pick(session, 'runtime.source_kind') || pick(local.detail, 'runtime.source_kind');
+    if (sourceKind === 'sim' || String(session.source || local.detail?.source || '').startsWith('sim')) {
+      body.push(el('p', { class: 'muted', text: '本次为仿真数据，仅用于流程演示。' }));
+    }
     if (scales.length) {
       body.push(el('p', { class: 'muted', text: '量表：' + scales.map((row) => `${row.code || DASH} 标准分 ${fmtInt(row.standard_score)}`
         + `（${row.level || DASH}）`).join('｜') }));
@@ -700,7 +716,7 @@ export function render(container, ctx) {
     // 自动推进的阶段：给一个去"实时监测"看数据的入口
     if (!interactive && ['monitor', 'training', 'baseline_open', 'baseline_closed', 'qc'].includes(key)) {
       body.push(el('div', { class: 'row step__action' }, [
-        button('看实时脑电波形', () => ctx.navigate(`#/live?session=${uuid}`), { small: true }),
+        button(['monitor', 'training'].includes(key) ? '实时监测与当下压力自评' : '看实时脑电波形', () => ctx.navigate(`#/live?session=${uuid}`), { small: true }),
         el('span', { class: 'muted', text: '波形与热力图在“实时监测”页' }),
       ]));
     }

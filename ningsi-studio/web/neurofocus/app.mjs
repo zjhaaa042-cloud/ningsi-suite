@@ -1,17 +1,27 @@
 import { MockAdapter, StreamStore, demoMeta, summarize, sessionExport, sessionCSV } from './core.mjs';
 import { drawTrend, drawEEG, populateOrb } from './charts.mjs';
 import { StudioAdapter } from './studio-adapter.mjs';
+import { SessionDirectory, initialSession, progressPercent } from './manager.mjs';
 
 const $ = (id) => document.getElementById(id);
 export const store = new StreamStore();
 export const metrics = { draws: 0, frames: 0, drawMs: [], arrivalToPaintMs: [], uiUpdates: 0 };
 const demoAdapter = new MockAdapter((event) => { store.ingest(event); });
-let adapter = demoAdapter, mode = 'demo', busy = false, operation = 0;
+const query = new URLSearchParams(location.search);
+let adapter = demoAdapter, mode = 'studio', busy = false, operation = 0;
+let selectedSession = query.get('session') || '', backendSession = null, directoryState = null, autoMonitor = true;
+function idleMetadata() {
+  const meta = demoMeta();
+  meta.device = { id: 'studio-pending', model: '等待 Studio 会话', channels: [], samplingRateHz: null, eegUnit: null };
+  meta.capabilities = { rawEEG: false, focus: false, bandPower: false, signalQuality: false };
+  meta.bandPowerInfo.bandsHz = {};
+  return meta;
+}
 const intervalFor = (session) => session?.metadata.focusIntervalMs || 1000;
 const sourceText = () => mode === 'demo' ? 'DEMO · 演示数据' : !store.meta.transport ? 'STUDIO · 待连接' : store.meta.source === 'live' ? 'LIVE · LSL 设备' : 'DEMO · 后端模拟源';
-store.ingest(demoMeta());
+store.ingest(idleMetadata());
 const labels = { valid: '正在接收演示信号', idle: '未连接', connecting: '正在连接数据源', waiting: '等待数据', poor: '信号质量不足', stale: '数据过期 / 断流', disconnected: '演示连接已断开', calibrating: '演示校准中', paused: '会话已暂停', error: '数据源错误' };
-const pages = { dashboard: ['实时总览', '每一刻专注，都有迹可循。', '从此刻开始，观察专注的节奏与变化。'], focus: ['沉浸专注', '留一段时间，给当下。', '温和反馈，安静观察。所有指标均来自演示源。'], analysis: ['会话记录', '看见专注走过的轨迹。', '只统计质量通过的有效点，保留真实记录的缺口。'], device: ['数据与设备', '每一个数值，都有来源。', '查看能力、算法定义与诊断信息，让数据可被追溯。'] };
+const pages = { dashboard: ['后台监控', '检测在前台，状态尽在掌握。', '与凝思 Studio 同时打开，独立查看后台检测与训练。'], focus: ['沉浸专注', '留一段时间，给当下。', '温和反馈，安静观察。数据来源以顶部标签为准。'], analysis: ['会话记录', '看见专注走过的轨迹。', '只统计质量通过的有效点，保留真实记录的缺口。'], device: ['数据与设备', '每一个数值，都有来源。', '查看能力、算法定义与诊断信息，让数据可被追溯。'] };
 let route = 'dashboard', range = '60', channel = 'all', windowSeconds = 5, frozen = false, frozenEnd = null;
 let hovered = null, reducedMotion = false, lastUIDraw = 0, lastEEGDraw = 0, raf = null, disposed = false;
 let lastPaintedArrival = null, lastValidUpdate = null, lastUIState = null;
@@ -23,13 +33,96 @@ const elapsed = (ms) => `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${St
 function on(node, type, callback) { node.addEventListener(type, callback); cleanups.push(() => node.removeEventListener(type, callback)); }
 function notice(text, warning = false) { $('announcement').textContent = text; $('announcement').dataset.tone = warning ? 'warning' : ''; }
 function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
+const directoryClient = new StudioAdapter(() => {});
+const directory = new SessionDirectory(directoryClient, {
+  onUpdate: renderDirectory,
+  onError: (error) => {
+    $('manager-status').textContent = `后台连接失败：${error.message}；稍后自动重试。`;
+    $('manager-panel').dataset.state = 'error';
+    $('manager-updated').textContent = directoryState ? `最后刷新 ${clock(directoryState.updatedAt)}` : '尚未连接';
+  },
+});
+function accessToken() { return $('studio-token').value.trim() || query.get('token') || document.querySelector('meta[name="ningsi-api-token"]')?.content || ''; }
+function studioURL(hash = '#/start') {
+  const url = new URL('/', location.origin);
+  if (accessToken()) url.searchParams.set('token', accessToken());
+  url.hash = hash; return url.href;
+}
+function updateStudioLinks() {
+  for (const link of document.querySelectorAll('[data-studio-link]')) link.href = studioURL(link.id === 'backend-studio' && selectedSession ? `#/live?session=${selectedSession}` : '#/start');
+}
+const statusLabels = { running: '运行中', created: '待开始', done: '已完成', cancelled: '已取消', failed: '失败', error: '异常' };
+const phaseLabel = (session) => session.phase_label || (session.status !== 'running' ? statusLabels[session.status] : '') || session.phase || '等待开始';
+function renderBackend() {
+  const session = backendSession;
+  $('backend-detail').hidden = !session;
+  if (!session) return;
+  $('backend-participant').textContent = session.participant || '未提供编号';
+  $('backend-uuid').textContent = `会话 ${session.uuid.slice(0, 8)}`;
+  $('backend-phase').textContent = phaseLabel(session);
+  $('backend-status').textContent = statusLabels[session.status] || session.status;
+  $('backend-device').textContent = session.device || session.source || '未提供';
+  $('backend-source').textContent = session.runtime?.source_note || (String(session.device).startsWith('sim') ? '后端仿真 · 演示数据' : '来源详情连接后读取');
+  const percent = progressPercent(session.progress);
+  $('backend-progress').value = percent; $('backend-percent').textContent = `${percent}%`;
+  const awaiting = session.awaiting_input ?? session.runtime?.awaiting_input ?? [];
+  $('backend-waiting').hidden = !awaiting.length || session.status !== 'running';
+  $('backend-waiting').textContent = '等待参与者完成当前操作，请在凝思 Studio 继续作答。';
+  const alerts = session.alerts || [];
+  $('backend-alerts').replaceChildren(...(alerts.length ? [element('span', 'muted', '最近预警'), ...alerts.slice(-3).reverse().map((alert) => {
+    const state = ({ triggered: '触发', active: '持续', released: '解除' })[alert.state] || '记录';
+    const at = Number.isFinite(alert.t_sec) ? `会话 ${Math.round(alert.t_sec)} 秒 · ` : '';
+    return element('p', 'backend-alert', `${at}${state} · ${alert.message || alert.kind}`);
+  })] : [element('p', 'muted', '暂无后台预警')]));
+  updateStudioLinks();
+}
+function renderDirectory(snapshot) {
+  directoryState = snapshot;
+  $('manager-panel').dataset.state = 'connected';
+  $('manager-status').textContent = snapshot.active.length ? '后台已连接 · 可切换查看运行中的会话' : '后台已连接 · 等待 Studio 开始检测，开始后自动显示';
+  $('running-count').textContent = `${snapshot.active.length} 个运行中`;
+  $('manager-updated').textContent = `${clock(snapshot.updatedAt)} 更新`;
+  selectedSession = initialSession(snapshot.active, selectedSession);
+  const oldValue = selectedSession;
+  $('studio-session').replaceChildren(new Option('请选择运行中的会话', ''));
+  for (const session of snapshot.active) $('studio-session').add(new Option(`${session.participant} · ${session.device} · ${session.uuid.slice(0, 8)}`, session.uuid));
+  if (oldValue && !snapshot.active.some((s) => s.uuid === oldValue)) $('studio-session').add(new Option(`${oldValue.slice(0, 8)} · 当前未运行`, oldValue));
+  $('studio-session').value = oldValue;
+  $('manager-sessions').replaceChildren(...(snapshot.active.length ? snapshot.active.map((session) => {
+    const button = element('button', 'manager-session');
+    button.type = 'button'; button.setAttribute('aria-pressed', String(session.uuid === selectedSession));
+    button.append(element('strong', '', session.participant || '未提供编号'), element('span', '', `${phaseLabel(session)} · ${progressPercent(session.progress)}%`), element('small', '', session.device || session.source));
+    button.addEventListener('click', () => selectSession(session.uuid)); return button;
+  }) : [element('p', 'manager-empty', '暂无运行中的会话。可在另一个窗口打开凝思 Studio 开始检测；本页会自动等待。')]));
+  $('manager-history').replaceChildren(...(snapshot.recent.length ? snapshot.recent.map((session) => {
+    const row = element('div', 'manager-history-row'), link = element('a', '', session.status === 'running' ? '查看监测 ↗' : '查看报告 ↗');
+    link.href = studioURL(`#/${session.status === 'running' ? 'live' : 'report'}?session=${session.uuid}`); link.target = '_blank'; link.rel = 'noopener noreferrer';
+    row.append(element('strong', '', session.participant), element('span', 'muted', `${statusLabels[session.status] || session.status} · ${phaseLabel(session)}`), link); return row;
+  }) : [element('p', 'manager-empty', '还没有后台会话记录。')]));
+  const selected = [...snapshot.active, ...snapshot.recent].find((session) => session.uuid === selectedSession);
+  if (selected) backendSession = { ...(backendSession?.uuid === selected.uuid ? backendSession : {}), ...selected };
+  if (selected && selected.status !== 'running' && store.session?.metadata.backendSessionId === selected.uuid) {
+    stop(); notice(`后台会话${statusLabels[selected.status] || '已停止'}，本页监测记录已结束。`);
+  }
+  renderBackend(); controls();
+  if (mode === 'studio' && autoMonitor && !store.session && !busy && snapshot.active.some((s) => s.uuid === selectedSession)) void start();
+}
+function selectSession(uuid) {
+  if (uuid === selectedSession && store.session) return;
+  stop(); selectedSession = uuid; autoMonitor = true;
+  backendSession = directoryState?.active.find((s) => s.uuid === uuid) || null;
+  store.resetStream(idleMetadata()); lastValidUpdate = null; hovered = null;
+  const url = new URL(location.href); url.searchParams.set('session', uuid); history.replaceState(null, '', url);
+  if (directoryState) renderDirectory(directoryState);
+  renderMetadata(); updateUI();
+}
 
 function routeChanged() {
   window.scrollTo({ top: 0, behavior: 'instant' });
   const requested = location.hash.replace('#/', '').split('?')[0]; route = pages[requested] ? requested : 'dashboard';
   if (!pages[requested]) history.replaceState(null, '', '#/dashboard');
   const page = pages[route]; $('page-name').textContent = page[0]; $('page-title').textContent = page[1]; $('page-description').textContent = route === 'focus' ? '温和反馈，安静观察。数据来源以顶部标签为准。' : page[2];
-  document.title = `${page[0]} · NeuroFocus`;
+  document.title = `${page[0]} · 凝思管理者平台`;
   for (const name of Object.keys(pages)) {
     $(`${name}-page`).hidden = name !== route;
     const link = document.querySelector(`[data-route="${name}"]`);
@@ -40,27 +133,29 @@ function routeChanged() {
 
 function controls() {
   const session = store.session;
-  $('start').disabled = !!session || busy;
-  $('start').textContent = busy ? '正在连接…' : mode === 'demo' ? '▶ 开始演示会话' : '▶ 开始后台监测';
+  $('start').disabled = !!session || busy || (mode === 'studio' && !directoryState?.active.some((s) => s.uuid === selectedSession));
+  $('start').textContent = busy ? '正在连接…' : mode === 'demo' ? '▶ 开始演示会话' : '▶ 连接监测';
   $('pause').disabled = !session;
-  $('pause').textContent = session?.status === 'paused' ? '▶ 继续' : 'Ⅱ 暂停';
+  $('pause').textContent = session?.status === 'paused' ? '▶ 继续查看' : 'Ⅱ 暂停查看';
   $('stop').disabled = !session && !busy;
-  $('stop').textContent = mode === 'demo' ? '■ 结束' : '■ 结束监测';
-  $('session-label').textContent = session ? `${sourceText()} · ${session.status === 'paused' ? '已暂停' : '记录中'}` : '尚未开始监测';
+  $('stop').textContent = mode === 'demo' ? '■ 结束' : '■ 断开监测';
+  $('session-label').textContent = session ? `${mode === 'studio' ? backendSession?.participant || 'Studio' : '演示会话'} · ${session.status === 'paused' ? '已暂停查看' : '监测中'}` : mode === 'studio' ? '等待连接后台会话' : '尚未开始演示';
   $('session-clock').textContent = elapsed(store.elapsed());
   $('duration').disabled = !!session;
   for (const id of ['source','studio-session','studio-token','refresh-sessions']) $(id).disabled = !!session || busy;
   $('scenario').disabled = mode !== 'demo'; $('reconnect').disabled = mode !== 'demo';
 }
 async function start() {
+  if (busy || store.session) return;
   const id = ++operation;
   if (mode === 'studio') {
     busy = true; controls();
     try {
       adapter = new StudioAdapter((event) => store.ingest(event), { token: $('studio-token').value,
-        onNotice: (message) => notice(message, true), onMetadata: () => renderMetadata(),
-        onTerminal: (message) => { stop(); notice(message, true); } });
-      const meta = await adapter.prepare($('studio-session').value);
+        onNotice: (message) => { if (id === operation) notice(message, true); }, onMetadata: () => renderMetadata(),
+        onSnapshot: (snapshot) => { if (id === operation) { backendSession = snapshot; renderBackend(); } },
+        onTerminal: (message) => { if (id === operation) { stop(); notice(message, true); void directory.refresh(); } } });
+      const meta = await adapter.prepare(selectedSession);
       if (id !== operation) return;
       store.resetStream(meta); store.staleMs = adapter.staleMs;
       $('channel').replaceChildren(new Option('全部通道', 'all')); channel = 'all';
@@ -76,6 +171,7 @@ async function start() {
   updateUI();
 }
 function stop() {
+  autoMonitor = false;
   operation++; busy = false; adapter.stop();
   const session = store.stopSession(); controls();
   if (!session) return;
@@ -84,7 +180,7 @@ function stop() {
   notice(`监测已结束 · 有效覆盖率 ${(summary.coverage * 100).toFixed(0)}% · 有效均值 ${num(summary.mean)}。可在“会话记录”导出。`);
   updateUI();
 }
-on($('start'), 'click', start);
+on($('start'), 'click', () => { autoMonitor = true; void start(); });
 on($('pause'), 'click', () => {
   if (store.session?.status === 'recording') { store.pauseSession(); adapter.stop(); notice(mode === 'demo' ? '会话已暂停：停止生成与记录新数据，画面停留在暂停时刻。' : '本页监测已暂停，后台检测继续；恢复时仅接收新数据。'); }
   else if (store.resumeSession()) { adapter.start(); notice('已继续记录。暂停区间保留缺口，不补齐数据。'); }
@@ -109,28 +205,23 @@ on($('reconnect'), 'click', () => {
   notice(store.session ? '已恢复正常演示场景，等待下一批有效数据。' : '正常演示场景已就绪，请开始会话。'); updateUI();
 });
 async function refreshSessions() {
-  const token = $('studio-token').value || new URLSearchParams(location.search).get('token') || document.querySelector('meta[name="ningsi-api-token"]')?.content || '';
-  $('studio-token').value = token;
-  const client = new StudioAdapter(() => {}, { token });
+  directoryClient.token = accessToken(); updateStudioLinks();
   $('refresh-sessions').disabled = true;
-  try {
-    const sessions = await client.list();
-    $('studio-session').replaceChildren(new Option('请选择运行中的会话', ''));
-    for (const item of sessions.filter((x) => x.status === 'running')) $('studio-session').add(new Option(`${item.participant || ''} · ${item.device || item.source || ''} · ${item.uuid.slice(0,8)}`, item.uuid));
-    const requested = new URLSearchParams(location.search).get('session');
-    if (requested && [...$('studio-session').options].some((o) => o.value === requested)) $('studio-session').value = requested;
-    notice(sessions.some((x) => x.status === 'running') ? '请选择后台会话，再开始监测。连接不会创建新实验。' : '没有运行中的后台会话，请先在 Studio 开始检测。');
-  } catch (error) { notice(error.message, true); }
+  try { await directory.refresh(); }
   finally { $('refresh-sessions').disabled = !!store.session || busy; }
 }
 on($('refresh-sessions'), 'click', refreshSessions);
+on($('manager-refresh'), 'click', refreshSessions);
+on($('studio-token'), 'change', () => { directory.stop(); directoryClient.token = accessToken(); directory.start(); updateStudioLinks(); });
+on($('studio-session'), 'change', () => { if ($('studio-session').value) selectSession($('studio-session').value); });
 on($('source'), 'change', () => {
-  adapter.stop(); mode = $('source').value;
-  store.resetStream(demoMeta()); store.staleMs = 3000; lastValidUpdate = null; hovered = null; frozen = false;
+  operation++; busy = false; adapter.stop(); directory.stop(); mode = $('source').value; autoMonitor = true;
+  store.resetStream(mode === 'studio' ? idleMetadata() : demoMeta()); store.staleMs = 3000; lastValidUpdate = null; hovered = null; frozen = false;
   $('freeze').textContent = 'Ⅱ 暂停绘制'; $('freeze').setAttribute('aria-pressed','false');
   $('studio-options').hidden = mode !== 'studio';
+  $('manager-panel').hidden = mode !== 'studio';
   adapter = demoAdapter;
-  if (mode === 'studio') refreshSessions();
+  if (mode === 'studio') { directoryClient.token = accessToken(); directory.start(); notice('自动等待 Studio 后台会话。暂停或断开本页监测时，Studio 继续检测与保存。'); }
   else { demoAdapter.scenario = $('scenario').value; $('channel').replaceChildren(new Option('全部通道','all'), ...[0,1,2,3].map((i)=>new Option(`CH${i+1}`,String(i)))); channel='all'; $('wave-window').value='5'; windowSeconds=5; notice('已选择本地演示源，请显式开始会话。'); }
   renderMetadata(); updateUI();
 });
@@ -207,7 +298,7 @@ function download(session, format) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function renderHistory() {
-  if (!store.sessions.length) { $('history').replaceChildren(element('div', 'history-empty', '还没有已结束的会话。开始一次演示，结束后在这里回看与导出。')); return; }
+  if (!store.sessions.length) { $('history').replaceChildren(element('div', 'history-empty', '还没有已结束的监测记录。断开本页监测后可在这里导出；后台历史报告见“最近会话与报告”。')); return; }
   $('history').replaceChildren(...store.sessions.map((session) => {
     const summary = summarize(session.points, session.activeMs, intervalFor(session)), row = element('div', 'history-row');
     const title = element('div'); title.append(element('strong', '', `${new Date(session.startedAt).toLocaleDateString('zh-CN')} ${clock(session.startedAt)}`), element('small', '', `${session.source.toUpperCase()} · ${elapsed(session.activeMs)} · ${summary.count} 个评分事件`));
@@ -226,7 +317,7 @@ function updateUI() {
   $('score').textContent = String(score); $('focus-score').textContent = String(score);
   $('connection').textContent = `${valid ? '●' : '○'} ${stateLabel}`;
   for (const id of ['source-badge','data-source','footer-source']) $(id).textContent = sourceText(); $('connection').dataset.state = state;
-  $('score-status').textContent = valid ? `${store.level || '观察中'} · 演示分级` : stateLabel;
+  $('score-status').textContent = valid ? `${store.level || '观察中'} · 显示分级` : stateLabel;
   $('focus-state').textContent = valid ? `${store.level || '观察中'} · ${sourceText()}` : stateLabel;
   document.body.classList.toggle('invalid-score', !valid);
   $('orb').className = `orb ${state}`; $('orb-status').textContent = valid ? '跟随此刻的专注节奏' : stateLabel;
@@ -242,17 +333,18 @@ function updateUI() {
   if (valid) lastValidUpdate = store.latest.timestampMs;
   $('last-update').textContent = lastValidUpdate ? clock(lastValidUpdate) : '--';
   $('wall-clock').textContent = clock(now); controls();
-  const meta = store.meta, raw = meta.capabilities.rawEEG, rawFresh = store.eegReceivedAt !== null && now - store.eegReceivedAt <= store.staleMs;
+  const meta = store.meta, pending = mode === 'studio' && !meta.transport, raw = meta.capabilities.rawEEG, rawFresh = store.eegReceivedAt !== null && now - store.eegReceivedAt <= store.staleMs;
   $('sample-rate').textContent = raw ? `${meta.device.samplingRateHz} Hz` : '未提供'; $('channel-count').textContent = raw ? `${meta.device.channels.length} 通道` : '未提供';
   $('data-age').textContent = store.receivedAt !== null ? `${((now - store.receivedAt) / 1000).toFixed(1)} s` : '--';
   $('rejected').textContent = `${store.diagnostics.rejected} / ${store.diagnostics.duplicate}`;
   $('eeg-empty').hidden = raw && rawFresh;
-  $('eeg-empty').textContent = !raw ? '此数据源未提供原始 EEG' : '等待数据 · 不补绘缺失样本';
-  $('eeg-description').textContent = raw ? `${meta.device.channels.length} 通道 / ${meta.device.samplingRateHz} Hz / ${meta.device.eegUnit} · ${mode === 'studio' ? '后端未抽稀显示快照 · 窗内相对时间' : '合成演示波形'}` : '仅提供聚合专注度，无法显示原始 EEG';
+  $('eeg-empty').textContent = pending ? '等待连接 Studio 后台会话' : !raw ? '此数据源未提供原始 EEG' : '等待数据 · 不补绘缺失样本';
+  $('eeg').setAttribute('aria-label', mode === 'studio' ? 'Studio 多通道 EEG 波形，单位微伏' : '合成 EEG 多通道波形，单位微伏');
+  $('eeg-description').textContent = pending ? '连接后读取设备通道、采样率与实时脑电' : raw ? `${meta.device.channels.length} 通道 / ${meta.device.samplingRateHz} Hz / ${meta.device.eegUnit} · ${mode === 'studio' ? '后端未抽稀显示快照 · 窗内相对时间' : '合成演示波形'}` : '等待原始 EEG 数据与设备参数';
   $('freeze').disabled = !raw; $('channel').disabled = !raw; $('wave-window').disabled = !raw || mode === 'studio';
   const bandsFresh = store.quality === 'good' && store.qualityAt !== null && now - store.qualityAt <= store.staleMs && ['connected','calibrating'].includes(store.connection) && meta.capabilities.bandPower && store.bandsReceivedAt !== null && now - store.bandsReceivedAt <= store.staleMs;
   for (const row of $('bands').children) { const value = bandsFresh ? store.bands?.values[row.dataset.band] : null; row.querySelector('.band-value').textContent = value === undefined || value === null ? '--' : `${(value * 100).toFixed(0)}%`; row.querySelector('.band-fill').style.width = value === undefined || value === null ? '0%' : `${value * 100}%`; }
-  $('band-status').textContent = !meta.capabilities.bandPower ? '此数据源未提供频段功率' : bandsFresh ? (mode === 'demo' ? '模拟生成 · 窗口 1 秒 · ratio' : `后端 Welch 相对功率 · 窗口 ${meta.bandPowerInfo.windowSeconds}s · ratio`) : '等待有效频段数据';
+  $('band-status').textContent = pending ? '连接后显示后台频段分析' : !meta.capabilities.bandPower ? '此数据源未提供频段功率' : bandsFresh ? (mode === 'demo' ? '模拟生成 · 窗口 1 秒 · ratio' : `后端 Welch 相对功率 · 窗口 ${meta.bandPowerInfo.windowSeconds}s · ratio`) : '等待有效频段数据';
   $('trend-empty').hidden = store.trend.length > 0;
   $('trend-window').textContent = range === 'session' ? '本次会话 · 本地事件时间' : `最近 ${range === '60' ? '60 秒' : '5 分钟'} · 本地时间`;
   if (route === 'device') $('events').replaceChildren(...store.events.values().slice(-20).reverse().map((e) => { const li = element('li'); li.append(element('time', '', clock(e.timestampMs)), element('span', '', `${e.kind} · ${e.detail}`)); return li; }));
@@ -281,10 +373,13 @@ function frame(t) {
   }
   raf = requestAnimationFrame(frame);
 }
-export function dispose() { if (disposed) return; disposed = true; adapter.stop(); if (raf !== null) cancelAnimationFrame(raf); cleanups.forEach((fn) => fn()); }
+export function dispose() { if (disposed) return; disposed = true; operation++; adapter.stop(); directory.stop(); if (raf !== null) cancelAnimationFrame(raf); cleanups.forEach((fn) => fn()); }
 on(window, 'hashchange', routeChanged);
-on(window, 'pagehide', () => { adapter.stop(); if (raf !== null) cancelAnimationFrame(raf); });
-on(window, 'pageshow', (event) => { if (event.persisted && !disposed) { if (store.session?.status === 'recording') adapter.start(); raf = requestAnimationFrame(frame); } });
+on(window, 'pagehide', () => { adapter.stop(); directory.stop(); if (raf !== null) cancelAnimationFrame(raf); });
+on(window, 'pageshow', (event) => { if (event.persisted && !disposed) { if (mode === 'studio') directory.start(); if (store.session?.status === 'recording') adapter.start(); raf = requestAnimationFrame(frame); } });
+on(document, 'visibilitychange', () => { if (!document.hidden && !disposed) { if (mode === 'studio') void refreshSessions(); updateUI(); } });
 on(window, 'error', () => { notice('界面发生错误，请结束会话并刷新；已记录数据可尝试从会话记录导出。', true); });
 routeChanged(); raf = requestAnimationFrame(frame);
-if (new URLSearchParams(location.search).has('session')) { $('source').value='studio'; $('source').dispatchEvent(new Event('change')); }
+$('studio-token').value = accessToken(); updateStudioLinks();
+$('source').value = query.get('source') === 'demo' ? 'demo' : 'studio';
+$('source').dispatchEvent(new Event('change'));

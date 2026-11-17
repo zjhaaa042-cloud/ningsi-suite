@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 import numpy as np
+from ningsi.acquisition.eeg import is_eeg_stream
 
 LOGGER = logging.getLogger("ningsi.lsl")
 
@@ -44,7 +45,6 @@ _KIND_ALIASES = (
     ("fnirs", {"fnirs", "nir", "nirs", "ir"}),
     ("motion", {"motion", "imu", "accelerometer", "accel"}),
     ("metric", {"metric", "metrics"}),
-    ("eeg", {"eeg"}),
 )
 
 
@@ -58,6 +58,8 @@ def _normalize(text: str) -> str:
 
 def canonical_kind(stream_type: str, stream_name: str = "") -> str | None:
     """把厂商的 type/name 归一到稳定的数据种类；未知则返回 None。"""
+    if is_eeg_stream(stream_type, stream_name):
+        return "eeg"
     candidates = {_normalize(stream_type), _normalize(stream_name)}
     for kind, aliases in _KIND_ALIASES:
         if candidates & aliases:
@@ -85,6 +87,7 @@ class StreamDescriptor:
     source_id: str = ""
     hostname: str = ""
     uid: str = ""
+    declared_units: tuple = ()
 
     @property
     def label(self) -> str:
@@ -98,6 +101,7 @@ class StreamDescriptor:
             "channel_count": self.channel_count,
             "nominal_srate": self.nominal_srate,
             "channel_labels": list(self.channel_labels),
+            "declared_units": list(self.declared_units),
             "source_id": self.source_id,
             "hostname": self.hostname,
             "label": self.label,
@@ -106,7 +110,6 @@ class StreamDescriptor:
 
 def _fallback_labels(kind: str, count: int) -> tuple:
     preset = {
-        "eeg": ("Fp1", "Fp2", "F3", "F4", "C3", "C4", "O1", "O2"),
         "motion": ("Accel X", "Accel Y", "Accel Z", "Gyro X", "Gyro Y", "Gyro Z"),
         "heart_rate": ("Heart Rate",),
         "metric": ("Metric 1", "Metric 2"),
@@ -137,9 +140,20 @@ def describe_stream(info: Any) -> StreamDescriptor | None:
     kind = canonical_kind(stream_type, name)
     if kind not in SUPPORTED_KINDS:
         return None
+    if kind == "eeg" and not is_eeg_stream(stream_type, name, _safe(info, "channel_format", None)):
+        return None
     channels = int(_safe(info, "channel_count", 0) or 0)
     if channels <= 0:
         return None
+    units = []
+    try:
+        node = info.desc().child("channels").child("channel")
+        for _ in range(channels):
+            units.append(node.child_value("unit").strip() if not node.empty() else "")
+            if not node.empty():
+                node = node.next_sibling()
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        units = []
     return StreamDescriptor(
         kind=kind,
         name=name or KIND_LABELS[kind],
@@ -147,6 +161,7 @@ def describe_stream(info: Any) -> StreamDescriptor | None:
         channel_count=channels,
         nominal_srate=float(_safe(info, "nominal_srate", 0.0) or 0.0),
         channel_labels=_channel_labels(info, kind, channels),
+        declared_units=tuple(units),
         source_id=str(_safe(info, "source_id", "")),
         hostname=str(_safe(info, "hostname", "")),
         uid=str(_safe(info, "uid", "")),
@@ -226,6 +241,16 @@ class StreamBuffer:
             return np.zeros((self.descriptor.channel_count, 0), dtype=float)
         return np.asarray(rows, dtype=float).T
 
+    def model_snapshot(self, count: int) -> dict:
+        """Atomic raw amplitudes and aligned timestamps for the research model."""
+        with self._lock:
+            stamps = list(self._timestamps)[-count:]
+            rows = list(self._samples)[-count:]
+            total, last = self._count, self._last_monotonic
+        return {"timestamps": stamps, "samples": np.asarray(rows, dtype=float).T,
+                "total_samples": total, "age": None if last is None else time.monotonic() - last,
+                "buffer_id": id(self), "descriptor": self.descriptor.as_dict()}
+
     def stats(self) -> dict:
         with self._lock:
             stamps = list(self._timestamps)
@@ -287,6 +312,13 @@ class _StreamWorker(threading.Thread):
         error: str | None = None
         try:
             inlet = self.inlet_factory(self.info, self.buffer_seconds)
+            if hasattr(inlet, "info"):
+                # The resolver normally omits channel XML. Read the connected
+                # stream's labels and units before publishing its first samples.
+                descriptor = describe_stream(inlet.info(timeout=3))
+                if descriptor is None or descriptor.kind != self.buffer.descriptor.kind:
+                    raise LslUnavailable("连接后的流类型与发现结果不一致。")
+                self.buffer.descriptor = descriptor
             while not self.stop_event.is_set():
                 samples, timestamps = inlet.pull_chunk(timeout=self.pull_timeout, max_samples=1024)
                 if timestamps:

@@ -2,8 +2,8 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="NeuroFocus 神经专注监测台。可追溯的演示数据、专注趋势与合成 EEG 可视化。">
-  <title>NeuroFocus · 神经专注监测台</title>
+  <meta name="description" content="凝思 Studio 管理者平台。独立查看后台会话、设备、实时脑电、专注趋势与预警，可与 Studio 同时打开。">
+  <title>管理者平台 · 凝思 Studio</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%23090e1b'/%3E%3Cpath d='M5 21h8l4-10 6 19 4-9h8' fill='none' stroke='%2337d5c7' stroke-width='3'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="./style.css">
 </head>
@@ -11,22 +11,35 @@
 <a class="skip-link" href="#main">跳到主内容</a>
 <div class="shell">
   <aside class="rail">
-    <a class="brand" href="#/dashboard" aria-label="NeuroFocus 首页"><span class="brand-mark">N<span>·</span></span><span class="brand-name">NeuroFocus<small>神经专注监测台</small></span></a>
-    <span class="nav-caption">WORKSPACE</span>
+    <a class="brand" href="#/dashboard" aria-label="凝思管理者平台首页"><span class="brand-mark">N<span>·</span></span><span class="brand-name">凝思 Studio<small>管理者平台</small></span></a>
+    <span class="nav-caption">MANAGEMENT</span>
     <nav id="workspace-nav" aria-label="主导航">
-      <a href="#/dashboard" data-route="dashboard"><span class="nav-icon">◫</span><span>实时总览</span><i>01</i></a>
+      <a href="#/dashboard" data-route="dashboard"><span class="nav-icon">◫</span><span>后台监控</span><i>01</i></a>
       <a href="#/focus" data-route="focus"><span class="nav-icon">◎</span><span>沉浸专注</span><i>02</i></a>
       <a href="#/analysis" data-route="analysis"><span class="nav-icon">▥</span><span>会话记录</span><i>03</i></a>
       <a href="#/device" data-route="device"><span class="nav-icon">⌘</span><span>数据与设备</span><i>04</i></a>
     </nav>
-    <div class="rail-bottom"><div class="local-indicator"><span></span> 本页监测记录仅存内存</div><a class="studio-link" href="../#/start">↗ 返回凝思 Studio</a><p>让专注有迹可循。</p><small>NEUROFOCUS / V1.0</small></div>
+    <div class="rail-bottom"><div class="local-indicator"><span></span> 独立监控 · Studio 持续运行</div><a class="studio-link" data-studio-link href="../#/start" target="_blank" rel="noopener noreferrer">↗ 打开凝思 Studio</a><p>检测与管理，同时进行。</p><small>STUDIO / MANAGER</small></div>
   </aside>
   <div class="workspace">
-    <header class="topbar"><button id="nav-collapse" class="nav-collapse" aria-label="收起导航" aria-expanded="true" aria-controls="workspace-nav">☰</button><div class="breadcrumb">工作空间 <span>/</span> <b id="page-name">实时总览</b></div><div class="top-status"><span id="source-badge" class="source-tag">DEMO <span>演示数据</span></span><span id="connection" class="connection">○ 未连接</span><time id="wall-clock">--:--:--</time></div></header>
+    <header class="topbar"><button id="nav-collapse" class="nav-collapse" aria-label="收起导航" aria-expanded="true" aria-controls="workspace-nav">☰</button><div class="breadcrumb">管理者平台 <span>/</span> <b id="page-name">后台监控</b></div><div class="top-status"><span id="source-badge" class="source-tag">STUDIO · 待连接</span><span id="connection" class="connection">○ 未连接</span><time id="wall-clock">--:--:--</time></div></header>
     <main id="main" tabindex="-1">
-      <div class="page-heading"><div><div class="eyebrow">OBSERVE YOUR ATTENTION</div><h1 id="page-title">每一刻专注，都有迹可循<span>。</span></h1><p id="page-description">从此刻开始，观察专注的节奏与变化。</p></div><span class="workspace-label">NEURAL WORKSPACE <span>↗</span></span></div>
+      <div class="page-heading"><div><div class="eyebrow">STUDIO MANAGEMENT</div><h1 id="page-title">检测在前台，状态尽在掌握。</h1><p id="page-description">与凝思 Studio 同时打开，独立查看后台检测与训练。</p></div><a class="open-studio" data-studio-link href="../#/start" target="_blank" rel="noopener noreferrer">打开凝思 Studio ↗</a></div>
+      <section id="manager-panel" class="panel manager-panel" aria-label="Studio 后台会话">
+        <div class="manager-heading"><div><h2>Studio 后台 <span id="running-count" class="count-tag">--</span></h2><p id="manager-status" class="panel-description" role="status">正在连接后台…</p></div><div class="manager-tools"><span id="manager-updated" class="muted">每 5 秒刷新</span><button id="manager-refresh" class="small-button">↻ 刷新</button></div></div>
+        <div id="manager-sessions" class="manager-sessions"><p class="manager-empty">正在查找运行中的会话…</p></div>
+        <div id="backend-detail" class="backend-detail" hidden>
+          <div><small>正在查看</small><strong id="backend-participant">--</strong><span id="backend-uuid" class="muted"></span></div>
+          <div><small>当前阶段</small><strong id="backend-phase">--</strong><span id="backend-status" class="muted"></span></div>
+          <div><small>设备 / 数据源</small><strong id="backend-device">--</strong><span id="backend-source" class="muted"></span></div>
+          <div><small>总进度 <span id="backend-percent">0%</span></small><progress id="backend-progress" max="100" value="0" aria-label="后台会话总进度"></progress><a id="backend-studio" data-studio-link href="../#/live" target="_blank" rel="noopener noreferrer">在 Studio 查看 ↗</a></div>
+          <p id="backend-waiting" class="backend-waiting" hidden></p>
+          <div id="backend-alerts" class="backend-alerts" aria-label="后台预警"></div>
+        </div>
+        <details id="recent-sessions" class="recent-sessions"><summary>最近会话与报告</summary><div id="manager-history"></div></details>
+      </section>
       <div class="session-bar"><div class="session-info"><span class="pulse-dot"></span><span id="session-label">尚未开始会话</span><time id="session-clock">00:00</time></div><div class="session-actions"><button id="start" class="primary">▶ 开始演示会话</button><button id="pause" disabled>Ⅱ 暂停</button><button id="stop" disabled>■ 结束</button></div></div>
-      <div id="announcement" class="notice" role="status" aria-live="polite">演示源已选择。开始后显示模拟专注度与合成 EEG，不代表真实采集。</div>
+      <div id="announcement" class="notice" role="status" aria-live="polite">等待 Studio 会话。检测开始后，本页自动连接监测。</div>
 
       <section id="dashboard-page" class="page-section" aria-label="实时总览">
         <div class="hero-grid">
@@ -46,6 +59,6 @@
     </main>
   </div>
 </div>
-<noscript>此监测台需要启用 JavaScript。所有演示数据均在浏览器本地生成。</noscript>
+<noscript>管理者平台需要启用 JavaScript，并连接正在运行的凝思 Studio 服务。</noscript>
 <script type="module" src="./app.mjs"></script>
 </body></html>

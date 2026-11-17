@@ -11,7 +11,8 @@
 
 import { api } from './api.js';
 import { describeError, store, toast } from './store.js';
-import { el, fmtInt, list, pick, statusText } from './util.js';
+import { el, fmtInt, list, phaseText, pick, statusText } from './util.js';
+import { managerURL } from './manager-link.js';
 
 import * as dashboard from './views/dashboard.js';
 import * as start from './views/start.js';
@@ -26,16 +27,16 @@ import * as panels from './views/panels.js';
 // 「开始检测」放第一个：这是一个"跑一次检测"的产品，第一次用的人应该先看到它，
 // 而不是先看到仪表盘/被试/设备这些零件。
 const ROUTES = [
-  { path: '#/start', label: '开始检测', module: start },
-  { path: '#/dashboard', label: '仪表盘', module: dashboard },
-  { path: '#/subjects', label: '被试管理', module: subjects },
+  { path: '#/start', label: '开始评估', module: start },
+  { path: '#/dashboard', label: '工作台概览', module: dashboard },
+  { path: '#/subjects', label: '参与者管理', module: subjects },
   { path: '#/flow', label: '会话流程', module: flow },
   { path: '#/live', label: '实时监测', module: live },
-  { path: '#/training', label: '训练视图', module: training },
+  { path: '#/training', label: '反馈训练', module: training },
   { path: '#/history', label: '历史与趋势', module: history },
   { path: '#/report', label: '评估报告', module: report },
-  { path: '#/models', label: '模型训练', module: panels.models },
-  { path: '#/devices', label: '设备状态', module: panels.devices },
+  { path: '#/models', label: '模型管理', module: panels.models },
+  { path: '#/devices', label: '设备连接', module: panels.devices },
 ];
 
 const DEFAULT_ROUTE = '#/start';
@@ -89,18 +90,25 @@ function navigate(hash) {
 
 async function renderRoute() {
   const { path, params } = parseHash();
+  // Retired and unknown routes resolve to a real product address.
+  const requestedPath = window.location.hash.split('?')[0];
+  if (requestedPath && !ROUTES.some(route => route.path === requestedPath)) {
+    window.history.replaceState(null, '', path);
+  }
   runCleanups();
   app.controller = new AbortController();
   app.route = path;
   highlightNav(path);
   const navToggle = document.getElementById('nav-toggle');
   if (navToggle) {
-    navToggle.textContent = `导航 · ${ROUTES.find((item) => item.path === path)?.label || '开始检测'}`;
+    navToggle.textContent = `导航 · ${ROUTES.find((item) => item.path === path)?.label || '开始评估'}`;
     navToggle.setAttribute('aria-expanded', 'false');
     navToggle.closest('nav').classList.remove('sidenav--open');
   }
 
   const route = ROUTES.find((item) => item.path === path) || ROUTES[0];
+  document.getElementById('page-location').textContent = route.label;
+  app.viewContainer.dataset.route = path.slice(2);
   document.title = `${route.label} · 凝思 Studio`;
 
   const ctx = {
@@ -140,6 +148,7 @@ const NAV_PATHS = [
   'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M8 13h8 M8 17h5',
   'M9 3h6v6H9z M3 15h6v6H3z M15 15h6v6h-6z M12 9v3 M6 15v-3h12v3',
   'M8 2h8v20H8z M11 5h2 M11 18h2 M3 9v6 M21 9v6',
+  'M3 4h18v12H3z M12 16v5 M7 21h10 M7 12l3-4 4 3 3-5',
 ];
 function navIcon(index) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -151,17 +160,31 @@ function navIcon(index) {
 
 function renderNav() {
   app.navList.textContent = '';
-  const tools = el('details', { class: 'tools-nav' }, [el('summary', { text: '更多工具' })]);
-  const secondary = el('ul', { class: 'tools-nav__list' });
-  for (const [index, route] of ROUTES.entries()) {
-    const primary = ['#/start', '#/history'].includes(route.path);
-    (primary ? app.navList : secondary).append(el('li', {}, [
-      el('a', { class: 'sidenav__link', href: route.path }, [navIcon(index), el('span', { text: route.label })]),
-    ]));
+  const groups = [
+    { label: '评估与训练', paths: ['#/start', '#/dashboard', '#/flow', '#/live', '#/training'] },
+    { label: '记录与结果', paths: ['#/history', '#/report'] },
+    { label: '设置与管理', paths: ['#/devices', '#/subjects', '#/models'], collapsible: true },
+  ];
+  for (const group of groups) {
+    const links = el('ul', { class: 'nav-group__links' });
+    for (const path of group.paths) {
+      const index = ROUTES.findIndex(route => route.path === path);
+      const route = ROUTES[index];
+      links.append(el('li', {}, [el('a', { class: 'sidenav__link', href: route.path }, [
+        navIcon(index), el('span', { text: route.label }),
+      ])]));
+    }
+    if (group.collapsible) {
+      links.append(el('li', {}, [el('a', { class: 'sidenav__link', href: managerURL(),
+        target: '_blank', rel: 'noopener noreferrer', title: '在独立窗口查看后台会话',
+      }, [navIcon(4), el('span', { text: '管理控制台 ↗' })])]));
+      app.navList.append(el('li', { class: 'nav-group' }, [
+        el('details', { class: 'nav-settings' }, [el('summary', { text: group.label }), links]),
+      ]));
+    } else {
+      app.navList.append(el('li', { class: 'nav-group' }, [el('span', { class: 'nav-group__label', text: group.label }), links]));
+    }
   }
-  secondary.append(el('li', {}, [el('a', { class: 'sidenav__link', href: './neurofocus/', text: '专注监测台' })]));
-  tools.append(secondary);
-  app.navList.append(el('li', {}, [tools]));
 }
 
 /* ------------------------------------------------------------------ 顶栏 */
@@ -183,7 +206,7 @@ function sourceText(kind, note, key) {
   if (!effective) return key ? `数据来源：${key}${note ? `（${note}）` : ''}` : '数据来源：—';
   const normalized = String(effective).toLowerCase();
   if (normalized === 'sim') return '数据来源：仿真';
-  if (normalized === 'lsl') return `数据来源：实时设备（${key || 'LSL'}）`;
+  if (normalized === 'lsl') return `数据来源：LSL 实时流（${key || 'LSL'}）`;
   return `数据来源：${effective}${note ? `（${note}）` : ''}`;
 }
 
@@ -210,13 +233,18 @@ function updateHeader() {
   const deviceKey = pick(session, 'device', null) || pick(health, 'overview.source', null);
   // 历史已结束会话的 runtime.source_kind 可能是空的：按设备键兜底判定类别，
   // 徽标文案与"仿真高亮"用同一个 effectiveKind，避免一个说仿真、一个不高亮
-  const effectiveKind = kind || kindFromKey(deviceKey);
+  const simulated = runtime.simulated === true || kind === 'sim'
+    || /(^|[^a-z])(sim|simulation|synthetic|demo)([^a-z]|$)/i.test(String(deviceKey || ''))
+    || /模拟|仿真/.test(String(note || ''));
+  const effectiveKind = simulated ? 'sim' : kind || kindFromKey(deviceKey);
   const noSignal = !effectiveKind && !deviceKey && !session.uuid;
-  const label = noSignal ? '数据来源：无信号' : sourceText(kind, note, deviceKey);
+  deviceBadge.hidden = !deviceKey;
+  document.querySelector('.topbar__session').hidden = !session.uuid;
+  const label = noSignal ? '数据来源：无信号' : sourceText(effectiveKind, note, deviceKey);
   sourceBadge.textContent = label;
   sourceBadge.dataset.kind = effectiveKind || 'none';
   sourceBadge.title = noSignal
-    ? '未检测到 LSL 脑电信号。请到「设备状态」页启动采集端后重试；仅演示时可在建会话时显式选择仿真源 sim-bsense'
+    ? '未检测到 LSL 脑电信号。请在采集软件开启 EEG 推流，然后到「设置与管理 → 设备连接」检查；仅演示时可在建会话时显式选择仿真源 sim-bsense'
     : (note || '数据来源标注（仿真数据会在界面与报告中显式标注）');
   sourceBadge.classList.toggle('badge--strong', noSignal
     || String(effectiveKind || '').toLowerCase() === 'sim');
@@ -248,7 +276,7 @@ function updateHeader() {
     deviceBadge.textContent = `设备：${deviceKey || '未检测到信号'}`;
     deviceBadge.title = deviceKey
       ? `采样率 ${pick(session, 'srate', '—')} Hz｜通道 ${pick(session, 'channels', '—')}`
-      : '未检测到 LSL 脑电设备；到「设备状态」页可查看接入指引与实时预览';
+      : '未检测到 LSL 脑电设备；到「设置与管理 → 设备连接」可查看接入指引与实时预览';
     deviceBadge.classList.toggle('badge--strong', noSignal);
   }
 
@@ -261,7 +289,9 @@ function updateHeader() {
   }
   const progress = Number(pick(session, 'progress', 0)) || 0;
   const percent = Math.max(0, Math.min(100, progress * 100));
-  sessionBadge.textContent = `会话：${statusText(pick(session, 'status', null))}｜${pick(session, 'phase_label', null) || pick(session, 'phase', null) || '—'}`;
+  const terminal = ['done', 'failed', 'cancelled', 'canceled', 'error'].includes(session.status);
+  sessionBadge.textContent = `会话：${statusText(pick(session, 'status', null))}`
+    + (terminal ? '' : `｜${phaseText(session.phase, session.phase_label)}`);
   sessionBadge.title = `uuid ${session.uuid}`;
   progressBar.style.width = `${percent.toFixed(1)}%`;
   percentNode.textContent = `${percent.toFixed(0)}%`;
@@ -319,6 +349,11 @@ function boot() {
     return;
   }
   renderNav();
+  document.querySelector('.skip-link')?.addEventListener('click', event => {
+    event.preventDefault();
+    app.viewContainer.focus({ preventScroll: true });
+    app.viewContainer.scrollIntoView({ block: 'start' });
+  });
   const navToggle = document.getElementById('nav-toggle');
   navToggle?.addEventListener('click', () => {
     const open = navToggle.getAttribute('aria-expanded') !== 'true';

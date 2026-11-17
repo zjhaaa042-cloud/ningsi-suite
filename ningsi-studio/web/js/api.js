@@ -140,6 +140,12 @@ const del = (path, options) => request('DELETE', path, { ...options });
 
 /* ------------------------------------------------------------------ 基础 */
 export const api = {
+  showcaseMetadata: () => get('/api/showcase/metadata'),
+  showcaseAnalyze: (body) => post('/api/showcase/analyze', body, { timeout: 30000 }),
+  showcaseEvidence: () => get('/api/showcase/evidence'),
+  showcaseDeviceProfile: () => get('/api/showcase/device-profile'),
+  saveShowcaseDeviceProfile: (body) => post('/api/showcase/device-profile', body),
+  createShowcaseDemo: () => post('/api/showcase/demo-session', {}, { timeout: 30000 }),
   health: () => get('/api/health'),
   config: () => get('/api/config'),
   devices: (probe) => get('/api/devices', { probe }),
@@ -166,6 +172,7 @@ export const api = {
   getSession: (uuid) => get(`/api/sessions/${uuid}`),
   cancelSession: (uuid) => request('DELETE', `/api/sessions/${uuid}`),
   sessionLive: (uuid) => get(`/api/sessions/${uuid}/live`),
+  submitStateCheckin: (uuid, body) => post(`/api/sessions/${uuid}/state-checkins`, body),
   sessionHeatmap: (uuid) => get(`/api/sessions/${uuid}/heatmap`),
   sessionTrend: (uuid, params) => get(`/api/sessions/${uuid}/trend`, params),
 
@@ -193,6 +200,15 @@ export const api = {
 
   /* ------------------------------------------------------- 模型与趋势 */
   trainModel: (body) => post('/api/models/train', body),
+  humanModels: () => get('/api/models/human'),
+  importHumanData: (files) => post('/api/models/human/import', { files }, { timeout: 60000 }),
+  importHumanLocalData: (paths) => post('/api/models/human/import-local', { paths }, { timeout: 60000 }),
+  trainHumanModel: (datasetId) => post('/api/models/human/train', { dataset_id: datasetId }),
+  humanModelJob: (runId) => get(`/api/models/human/jobs/${encodeURIComponent(runId)}`),
+  activateHumanModel: (body) => post('/api/models/human/activate', body),
+  deactivateHumanModel: () => del('/api/models/human/active'),
+  humanModelArtifactUrl: (runId, kind) => `/api/models/human/jobs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(kind)}` + buildQuery({ token: apiToken() }),
+  humanModelReportUrl: (runId) => `/api/models/human/jobs/${encodeURIComponent(runId)}/artifacts/report` + buildQuery({ preview: 1, token: apiToken() }),
   reportsTrend: (params) => get('/api/reports/trend', params),
 };
 

@@ -33,6 +33,7 @@ LOGGER = logging.getLogger("ningsi_studio.http")
 SSE_TYPE = "text/event-stream; charset=utf-8"
 NO_CACHE = "no-store, no-cache, must-revalidate"
 MAX_BODY_BYTES = 1024 * 1024
+MAX_MODEL_IMPORT_BYTES = 16 * 1024 * 1024
 BODY_TIMEOUT_SEC = 10.0
 
 
@@ -143,7 +144,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             size = int(raw)
         except ValueError:
             reject("Content-Length 不合法")
-        if size > MAX_BODY_BYTES:
+        body_limit = (MAX_MODEL_IMPORT_BYTES if urlparse(getattr(self, "path", "")).path == "/api/models/human/import"
+                      else MAX_BODY_BYTES)
+        if size > body_limit:
             reject("请求体过大", 413)
         previous_timeout = self.connection.gettimeout()
         deadline = time.monotonic() + BODY_TIMEOUT_SEC
@@ -275,14 +278,21 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     or host.path or host.query or host.fragment):
                 raise ValueError('untrusted host')
             origin = self.headers.get('Origin')
-            if origin is not None:
+            # External app/browser-extension navigation may be marked cross-site.
+            # Only the public SPA entry may be opened this way; API requests and
+            # all mutations retain the exact-origin checks below.
+            public_navigation = (self.command in ('GET', 'HEAD')
+                                 and urlparse(self.path).path in ('/', '/index.html')
+                                 and self.headers.get('Sec-Fetch-Mode') == 'navigate'
+                                 and self.headers.get('Sec-Fetch-Dest') == 'document')
+            if origin is not None and not public_navigation:
                 parsed = urlparse(origin)
                 if (parsed.scheme != 'http' or parsed.hostname != host.hostname
                         or (parsed.port or 80) != port
                         or parsed.username is not None or parsed.password is not None
                         or parsed.path or parsed.query or parsed.fragment):
                     raise ValueError('cross origin')
-            if self.headers.get('Sec-Fetch-Site', '').lower() == 'cross-site':
+            if self.headers.get('Sec-Fetch-Site', '').lower() == 'cross-site' and not public_navigation:
                 raise ValueError('cross site')
         except ValueError as exc:
             raise Forbidden('仅允许从本服务页面访问，请使用服务启动时显示的地址。') from exc

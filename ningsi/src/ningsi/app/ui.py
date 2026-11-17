@@ -185,11 +185,13 @@ class StudioWindow:
             )
             self.series.append((window.t_end, result.score("focus")))
             if self.training and getattr(self, "segment_open", False):
-                self.segment_samples.append((window.t_end, result.score("focus")))
+                self.segment_samples.append((window.t_end - self.segment_start_t, result.score("focus")))
             self._draw_heatmap()
             self._draw_wave_and_spectrum(raw, self.sim.srate)
             self._draw_feedback(result.score("focus") or 0.0, self.training.target if self.training else 0.5)
         else:
+            if self.training and getattr(self, "segment_open", False):
+                self.segment_interruptions.append(window.t_end - self.segment_start_t)
             self.series.append((window.t_end, None))
             self.quality_label.config(text=f"窗 {self.index + 1}｜质量不合格：{','.join(window.quality.reasons)}（不计入指标与计时）")
         self.index += 1
@@ -218,17 +220,24 @@ class StudioWindow:
     def _start_segment(self) -> None:
         self.segment_open = True
         self.segment_samples = []
+        self.segment_interruptions = []
+        self.segment_start_t = self.index * config.STEP_SEC
         self.segment_label.config(text="分段记录：采集中…")
 
     def _finish_segment(self) -> None:
         if not getattr(self, "segment_open", False):
             return
         self.segment_open = False
-        segment = self.training.add_segment(self.segment_samples, 120.0)
+        segment = self.training.add_segment(self.segment_samples, 120.0,
+                                            excluded_windows=len(self.segment_interruptions),
+                                            interruptions=self.segment_interruptions)
         stats = segment.stats()
+        mean = '—' if stats['mean'] is None else f"{stats['mean']:.2f}"
+        ratio = '—' if stats['on_target_ratio'] is None else f"{stats['on_target_ratio']:.0%}"
+        volatility = '—' if stats['volatility'] is None else f"{stats['volatility']:.2f}"
         self.segment_label.config(
-            text=(f"分段记录：第 {segment.index} 段 均值 {stats['mean']:.2f}／达标 {stats['on_target_ratio']:.0%}／"
-                  f"波动 {stats['volatility']:.2f} → 下一段目标 {self.training.target:.2f}")
+            text=(f"分段记录：第 {segment.index} 段 均值 {mean}／达标 {ratio}／"
+                  f"波动 {volatility} → 下一段目标 {self.training.target:.2f}")
         )
 
     def _run_session(self) -> None:

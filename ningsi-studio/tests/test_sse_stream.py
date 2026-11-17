@@ -283,6 +283,36 @@ class SignalStreamTests(StudioTestCase):
                                   "非运行会话的 /signal 应返回统一 409 错误体（不再手拼响应体）")
         self.assertIn("运行", error["message"], "409 消息应说明会话不在运行中")
 
+    def test_manager_does_not_retune_or_stop_the_studio_observer(self) -> None:
+        session = self.create_session("g03", time_scale=1.0)
+        uuid = session["uuid"]
+        studio_connection, studio_response = self.open_signal_stream(uuid, "?hz=10&seconds=10&points=200")
+        manager_connection = manager_response = None
+        try:
+            self.assertEqual(studio_response.status, 200)
+            manager_connection, manager_response = self.open_signal_stream(uuid, "?hz=5&seconds=2&points=4000")
+            self.assertEqual(manager_response.status, 200)
+            manager_frame, _ = self.read_first_signal_frame(manager_response)
+            self.assertEqual(manager_frame["window_sec"], 2.0)
+            self.assertEqual(manager_frame["refresh_hz"], 5.0)
+            self.assertEqual(manager_frame["channels"][0]["points"], manager_frame["channels"][0]["raw_points"])
+            for _ in range(6):
+                studio_frame, _ = self.read_first_signal_frame(studio_response)
+                self.assertEqual(studio_frame["window_sec"], 10.0)
+                self.assertEqual(studio_frame["refresh_hz"], 10.0)
+            manager_response.close()
+            manager_connection.close()
+            studio_frame, _ = self.read_first_signal_frame(studio_response)
+            self.assertEqual(studio_frame["window_sec"], 10.0)
+            self.assertTrue(self.session_detail(uuid)["runtime"]["alive"])
+        finally:
+            if manager_response is not None:
+                manager_response.close()
+            if manager_connection is not None:
+                manager_connection.close()
+            studio_response.close()
+            studio_connection.close()
+
 
 class SignalFeedRegistryTests(StudioTestCase):
     """实时信号注册表不随会话数增长：会话结束与应用停止都必须回收 feed。"""

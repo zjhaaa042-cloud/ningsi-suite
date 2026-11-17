@@ -1,0 +1,218 @@
+{
+  "schema": "ningsi-showcase-evidence-v1",
+  "overall_status": "pending_field_validation",
+  "requirements": [
+    {
+      "id": "hardware",
+      "title": "真实脑电硬件采集",
+      "software_status": "implemented",
+      "verification_status": "not_accepted",
+      "status_label": "真实采集已接入，合规与完整流程待核验",
+      "route": "#/devices",
+      "evidence_ids": [
+        "short_capture",
+        "complete_capture",
+        "recent_capture"
+      ],
+      "gaps": [
+        "实际型号、导联、参考与单位仍需现场核对。",
+        "接收成功不能代替有效基线与任务配对验收。"
+      ],
+      "next_action": "保存设备声明与材料出处，完成合格基线和正式任务采集。"
+    },
+    {
+      "id": "preprocessing",
+      "title": "信号降噪与伪迹处理",
+      "software_status": "implemented",
+      "verification_status": "partial",
+      "status_label": "滤波已实现，伪迹校正与拒评效果待现场验证",
+      "route": "#/showcase?step=preprocessing",
+      "evidence_ids": [
+        "recent_capture",
+        "complete_capture"
+      ],
+      "gaps": [
+        "同步 EOG 参考可用于回归校正；无参考时主要检测和排除污染。",
+        "肌电与运动的标记、留空和拒窗不能等同于恢复无伪迹脑电。"
+      ],
+      "next_action": "展示处理前后信号，并用眨眼、咬牙、转头对照核查误拒和漏检。"
+    },
+    {
+      "id": "features",
+      "title": "PSD 与可解释特征",
+      "software_status": "implemented",
+      "verification_status": "software_only",
+      "status_label": "θ、α、β PSD 与时域特征已实现",
+      "route": "#/showcase?step=features",
+      "evidence_ids": [],
+      "gaps": [
+        "特征可计算并不证明其能可靠识别心理状态。"
+      ],
+      "next_action": "用同窗原始数据、固定单位和频带核对可复算特征。"
+    },
+    {
+      "id": "models",
+      "title": "可训练模型与部署",
+      "software_status": "implemented",
+      "verification_status": "pending",
+      "status_label": "训练导出与加载已实现，目标设备精度待验证",
+      "route": "#/models",
+      "evidence_ids": [
+        "complete_capture"
+      ],
+      "gaps": [
+        "专注模型需要独立探针标签与按人隔离的开发和测试。",
+        "压力和情绪候选保留研究分数，不自动判定个人状态。"
+      ],
+      "next_action": "导入合格采集导出，冻结模型后使用独立人员评估。"
+    },
+    {
+      "id": "joint",
+      "title": "脑电量表联合评估",
+      "software_status": "implemented",
+      "verification_status": "pending",
+      "status_label": "规则式联合评估已实现，预测有效性待验证",
+      "route": "#/flow",
+      "evidence_ids": [],
+      "gaps": [
+        "脑电指数、SAS/SDS、SART/PVT 按来源融合；模型分数独立展示。",
+        "当前规则阈值尚未建立目标人群常模。"
+      ],
+      "next_action": "运行完整协议，核对证据一致、冲突和缺失的报告分支。"
+    },
+    {
+      "id": "report",
+      "title": "结构化报告与建议",
+      "software_status": "implemented",
+      "verification_status": "software_only",
+      "status_label": "报告生成与导出已实现",
+      "route": "#/report",
+      "evidence_ids": [],
+      "gaps": [
+        "报告中的状态含义受原始证据质量和验证范围约束。"
+      ],
+      "next_action": "展示评分、质量、问题分析、建议以及 JSON、HTML 导出。"
+    },
+    {
+      "id": "visualization",
+      "title": "实时波形频谱与热力图",
+      "software_status": "implemented",
+      "verification_status": "software_only",
+      "status_label": "实时可视化已实现",
+      "route": "#/live",
+      "evidence_ids": [],
+      "gaps": [
+        "波形刷新率与状态分析窗口分别计算，不能混用响应尺度。"
+      ],
+      "next_action": "显示真实或明确标注的模拟源，并核对无效窗独立留空。"
+    },
+    {
+      "id": "trends",
+      "title": "历史查询与周月趋势",
+      "software_status": "implemented",
+      "verification_status": "pending",
+      "status_label": "查询聚合已实现，长期真人追踪待积累",
+      "route": "#/history",
+      "evidence_ids": [],
+      "gaps": [
+        "专注曲线为相对基线指数；压力曲线来自本人当下自评。",
+        "当前曲线不能表述为已验证的脑电压力识别趋势。"
+      ],
+      "next_action": "按同一参与者查询周月数据，保留缺失与配置不可比提示。"
+    }
+  ],
+  "summary": {
+    "requirements": 8,
+    "software_implemented": 8,
+    "target_device_accepted": 0,
+    "evidence_available": 3
+  },
+  "evidence": [
+    {
+      "id": "short_capture",
+      "title": "真实短段采集核对",
+      "kind": "target_device_record",
+      "available": true,
+      "availability": "available",
+      "sha256": "cabd7f3b028b6b7f36e0fd7656511a14589dd1b49e5697a86275c73000f6b6ef",
+      "result": "partial",
+      "metrics": {
+        "windows_total": 13,
+        "windows_usable": 9,
+        "valid_ratio": 0.6923076923076923,
+        "duration_sec": 29.72,
+        "timing_pass": 13
+      },
+      "notes": [
+        "这份记录仅覆盖短时采集。",
+        "合格窗口有重叠，不能当作独立被试样本。"
+      ]
+    },
+    {
+      "id": "complete_capture",
+      "title": "完整研究记录按新策略复算",
+      "kind": "target_device_record",
+      "available": true,
+      "availability": "available",
+      "sha256": "e7b55a121746db585655c1834d1e2e363b56df81a8f31a8755f09e645bd9b100",
+      "result": "not_accepted",
+      "metrics": {
+        "windows_total": 573,
+        "windows_usable": 3,
+        "valid_ratio": 0.005235602094240838,
+        "baseline_valid": false,
+        "formal_probes": 15,
+        "paired": 0,
+        "train_eligible": 0,
+        "test_eligible": 0
+      },
+      "notes": [
+        "历史原始记录使用新预处理策略复算，原始数据保持不变。",
+        "有效基线和正式探针配对需分别满足要求。"
+      ]
+    },
+    {
+      "id": "recent_capture",
+      "title": "后续短时实采处理核对",
+      "kind": "target_device_record",
+      "available": true,
+      "availability": "available",
+      "sha256": "3d6d5a738d36c61e228e6203ec3c89ecb6957e4a321f0b8f4d8391b35028d2f0",
+      "result": "not_accepted",
+      "metrics": {
+        "windows_total": 15,
+        "windows_usable": 0,
+        "valid_ratio": 0.0,
+        "duration_sec": 32.16,
+        "channels": 2,
+        "srate": 250.0,
+        "windows_with_valid_clock": 11
+      },
+      "notes": [
+        "工频抑制与整窗是否合格分别检查。",
+        "结果仅适用于本段记录。"
+      ]
+    }
+  ],
+  "research": {
+    "available": true,
+    "availability": "available",
+    "sha256": "79634c47361d3581a734ae36446a90753f442c2712a0b3460fd021a088dd7ed9",
+    "scope": "public_cohort",
+    "target_device_validated": false,
+    "title": "公开真人脑电个人校准量研究",
+    "conclusion": "报告比较压力、情绪与跨研究专注的早期个人校准；结果不能代替目标设备现场验证。"
+  },
+  "software_validation": {
+    "available": true,
+    "availability": "available",
+    "sha256": "e8894a832a0446e2137dab3efab870b5a27c5644f27f9bc0c6e32cce6099bc4c",
+    "kind": "recorded_development_snapshot",
+    "tests_total": 470,
+    "note": "记录中的软件回归结果；本接口不重新执行测试，也不代表真人效果。"
+  },
+  "evidence_origin": "bundled_development_snapshot",
+  "snapshot_at": "2026-11-16T17:01:09.235657+00:00",
+  "scope_note": "实现状态、软件回归与目标设备验收分别展示；未自动计算总体达标率。",
+  "snapshot_note": "随软件提供的脱敏开发证据快照；不代表当前设备或本次会话的实时测量。"
+}

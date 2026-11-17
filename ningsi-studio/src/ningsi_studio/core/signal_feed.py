@@ -31,6 +31,8 @@ class _Subscriber:
 
     events: "object" = None
     dropped: int = 0
+    config: "SignalConfig | None" = None
+    next_frame_at: float = 0.0
 
     def put(self, event: dict) -> None:
         queue = self.events
@@ -103,6 +105,7 @@ class SignalFeed:
         self.source_kind = source_kind
         self.spectrum_interval = float(spectrum_interval)
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
         self._subscribers: list[_Subscriber] = []
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -118,9 +121,14 @@ class SignalFeed:
         with self._lock:
             return len(self._subscribers)
 
-    def subscribe(self) -> tuple[_Subscriber, int]:
+    def subscribe(self, config: SignalConfig | None = None) -> tuple[_Subscriber, int]:
         """订阅并立即返回一帧（与 EventBus.subscribe 同形：(subscriber, 预置帧数)）。"""
-        subscriber = _Subscriber(events=queue_module.Queue(maxsize=max(1, self.config.queue_size)))
+        with self._lifecycle_lock:
+            return self._subscribe(config)
+
+    def _subscribe(self, config: SignalConfig | None) -> tuple[_Subscriber, int]:
+        selected = config or self.config
+        subscriber = _Subscriber(events=queue_module.Queue(maxsize=max(1, selected.queue_size)), config=config)
         with self._lock:
             self._subscribers.append(subscriber)
             start = self._thread is None or not self._thread.is_alive()
@@ -128,7 +136,7 @@ class SignalFeed:
             self._start()
         # 立刻给一帧，避免前端等一整个刷新周期才看到内容
         try:
-            subscriber.put(self.frame(seq=self._frames))
+            subscriber.put(self.frame(seq=self._frames, config=selected))
         except Exception as exc:  # noqa: BLE001 - 首帧失败不影响后续
             LOGGER.warning("首帧生成失败：%s", exc)
         LOGGER.info("signal 订阅: session=%s 首帧入队=%d 线程存活=%s",
@@ -152,6 +160,10 @@ class SignalFeed:
         return changed
 
     def unsubscribe(self, subscriber: _Subscriber) -> None:
+        with self._lifecycle_lock:
+            self._unsubscribe(subscriber)
+
+    def _unsubscribe(self, subscriber: _Subscriber) -> None:
         with self._lock:
             if subscriber in self._subscribers:
                 self._subscribers.remove(subscriber)
@@ -178,9 +190,10 @@ class SignalFeed:
             labels.append(preset[index] if index < len(preset) else f"Ch{index + 1}")
         return labels
 
-    def frame(self, seq: int | None = None) -> dict:
+    def frame(self, seq: int | None = None, *, config: SignalConfig | None = None) -> dict:
         """生成一帧：多通道抽稀后的波形 + 最近窗的频谱与频带功率。"""
-        span = float(self.config.window_sec)
+        config = config or self.config
+        span = float(config.window_sec)
         try:
             data = self._samples(span)
         except Exception as exc:  # noqa: BLE001 - 采样失败也要能推帧（前端显示错误）
@@ -193,7 +206,7 @@ class SignalFeed:
         channels: list[dict] = []
         for index in range(actual_channels):
             series = rows[index] if rows.size else np.zeros(0, dtype=float)
-            reduced = decimate_minmax(series, self.config.max_points_per_channel)
+            reduced = decimate_minmax(series, config.max_points_per_channel)
             peak = float(np.max(np.abs(series))) if series.size else 0.0
             channels.append({
                 "index": index,
@@ -217,7 +230,7 @@ class SignalFeed:
             "samples": count,
             "source_kind": self.source_kind,
             "device": self.device,
-            "refresh_hz": self.config.refresh_hz,
+            "refresh_hz": config.refresh_hz,
             "realtime": count > 0,
             "note": self._last_error,
         }
@@ -260,24 +273,34 @@ class SignalFeed:
         while not self._stop.is_set():
             with self._lock:
                 subscribers = list(self._subscribers)
-                # 每帧重算间隔：调用方通过 retune() 改了刷新率要立刻生效
-                interval = 1.0 / max(0.5, float(self.config.refresh_hz))
+                # 不同窗口独立选择刷新率、跨度和点数；共享采集与频谱缓存。
+                rate = max((float((s.config or self.config).refresh_hz) for s in subscribers), default=0.5)
+                interval = 1.0 / max(0.5, rate)
             if not subscribers:
                 break
             self._frames += 1
-            try:
-                event = self.frame(seq=self._frames)
-            except Exception as exc:  # noqa: BLE001 - 生成失败记录后继续
-                self._last_error = str(exc)
-                LOGGER.debug("生成信号帧失败：%s", exc)
-                event = None
-            if event is not None:
-                for subscriber in subscribers:
+            now = time.monotonic()
+            frames: dict[tuple, dict | None] = {}
+            for subscriber in subscribers:
+                if now + 0.001 < subscriber.next_frame_at:
+                    continue
+                selected = subscriber.config or self.config
+                subscriber.next_frame_at = now + 1.0 / max(0.5, selected.refresh_hz)
+                key = (selected.window_sec, selected.refresh_hz, selected.max_points_per_channel)
+                if key not in frames:
+                    try:
+                        frames[key] = self.frame(seq=self._frames, config=selected)
+                    except Exception as exc:  # noqa: BLE001 - 单个显示配置失败不影响其他窗口
+                        self._last_error = str(exc)
+                        LOGGER.debug("生成信号帧失败：%s", exc)
+                        frames[key] = None
+                event = frames[key]
+                if event is not None:
                     subscriber.put(event)
             next_tick += interval
             delay = next_tick - time.monotonic()
             if delay > 0:
-                time.sleep(delay)
+                self._stop.wait(delay)
             else:
                 next_tick = time.monotonic()      # 落后就对齐，避免堆积
 

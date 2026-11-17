@@ -46,6 +46,8 @@ def _migrate(conn) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
     if "protocol" not in columns:
         conn.execute("ALTER TABLE sessions ADD COLUMN protocol TEXT NOT NULL DEFAULT 'full'")
+    if "eeg_calibration" not in columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN eeg_calibration TEXT")
 
 
 def initialize(path) -> Path:

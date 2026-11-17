@@ -93,7 +93,7 @@ def assess(eeg, scales=None, behavior=None) -> JointAssessment:
             code="eeg_focus",
             source="eeg",
             dimension="attention",
-            summary=f"专注度评分 {focus:.2f}（可用窗比例 {valid_ratio:.0%}）",
+            summary=f"专注相关脑电指数 {focus:.2f}（可用窗比例 {valid_ratio:.0%}；工程阈值待验证）",
             value=round(float(focus), 4),
             direction="low" if focus < thresholds["focus_low"] else "normal",
             ref={"indicator_spec": eeg.get("spec", config.INDICATOR_SPEC), "baseline_spec": eeg.get("baseline_spec")},
@@ -118,7 +118,7 @@ def assess(eeg, scales=None, behavior=None) -> JointAssessment:
                 ref={"indicator_spec": eeg.get("spec", config.INDICATOR_SPEC)},
             ))
     else:
-        reason = "基线不可用" if not eeg.get("available", True) else f"可用窗比例 {valid_ratio:.0%} 低于 {thresholds['min_valid_ratio']:.0%}"
+        reason = (eeg.get("unavailable_reason") or "基线不可用") if not eeg.get("available", True) else f"可用窗比例 {valid_ratio:.0%} 低于 {thresholds['min_valid_ratio']:.0%}"
         evidence.append(Evidence(
             code="eeg_unavailable", source="eeg", dimension="attention",
             summary=f"脑电指标不可用：{reason}", value=None, direction="unknown", available=False,
@@ -189,7 +189,8 @@ def assess(eeg, scales=None, behavior=None) -> JointAssessment:
     dimension_states, consistency = _consistency(evidence, thresholds)
     conclusion = _conclusion(dimension_states, consistency, evidence)
     advice = _advice(dimension_states, consistency,
-                     eeg_available=any(e.source == "eeg" and e.available for e in evidence))
+                     eeg_available=any(e.source == "eeg" and e.available for e in evidence),
+                     eeg_reason=eeg.get("unavailable_code", ""))
     return JointAssessment(
         conclusion=conclusion,
         dimension_states=dimension_states,
@@ -208,10 +209,13 @@ def _consistency(evidence, thresholds) -> tuple[dict, dict]:
     for dimension, items in by_dimension.items():
         usable = [i for i in items if i.available]
         flagged = [i for i in usable if i.direction in ("elevated", "low")]
+        sources = sorted({i.source for i in usable})
         if not usable:
             state = "证据不足"
         elif not flagged:
-            state = "正常范围"
+            state = "未触发工程阈值"
+        elif len(sources) == 1:
+            state = "单一来源提示偏离"
         elif len(flagged) == len(usable):
             state = "一致提示偏离"
         else:
@@ -221,6 +225,9 @@ def _consistency(evidence, thresholds) -> tuple[dict, dict]:
             "evidence_codes": [i.code for i in usable],
             "flagged": [i.code for i in flagged],
             "missing": [i.code for i in items if not i.available],
+            "sources": sources,
+            "source_count": len(sources),
+            "within_source_mixed": bool(flagged and len(flagged) != len(usable)),
         }
     consistency = {
         "eeg_vs_scale": _pair_consistency(states.get("stress"), "量表"),
@@ -268,9 +275,10 @@ def _mismatch(state, source_a: str, source_b: str) -> bool:
 
 
 DIMENSION_CONCLUSION = {
-    "stress": "压力相关指标偏高，建议休息与放松训练",
-    "attention": "专注力相关指标偏低，建议进行专注力强化训练",
+    "stress": "压力相关证据触发当前工程阈值",
+    "attention": "专注相关证据触发当前工程阈值",
 }
+FLAGGED_STATES = {"一致提示偏离", "部分提示偏离", "单一来源提示偏离"}
 
 
 def _conclusion(states, consistency, evidence) -> str:
@@ -283,35 +291,52 @@ def _conclusion(states, consistency, evidence) -> str:
         return "数据不足，无法给出结论（请补充量表或重测行为任务）"
 
     inconsistent = "不一致" in consistency.values()
-    consistent_flags = [name for name in ("stress", "attention") if states.get(name, {}).get("state") == "一致提示偏离"]
-    partial_flags = [name for name in ("stress", "attention") if states.get(name, {}).get("state") == "部分提示偏离"]
-    target = (consistent_flags or partial_flags or [None])[0]
+    flagged_dimensions = [name for name in ("stress", "attention")
+                          if states.get(name, {}).get("state") in FLAGGED_STATES]
 
-    if target is None:
+    if not flagged_dimensions:
         if inconsistent:
             return "结果不一致，建议复测（脑电指标与其他证据方向不一致）"
-        if any(states.get(name, {}).get("state") in ("证据不足", None) for name in ("stress", "attention")):
-            return "证据不足，暂不给出状态结论（请补充缺失的评估环节）"
-        return "本次可用证据未触发当前工程判定阈值（阈值待验证）"
+        missing = [label for name, label in (("stress", "压力"), ("attention", "专注"))
+                   if states.get(name, {}).get("state") in ("证据不足", None)]
+        return ("本次可用证据未触发当前工程判定阈值（阈值待验证）"
+                + ("；证据不足的维度：" + "、".join(missing) if missing else ""))
 
-    conclusion = DIMENSION_CONCLUSION[target]
+    parts = []
+    for name in flagged_dimensions:
+        state = states[name]
+        text = DIMENSION_CONCLUSION[name]
+        if state["source_count"] == 1:
+            labels = {"eeg": "脑电", "scales": "量表", "behavior": "行为任务"}
+            codes = state["evidence_codes"]
+            label = "PVT行为" if codes == ["pvt_alertness"] else "SART行为" if codes == ["sart_performance"] else labels[state["sources"][0]]
+            text = f"仅{label}提示" + ("压力" if name == "stress" else "专注") + "相关工程阈值偏离，缺少其他来源交叉验证"
+        parts.append(text)
+    conclusion = "；".join(parts) + "（阈值待验证）"
     if inconsistent:
-        conclusion += "；另有维度与其他证据不一致，建议复测"
+        conclusion += "；存在来源间结果不一致，建议复测"
     return conclusion
 
 
-def _advice(states, consistency, eeg_available=True) -> list:
+def _advice(states, consistency, eeg_available=True, eeg_reason="") -> list:
     advice = []
     insufficient = [name for name, value in states.items() if value.get("state") == "证据不足"]
     if insufficient:
-        advice.append("证据不足的维度：" + "、".join(insufficient) + "；请先完成量表填写与行为任务，或在安静环境重测脑电。")
+        names = {"stress": "压力", "attention": "专注"}
+        advice.append("证据不足的维度：" + "、".join(names.get(name, name) for name in insufficient)
+                      + "；如需该维度评估，请选择包含对应测量的协议或补充相应证据。")
     if "不一致" in consistency.values():
         advice.append("在安静环境、固定佩戴位置下复测一次，优先核对伪迹比例与基线质量。")
     if not eeg_available:
-        advice.append("本次脑电不支持个体评分或训练目标；先核对电极接触、信号单位与采集质量，再重新采集基线。行为任务仍可独立查看，不用量表或行为成绩补造脑电分数。")
-    if states.get("stress", {}).get("state") in ("一致提示偏离", "部分提示偏离"):
+        if eeg_reason == "monitor_not_collected":
+            advice.append("本协议未采集独立监测脑电，无法做脑电与行为的测评交叉验证；有效基线下的训练指数和训练目标单独查看，不填入测评脑电证据。")
+        elif eeg_reason == "baseline_invalid":
+            advice.append("睁眼基线不可用，当前不支持个体脑电评分或脑电训练目标；请核对电极接触、信号单位与采集质量，重新采集基线。行为成绩独立保留。")
+        else:
+            advice.append("本次脑电测评证据不可用；请核对监测窗口质量、采样配置和基线。如基线不合格，重新采集基线。行为任务与有效训练记录单独查看，不补造测评脑电分数。")
+    if states.get("stress", {}).get("state") in FLAGGED_STATES:
         advice.append("安排适当休息与放松；本次量表仅反映自评感受，不作诊断。" if not eeg_available else "安排 5–10 分钟腹式呼吸或闭眼放松，并观察放松度评分是否回升。")
-    if eeg_available and states.get("attention", {}).get("state") in ("一致提示偏离", "部分提示偏离"):
+    if eeg_available and states.get("attention", {}).get("state") in FLAGGED_STATES:
         advice.append("按个体基线中位数设置训练目标，先完成 2 段短时专注训练并记录达标时间占比。")
     if not advice or all(item.startswith("证据不足") for item in advice):
         advice.append("维持当前作息与训练频次，按周复评以观察趋势。")

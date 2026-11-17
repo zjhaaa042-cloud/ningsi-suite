@@ -67,11 +67,12 @@ class MeasurementValidityTests(unittest.TestCase):
         runtime.engine = WindowEngine(SyntheticEEG(seed=42), 250, device='test')
         runtime._check_cancel = Mock()
         runtime._publish_window = Mock()
-        runtime._sleep = Mock()
-        with patch('ningsi_studio.core.runtime.time.monotonic', side_effect=[100+i*.1 for i in range(15)]):
+        runtime._sleep_real = Mock()
+        runtime.session = {'time_scale': .05}
+        with patch('ningsi_studio.core.runtime.time.monotonic', return_value=100):
             baseline, _ = runtime._collect_baseline('rest', 30, 'baseline_open', progress=False)
         self.assertFalse(baseline.valid)
-        self.assertAlmostEqual(baseline.quality['usable_seconds'], 5.4)
+        self.assertEqual(baseline.quality.get('usable_seconds', 0), 0)
 
     def test_report_preserves_validation_boundaries(self):
         report = SessionReport('p', 's', 'r')

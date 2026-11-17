@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
 from pathlib import Path
 
@@ -26,10 +27,13 @@ from ningsi_studio.core import signal_feed
 from ningsi_studio.core.runtime import SART_TRIAL_WINDOW, SessionManager
 from ningsi_studio.db import repository as repo
 from ningsi_studio.db import sqlite_store as store
-from ningsi_studio.domain import export as export_domain
+from ningsi_studio.domain import export as export_domain, state_checkins, eeg_units
 from ningsi_studio.domain import model_training, scales as scales_domain
+from ningsi_studio.domain import showcase, showcase_evidence
+from ningsi_studio.domain.human_models import HumanModelService
+from ningsi_studio.domain.results import training_indicator_overview
 from ningsi_studio.http import sse
-from ningsi_studio.http.router import (ApiError, Conflict, NotFound, Request, Response, Router,
+from ningsi_studio.http.router import (ApiError, Conflict, Forbidden, NotFound, Request, Response, Router,
                                        ValidationError, dump, jsonable)
 from ningsi_studio.http.server import sse_response
 from ningsi_studio.settings import Settings
@@ -93,6 +97,26 @@ def _decode_payload(value):
         return value
 
 
+def _training_overview(conn, row, runs):
+    for run in reversed(runs):
+        data = run.get("payload") or {}
+        if run.get("phase") == "training" and isinstance(data, dict):
+            overview = data.get("indicator_overview")
+            if isinstance(overview, dict):
+                return overview
+    # Older ten-minute sessions saved all three scores in report diagnostics.
+    # Recover them read-only; never substitute baseline or reward scores.
+    artifact = repo.artifact_for(conn, row["id"], "report_json")
+    if artifact and artifact["path"]:
+        try:
+            report = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            windows = report.get("extras", {}).get("signal_diagnostics", {}).get("windows", [])
+            return training_indicator_overview(windows)
+        except (OSError, ValueError, AttributeError, TypeError):
+            LOGGER.warning("Unable to recover training indicators for %s", row["uuid"])
+    return training_indicator_overview([])
+
+
 def session_public(row, *, extra: dict | None = None) -> dict:
     payload = {
         "uuid": row["uuid"],
@@ -103,6 +127,7 @@ def session_public(row, *, extra: dict | None = None) -> dict:
         "srate": row["srate"],
         "channels": row["channels"],
         "source": row["source"],
+        "eeg_calibration": _decode_payload(row["eeg_calibration"]) if "eeg_calibration" in row.keys() else None,
         "time_scale": row["time_scale"],
         "training_mode": row["training_mode"],
         # 协议档（full / short）：老库的行在迁移里补成 'full'；未知值按完整协议展示
@@ -180,6 +205,7 @@ class StudioSessionManager(SessionManager):
 def build_router(settings: Settings) -> Router:
     router = Router()
     manager = StudioSessionManager(settings)
+    human_models = HumanModelService(settings.data_dir)
     db_path = Path(settings.db_path)
 
     def sweep_signal_feeds() -> int:
@@ -208,6 +234,64 @@ def build_router(settings: Settings) -> Router:
             pass
 
     # ---------------------------------------------------------------- 基础
+    @router.get(r"/api/showcase/metadata")
+    def showcase_metadata(request: Request) -> Response:
+        return Response.json(showcase.metadata())
+
+    @router.post(r"/api/showcase/analyze")
+    def showcase_analyze(request: Request) -> Response:
+        try:
+            result = showcase.build_analysis(request.json())
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return Response.json(result)
+
+    @router.get(r"/api/showcase/evidence")
+    def showcase_requirement_evidence(request: Request) -> Response:
+        return Response.json(showcase_evidence.build_evidence())
+
+    @router.get(r"/api/showcase/device-profile")
+    def showcase_device_profile(request: Request) -> Response:
+        return Response.json(showcase_evidence.load_device_profile(settings.data_dir))
+
+    @router.post(r"/api/showcase/device-profile")
+    def showcase_save_device_profile(request: Request) -> Response:
+        try:
+            profile = showcase_evidence.save_device_profile(settings.data_dir, request.json())
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return Response.json(profile)
+
+    @router.post(r"/api/showcase/demo-session")
+    def showcase_demo_session(request: Request) -> Response:
+        if schemas.typed(request.json()):
+            raise ValidationError("比赛模拟使用固定演示参数，无需传入设备或参与者信息")
+        for uuid in manager.active_uuids():
+            with store.read_only(db_path) as conn:
+                row = repo.get_session(conn, uuid)
+                if row and row["label"] == "比赛展示 · 显式模拟":
+                    return Response.json({"session": session_public(row), "reused": True,
+                                          "source_kind": "sim", "note": "模拟脑电与模拟作答，仅用于演示软件流程"})
+        with store.read_only(db_path) as conn:
+            public_id = None
+            for index in range(9999, -1, -1):
+                candidate = f"dmo{index:04d}"
+                subject = repo.find_subject(conn, candidate)
+                if subject is None or subject["label"] == "比赛展示 · 显式模拟":
+                    public_id = candidate
+                    break
+            if public_id is None:
+                raise Conflict("演示编号空间已满，请使用独立的比赛展示数据目录")
+        payload = {"participant": public_id, "create_subject": True,
+                   "label": "比赛展示 · 显式模拟", "device": live_source.SIM_SOURCE,
+                   "srate": 250, "channels": 2, "time_scale": 0.01,
+                   "protocol": "full", "training_mode": "quick"}
+        response = create_session(Request("POST", "/api/sessions", {}, request.headers,
+                                          body=dump(payload), remote=request.remote))
+        result = json.loads(response.body)
+        result.update(source_kind="sim", note="模拟脑电、量表和行为作答，仅用于演示软件流程")
+        return Response.json(result, status=response.status)
+
     @router.get(r"/api/health")
     def health(request: Request) -> Response:
         with store.read_only(db_path) as conn:
@@ -254,6 +338,7 @@ def build_router(settings: Settings) -> Router:
             "alerts": engine_config.ALERTS,
             "assess": engine_config.ASSESS,
             "training": engine_config.TRAINING,
+            "pvt_validity": engine_config.PVT_VALIDITY,
             "heatmap_bands": [{"low": low, "high": high, "label": label, "color": color}
                               for low, high, label, color in engine_config.HEATMAP_BANDS],
             "scale_boundary": engine_config.SCALE_BOUNDARY,
@@ -527,6 +612,12 @@ def build_router(settings: Settings) -> Router:
                 detail=device)
         if device.startswith("lsl:") and time_scale != 1.0:
             raise ValidationError("真实脑电采集必须使用真实节奏（时间倍率1.0）；快速演示请显式选择仿真源 sim-bsense")
+        try:
+            calibration = eeg_units.confirmation(payload.get("eeg_calibration"))
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        if calibration and not device.startswith("lsl:"):
+            raise ValidationError("仅 LSL 设备可确认 EEG 源单位")
 
         with store.connect(db_path) as conn:
             subject = repo.find_subject(conn, public_id)
@@ -544,7 +635,7 @@ def build_router(settings: Settings) -> Router:
                 device=device, srate=srate, channels=channels,
                 source="lsl" if device.startswith("lsl:") else "sim-bsense",
                 time_scale=time_scale, training_mode=training_mode,
-                protocol=protocol,
+                protocol=protocol, eeg_calibration=calibration,
                 engine_versions=bootstrap.engine_versions(),
             )
         # 注意：这里必须已经退出 `with store.connect(...)`（事务提交、连接释放），
@@ -582,7 +673,7 @@ def build_router(settings: Settings) -> Router:
             "session": session_public(row, extra={"participant": public_id}),
             "events_url": f"/api/sessions/{row['uuid']}/events",
             # 阶段列表按本次会话的协议档给：短协议只有 9 步，界面步进条据此渲染
-            "phases": phase_module.as_list(row["protocol"] if "protocol" in row.keys() else None),
+            "phases": phase_module.as_list(row["protocol"] if "protocol" in row.keys() else None, row["training_mode"]),
             "protocol": protocol,
             "protocol_label": phase_module.PROFILES[protocol]["label"],
             "protocol_note": phase_module.PROFILES[protocol]["caveat"],
@@ -626,10 +717,12 @@ def build_router(settings: Settings) -> Router:
             payload["runs"] = runs
             payload["artifacts"] = jsonable(schemas.rows_to_dicts(repo.list_artifacts(conn, row["id"])))
             payload["indicator_summary"] = jsonable(repo.latest_metric_summary(conn, row["id"]))
+            if payload.get("protocol") == "ten_min":
+                payload["result_overview"] = jsonable(_training_overview(conn, row, runs))
             # 本次会话的阶段表**按它自己的协议档**给出：短协议是 9 步。
             # 不返回它的话，直接打开 `#/flow?session=…` 的页面只能退回前端写死的 11 步兜底表，
             # 细条就会显示"第 5 / 11 步"（实测踩到）。
-            payload["phases"] = phase_module.as_list(payload.get("protocol"))
+            payload["phases"] = phase_module.as_list(payload.get("protocol"), payload.get("training_mode"))
         runtime = manager.get(uuid)
         actual_source = getattr(getattr(runtime, "source", None), "key", None)
         if actual_source:
@@ -771,11 +864,9 @@ def build_router(settings: Settings) -> Router:
             )
 
         feed = signal_feed.REGISTRY.get_or_create(uuid, factory)
-        # 同一会话的 feed 会被复用：参数变了（例如界面切换到 20 FPS）必须重新调参，
-        # 否则浏览器再怎么请求 hz=20 也还是按第一次的刷新率推。
-        feed.retune(signal_feed.SignalConfig(window_sec=window_sec, refresh_hz=hz,
-                                             max_points_per_channel=max_points))
-        subscriber, preload = feed.subscribe()
+        # 显示参数属于订阅者：管理页的 2 秒原始快照不能覆盖 Studio 的窗口/抽稀配置。
+        subscriber, preload = feed.subscribe(signal_feed.SignalConfig(
+            window_sec=window_sec, refresh_hz=hz, max_points_per_channel=max_points))
 
         def release_signal_feed() -> None:
             """流结束时释放订阅；会话已结束且无人订阅时连注册表条目一起回收。
@@ -807,10 +898,46 @@ def build_router(settings: Settings) -> Router:
                 "progress": row["progress"],
                 "indicator_summary": jsonable(repo.latest_metric_summary(conn, row["id"])),
                 "alerts": jsonable(schemas.rows_to_dicts(repo.list_alerts(conn, row["id"]))),
+                "checkins": state_checkins.summary(conn, row["id"]),
+                "checkins_open": row["status"] == "running" and row["phase"] in state_checkins.CHECKIN_PHASES,
             }
         payload["awaiting_input"] = runtime.awaiting() if runtime else []
         payload["runtime_alive"] = bool(runtime and runtime.alive)
+        payload["attention_model"] = runtime.latest_model_prediction if runtime else None
+        payload["affect_model"] = runtime.current_affect() if runtime else None
         return Response.json(payload)
+
+    @router.post(r"/api/sessions/{uuid}/state-checkins")
+    def submit_state_checkin(request: Request) -> Response:
+        uuid = schemas.ensure_uuid(request.params["uuid"])
+        body = schemas.typed(request.json())
+        request_id = schemas.ensure_uuid(body.get("request_id"))
+        ratings = []
+        for key in ("stress", "valence"):
+            value = body.get(key)
+            if value is not None and (type(value) is not int or not 0 <= value <= 10):
+                raise ValidationError(f"{key} 需填写 0–10 的整数")
+            ratings.append(value)
+        if ratings == [None, None]:
+            raise ValidationError("请至少填写一项当前感受")
+        runtime = manager.get(uuid)
+        with store.connect(db_path) as conn:
+            row = _session_row(conn, uuid)
+            source = runtime.source if runtime else None
+            source_kind = None
+            if source and runtime.alive:
+                source_kind = "lsl" if source.is_real and runtime.scale == 1 else "simulation"
+            elapsed = runtime.elapsed_now() if runtime else 0.
+            context = runtime.checkin_context(row["phase"]) if runtime else None
+            try:
+                record, alert = state_checkins.save(conn, row, request_id, *ratings,
+                    source_kind=source_kind, elapsed=elapsed, eeg_context=context)
+            except ValueError as exc:
+                raise Conflict(str(exc)) from exc
+        if alert and runtime:
+            runtime.bus.publish("notice", {"level": "warning", "message": alert["message"]})
+        return Response.json({"record": record,
+                              "high_stress": ratings[0] is not None and ratings[0] >= state_checkins.HIGH_STRESS})
 
     @router.get(r"/api/sessions/{uuid}/heatmap")
     def session_heatmap(request: Request) -> Response:
@@ -853,12 +980,14 @@ def build_router(settings: Settings) -> Router:
         uuid = schemas.ensure_uuid(request.params["uuid"])
         field = request.query.get("field") or "focus"
         period = request.query.get("period") or "week"
-        if field not in ("focus", "relax", "load"):
-            raise ValidationError("field 仅支持 focus / relax / load", detail=field)
+        if field not in ("focus", "relax", "load", "stress"):
+            raise ValidationError("field 仅支持 focus / relax / load / stress", detail=field)
         if period not in ("week", "month"):
             raise ValidationError("period 仅支持 week / month", detail=period)
         with store.read_only(db_path) as conn:
             row = _session_row(conn, uuid)
+            if field == "stress":
+                return Response.json(state_checkins.stress_trend(conn, row["public_id"], period))
             records = repo.session_points(conn, public_id=row["public_id"])
         from ningsi.monitoring import history as history_module
         usable, rejected = _comparable(records, history_module)
@@ -1012,6 +1141,12 @@ def build_router(settings: Settings) -> Router:
                 break
         if not segments and not summary:
             raise NotFound("该会话没有训练记录")
+        if summary:
+            # SQLite JSON merge-patch removes null-valued object members.
+            # Restore explicit missing statistics without making {} look final.
+            for key in ("mean_focus", "on_target_ratio", "on_target_valid_ratio",
+                        "volatility", "first_to_last_change"):
+                summary.setdefault(key, None)
         for segment in segments:
             stored = json.loads(segment.get("samples") or "null")
             if isinstance(stored, dict):
@@ -1047,6 +1182,7 @@ def build_router(settings: Settings) -> Router:
         with store.read_only(db_path) as conn:
             partial["indicator_summary"] = jsonable(repo.latest_metric_summary(conn, row["id"]))
             partial["alerts"] = jsonable(schemas.rows_to_dicts(repo.list_alerts(conn, row["id"])))
+            partial["state_observations"] = state_checkins.summary(conn, row["id"])
         return Response.json(partial, status=202)
 
     @router.get(r"/api/sessions/{uuid}/artifacts")
@@ -1082,6 +1218,8 @@ def build_router(settings: Settings) -> Router:
             "heatmap_svg": "image/svg+xml",
             "trend_svg": "image/svg+xml",
             "model": "application/json; charset=utf-8",
+            "attention_model": "application/json; charset=utf-8",
+            "attention_predictions": "application/json; charset=utf-8",
             "history": "application/x-ndjson; charset=utf-8",
             "zip": "application/zip",
         }.get(kind, "application/octet-stream")
@@ -1111,6 +1249,67 @@ def build_router(settings: Settings) -> Router:
         return _build_zip_response(uuid, db_path, settings, manager)
 
     # ------------------------------------------------------------ 模型与趋势
+    def human_action(action):
+        try:
+            return action()
+        except FileNotFoundError as exc:
+            raise NotFound(str(exc)) from exc
+        except (ValueError, KeyError, TypeError, OverflowError) as exc:
+            raise ValidationError(str(exc)) from exc
+        except RuntimeError as exc:
+            raise Conflict(str(exc)) from exc
+
+    @router.get(r"/api/models/human")
+    def human_state(request: Request) -> Response:
+        return Response.json(human_action(human_models.list_state))
+
+    @router.post(r"/api/models/human/import")
+    def human_import(request: Request) -> Response:
+        payload = schemas.typed(request.json())
+        return Response.json(human_action(lambda: human_models.import_data(payload.get("files"))), status=201)
+
+    @router.post(r"/api/models/human/train")
+    def human_train(request: Request) -> Response:
+        payload = schemas.typed(request.json())
+        job = human_action(lambda: human_models.start(payload.get("dataset_id")))
+        return Response.json(job, status=202 if job["state"] == "running" else 200)
+
+    @router.post(r"/api/models/human/import-local")
+    def human_import_local(request: Request) -> Response:
+        try:
+            local = ipaddress.ip_address(request.remote).is_loopback
+        except ValueError:
+            local = False
+        if not local:
+            raise Forbidden("本机目录导入仅允许在运行程序的这台电脑上操作。")
+        payload = schemas.typed(request.json())
+        return Response.json(human_action(lambda: human_models.import_paths(payload.get("paths"))), status=201)
+
+    @router.get(r"/api/models/human/jobs/{run_id}")
+    def human_job(request: Request) -> Response:
+        return Response.json(human_action(lambda: human_models.job(request.params["run_id"])))
+
+    @router.get(r"/api/models/human/jobs/{run_id}/artifacts/{kind}")
+    def human_artifact(request: Request) -> Response:
+        path = human_action(lambda: human_models.artifact(request.params["run_id"], request.params["kind"]))
+        content_type = {".zip": "application/zip", ".json": "application/json; charset=utf-8",
+                        ".html": "text/html; charset=utf-8", ".md": "text/markdown; charset=utf-8",
+                        ".csv": "text/csv; charset=utf-8"}[path.suffix]
+        disposition = "inline" if request.params["kind"] == "report" and request.query.get("preview") == "1" else "attachment"
+        return Response(body=path.read_bytes(), content_type=content_type,
+                        headers={"Content-Disposition": f'{disposition}; filename="{path.name}"'})
+
+    @router.post(r"/api/models/human/activate")
+    def human_activate(request: Request) -> Response:
+        payload = schemas.typed(request.json())
+        if bool(payload.get("run_id")) == bool(payload.get("model")):
+            raise ValidationError("请选择一个已完成任务，或导入一个真人模型 JSON。")
+        return Response.json(human_action(lambda: human_models.activate(payload.get("run_id"), payload.get("model"))))
+
+    @router.delete(r"/api/models/human/active")
+    def human_deactivate(request: Request) -> Response:
+        return Response.json(human_action(human_models.deactivate))
+
     @router.post(r"/api/models/train")
     def train_model(request: Request) -> Response:
         payload = schemas.typed(request.json())
@@ -1126,13 +1325,15 @@ def build_router(settings: Settings) -> Router:
     def global_trend(request: Request) -> Response:
         field = request.query.get("field") or "focus"
         period = request.query.get("period") or "week"
-        if field not in ("focus", "relax", "load"):
-            raise ValidationError("field 仅支持 focus / relax / load", detail=field)
+        if field not in ("focus", "relax", "load", "stress"):
+            raise ValidationError("field 仅支持 focus / relax / load / stress", detail=field)
         if period not in ("week", "month"):
             raise ValidationError("period 仅支持 week / month", detail=period)
         public_id = request.query.get("participant")
         public_id = schemas.normalize_public_id(public_id) if public_id else None
         with store.read_only(db_path) as conn:
+            if field == "stress":
+                return Response.json(state_checkins.stress_trend(conn, public_id, period))
             records = repo.session_points(conn, public_id=public_id)
         from ningsi.monitoring import history as history_module
         usable, rejected = _comparable(records, history_module)
@@ -1178,6 +1379,7 @@ def build_router(settings: Settings) -> Router:
         return Response.json(payload)
 
     router.manager = manager          # type: ignore[attr-defined]
+    router.human_models = human_models  # type: ignore[attr-defined]
     return router
 
 
@@ -1300,6 +1502,12 @@ def _build_zip_response(uuid: str, db_path: Path, settings: Settings, manager) -
 # ---------------------------------------------------------------- OpenAPI 描述
 
 _PATH_SPECS = [
+    ("get", "/api/showcase/metadata", "比赛展示处理链与特征说明", None),
+    ("post", "/api/showcase/analyze", "显式模拟或导入原始窗口的可追溯信号分析", None),
+    ("get", "/api/showcase/evidence", "逐项要求与脱敏验证证据摘要", None),
+    ("get", "/api/showcase/device-profile", "读取现场设备声明与缺失项", None),
+    ("post", "/api/showcase/device-profile", "保存设备声明，不自动认定硬件合规", None),
+    ("post", "/api/showcase/demo-session", "显式运行固定参数的完整模拟会话", None),
     ("get", "/api/health", "服务健康与运行概况", None),
     ("get", "/api/config", "引擎口径与阈值全量定义", None),
     ("get", "/api/devices", "可用数据源（实时 LSL 流在前，仿真源可显式选择）", "probe"),
@@ -1338,6 +1546,14 @@ _PATH_SPECS = [
     ("get", "/api/sessions/{uuid}/artifacts/{kind}", "下载单个产物", None),
     ("get", "/api/sessions/{uuid}/export.zip", "打包下载全部产物", None),
     ("post", "/api/models/train", "训练基线模型", None),
+    ("get", "/api/models/human", "真人数据集、训练任务与启用模型", None),
+    ("post", "/api/models/human/import", "导入采集器特征及配套清单", None),
+    ("post", "/api/models/human/import-local", "从本机采集目录导入特征及配套清单", None),
+    ("post", "/api/models/human/train", "按被试训练并进行冻结后的独立测试", None),
+    ("get", "/api/models/human/jobs/{run_id}", "真人训练任务进度及结果", None),
+    ("get", "/api/models/human/jobs/{run_id}/artifacts/{kind}", "导出真人模型、独立测试报告和成果包", None),
+    ("post", "/api/models/human/activate", "为新会话启用真人模型", None),
+    ("delete", "/api/models/human/active", "停用新会话的真人模型", None),
     ("get", "/api/reports/trend", "跨会话趋势（含不可比计数）", "participant,field,period"),
     ("get", "/api/openapi.json", "本描述文件", None),
 ]
@@ -1369,7 +1585,7 @@ def _openapi_spec() -> dict:
         "info": {"title": API_TITLE, "version": API_VERSION,
                  "description": "凝思 Studio：便携脑电专注力训练与心理状态评估的 Web 接口。"
                                 "算法口径全部来自 ningsi 引擎（welch-v1 / indicator-v1 / "
-                                "baseline-v2 / neurofeedback-v2）。"},
+                                f"baseline-v2 / {engine_config.TRAINING_SPEC}）。"},
         "servers": [{"url": "/", "description": "同端口静态前端与 API"}],
         "paths": paths,
         "components": {

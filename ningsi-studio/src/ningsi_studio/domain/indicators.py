@@ -1,7 +1,7 @@
 """逐窗分析引擎：把"取一窗数据 → 质检 → 指标 → 预警"串成一个可复用对象。
 
-CLI / 桌面版把这段逻辑写在 `SessionRunner` 里；Studio 需要"每隔 2 秒推一次"的
-流式推进，因此这里抽出一个只依赖引擎公开 API 的 `WindowEngine`，两侧口径一致。
+CLI / 桌面版与 Studio 共享引擎 `processing.process_window` 的逐窗服务。
+本层只负责流式推进、预警状态和面向界面的载荷。
 """
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 
 from ningsi import config
 from ningsi.monitoring.alerts import AlertEngine
+from ningsi.processing import process_window
 from ningsi.signal.baseline import build_baseline
-from ningsi.signal.indicators import aggregate, compute_indicators
-from ningsi.signal.window import analyze_window
+from ningsi.signal.indicators import aggregate
 
 INDICATOR_LABELS = {"focus": "专注相关指数", "relax": "放松度", "load": "认知负荷"}
 
@@ -30,6 +30,7 @@ class WindowStep:
     alerts: list = field(default_factory=list)
     raw: object = None
     graded: dict = field(default_factory=dict)
+    attention_model: dict = field(default_factory=dict)
 
     @property
     def usable(self) -> bool:
@@ -60,6 +61,7 @@ class WindowStep:
             "reasons": list(quality.get("reasons", [])),
             "alerts": self.alerts,
             "graded": self.graded,
+            "attention_model": self.attention_model,
         }
         if include_signal and self.raw is not None:
             payload["signal"] = _trace(self.raw, self.window)
@@ -104,15 +106,13 @@ class WindowEngine:
              artifact: bool = False) -> WindowStep:
         self.index += 1
         self.t += config.STEP_SEC
-        raw = self.source.window(state, artifact=artifact)
-        if not self._enough_data(raw):
-            # 真实流刚接上/短暂断流：样本不足以算一个窗。
-            # 这里绝不能把空数组丢给 analyze_window（会因"样本少于分段长度"直接抛错），
-            # 而是产出一个"不可用窗"，让质量门控记录原因、指标与计时都跳过它。
-            window = self._unusable_window(raw)
+        if hasattr(self.source, "analysis_window"):
+            raw, artifact_record = self.source.analysis_window(state, artifact=artifact)
         else:
-            window = analyze_window(raw, self.srate, t_end=self.t)
-        indicators = compute_indicators(window, self.baseline)
+            raw, artifact_record = self.source.window(state, artifact=artifact), {}
+        processed = process_window(raw, self.srate, t_end=self.t,
+                                   baseline=self.baseline, artifact_evidence=artifact_record)
+        window, indicators = processed.window, processed.indicators
         events = self.alerts.feed(window, indicators)
         triggered = [event.as_dict() for event in events if event.state == "triggered"]
         self.fired_alerts.extend(triggered)
@@ -120,6 +120,8 @@ class WindowEngine:
         if getattr(self, "graded_enabled", False):
             from ningsi.signal.graded import describe_fragments
             graded = describe_fragments(raw, self.srate, window.usable)
+            if artifact_record.get("reasons"):
+                graded = {"grade": "C", "channels": [], "reason": "|".join(artifact_record["reasons"])}
             graded["t_end"] = window.t_end
         return WindowStep(
             graded=graded, index=self.index, t_end=self.t, state=state, window=window,
@@ -132,32 +134,6 @@ class WindowEngine:
         """评分窗口须包含完整的 4 秒数据，不能把一个 Welch 分段当成完整窗。"""
         segment = float(config.WINDOW_SEC)
         return max(1, int(round(segment * self.srate)))
-
-    def _enough_data(self, raw) -> bool:
-        import numpy as np
-        if raw is None:
-            return False
-        data = np.atleast_2d(np.asarray(raw, dtype=float))
-        return data.shape[1] >= self._min_samples() and bool(np.isfinite(data).all())
-
-    def _unusable_window(self, raw):
-        import numpy as np
-        from ningsi.signal.artifacts import Verdict
-        from ningsi.signal.window import WindowFeatures
-        data = np.atleast_2d(np.asarray(raw, dtype=float)) if raw is not None else np.zeros((1, 0))
-        channels = int(data.shape[0]) or 1
-        reason = "no_data" if data.shape[1] == 0 else "signal_too_short"
-        if data.size and not np.isfinite(data).all():
-            reason = "non_finite_signal"
-        return WindowFeatures(
-            t_end=self.t,
-            srate=self.srate,
-            channels=channels,
-            rel={},
-            powers={},
-            quality=Verdict(ok=False, reasons=(reason,), metrics={"samples": int(data.shape[1])}),
-            spectrum={},
-        )
 
     def run(self, state: str, count: int, *, artifact_every: int = 0) -> list[WindowStep]:
         steps = []

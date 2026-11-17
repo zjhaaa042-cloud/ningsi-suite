@@ -1,5 +1,5 @@
 /**
- * 仪表盘：KPI、周趋势、最近会话、快捷新建会话。
+ * 工作概览：会话记录、最近完成结果、个人周趋势。
  *
  * 数据来源（严格按 docs/API.md）：
  * - GET /api/health、GET /api/overview
@@ -10,7 +10,7 @@
 import { api } from '../api.js';
 import { describeError, toast } from '../store.js';
 import {
-  DASH, button, card, el, empty, fmtInt, fmtNum, fmtPercent, fmtRelative, fmtTime,
+  DASH, button, card, el, empty, fmtInt, fmtNum, fmtPercent, fmtTime,
   list, phaseText, pick, statusText, table,
 } from '../util.js';
 import { SERIES_COLORS, drawGauge, drawLineChart } from '../charts.js';
@@ -52,11 +52,29 @@ function normalizeTrendPoint(point) {
 }
 
 function renderKpi(label, value, hint) {
-  return el('div', { class: 'card kpi' }, [
-    el('span', { class: 'kpi__label', text: label }),
-    el('span', { class: 'kpi__value', text: value }),
-    hint ? el('span', { class: 'kpi__hint', text: hint }) : null,
+  return el('div', { class: 'overview-stat' }, [
+    el('span', { class: 'overview-stat__label', text: label }),
+    el('strong', { class: 'overview-stat__value', text: value }),
+    hint ? el('span', { class: 'overview-stat__hint', text: hint }) : null,
   ]);
+}
+
+function disclosure(label, children, className = '') {
+  return el('details', { class: `overview-details ${className}`.trim() }, [
+    el('summary', { text: label }), el('div', { class: 'overview-details__body' }, children),
+  ]);
+}
+
+function sourceLabel(session) {
+  const key = String(session?.device || '').toLowerCase();
+  const kind = session?.source_kind || session?.runtime?.source_kind;
+  const note = session?.source_note || session?.runtime?.source_note || '';
+  if (session?.simulated === true || kind === 'sim' || kind === 'simulation'
+      || key === 'sim' || key.startsWith('sim-')
+      || /(^|[^a-z])(sim|simulation|synthetic|demo)([^a-z]|$)/i.test(key)
+      || /模拟|仿真/i.test(note)) return '模拟数据';
+  if (key.startsWith('lsl:')) return 'LSL 数据';
+  return '来源未记录';
 }
 
 export async function render(container, ctx) {
@@ -128,97 +146,156 @@ export async function render(container, ctx) {
   const doneCount = stats.sessions_done;
   const totalCount = stats.sessions;
   const shortUuid = (row) => (row && row.uuid ? `${String(row.uuid).slice(0, 8)}…` : DASH);
-  // KPI 的"这些数是谁的"必须写清楚：原来只有"最近会话 f65dc682… · 状态 失败
-  // （最新一条仍在运行，指标口径取最近一条已完成会话）"，既没说清取的是哪条、
-  // 又和前半句"最近会话"自相矛盾（用户反馈"显示有问题"就包含这条）。
   const metricNote = metricRow
-    ? `指标取自最近一次有指标数据的会话 ${shortUuid(metricRow)}（该次状态：${statusText(metricRow.status)}）`
-      + (newest && newest.uuid !== metricRow.uuid
-        ? `；库里最新会话 ${shortUuid(newest)} ${statusText(newest.status)}，未计入`
-        : '')
-    : '尚无会话记录';
-
-  const page = el('div');
-  page.append(el('div', { class: 'row row--between' }, [
-    el('h1', { text: '仪表盘' }),
-    // 会话只能在被试页创建（要先选/建被试），所以这里是"跳转"而不是"直接建会话"：
-    // 按钮文案必须说明它只是导航，避免误解为点一下就建好会话
-    // 主行动：直接进「开始一次检测」向导（选被试 → 确认设备 → 开始）。
-    // 原来跳"被试管理"再让人自己找表单，对第一次用的人不清晰。
-    button('开始一次检测', () => ctx.navigate('#/start'), {
-      primary: true,
-      title: '三步向导：选/建被试 → 确认设备有信号 → 选节奏后开始',
-    }),
+    ? `${newestDone ? '最近已完成会话' : '最近会话'} ${shortUuid(metricRow)} · ${fmtTime(metricRow.started_at, false)}`
+      + (newest && newest.uuid !== metricRow.uuid ? `；最新会话${statusText(newest.status)}，未计入本次结果` : '')
+    : '完成一次评估后，这里会显示本次结果。';
+  const page = el('div', { class: 'overview-page' });
+  page.append(el('header', { class: 'overview-heading' }, [
+    el('div', {}, [
+      el('p', { class: 'overview-eyebrow', text: '工作概览' }),
+      el('h1', { text: '每一次练习，都有记录' }),
+      el('p', { class: 'overview-intro', text: '回顾评估结果，关注长期变化，安排下一次专注练习。' }),
+    ]),
+    button('开始新的评估', () => ctx.navigate('#/start'), { primary: true }),
+  ]));
+  page.append(el('section', { class: 'overview-stats', 'aria-label': '已保存会话统计' }, [
+    renderKpi('参与者', fmtInt(subjectCount), '当前数据目录'),
+    renderKpi('已完成评估', fmtInt(doneCount), `共 ${fmtInt(totalCount)} 次会话`),
+    renderKpi('正在进行', fmtInt(list(pick(health.data, 'active_sessions', [])).length), '后台运行的会话'),
   ]));
 
-  /* ------------------------------------------------------------------ KPI */
-  const kpiRow = el('div', { class: 'grid grid--kpi' }, [
-    renderKpi('最近会话 · 专注度', fmtNum(pick(summary, 'focus.mean')), '指标均值（0–1）'),
-    renderKpi('最近会话 · 放松度', fmtNum(pick(summary, 'relax.mean')), '指标均值（0–1）'),
-    renderKpi('最近会话 · 认知负荷', fmtNum(pick(summary, 'load.mean')), '指标均值（0–1）'),
-    // 无质检记录时给明确文案：不要只留一个静默的 "—" 让人猜
-    renderKpi('质检通过率', quality ? fmtPercent(pick(quality, 'valid_ratio')) : '无记录',
-      quality
-        ? `${fmtInt(pick(quality, 'usable'))}/${fmtInt(pick(quality, 'windows'))} 窗可用`
-        : '最近会话没有质检（qc）阶段记录'),
-    renderKpi('预警数', fmtInt(alertCount),
-      metricRow
-        ? `会话 ${shortUuid(metricRow)}（${fmtRelative(metricRow.started_at)}）`
-          + (totalAlerts === null ? '' : `｜全库累计 ${fmtInt(totalAlerts)} 条`)
-        : '暂无会话'),
-    renderKpi('被试 / 会话', `${fmtInt(subjectCount)} / ${fmtInt(totalCount)}`,
-      `已完成 ${fmtInt(doneCount)} 次`),
-  ]);
-  page.append(card('关键指标', kpiRow, { sub: metricNote }));
-  // 质检可用窗比例用仪表盘再画一遍：评审时需要"一眼看出质量是否达标"
-  // 门槛值读 config.quality.valid_ratio_min（原来是写死的 0.6，与文案"取自 config.quality"不符）
-  if (quality) {
-    const gaugeHost = el('div', { class: 'gauge-host' });
-    const rawRatio = pick(quality, 'valid_ratio', null);
-    const ratio = typeof rawRatio === 'number' && Number.isFinite(rawRatio) ? rawRatio : null;
-    const threshold = typeof validRatioMin === 'number' && Number.isFinite(validRatioMin) ? validRatioMin : null;
-    drawGauge(gaugeHost, ratio, {
-      color: SERIES_COLORS[2],
-      target: threshold,
-      // 说明不放仪表下面，改为右侧一行"门槛"，避免整张卡只有中间一个控件、两侧全空
-      label: '质检可用窗比例仪表',
-    });
-    // 仪表 + 关键数字并排：卡片是全页宽，只放一个 320px 的仪表会让整张卡看着"空"
-    const fact = (label, value) => el('div', { class: 'gauge-fact' }, [
-      el('span', { class: 'gauge-fact__label', text: label }),
-      value instanceof Node ? value : el('span', { class: 'gauge-fact__value mono', text: value }),
-    ]);
-    const facts = el('div', { class: 'gauge-facts' }, [
-      fact('可用窗', `${fmtInt(pick(quality, 'usable'))}/${fmtInt(pick(quality, 'windows'))}`),
-      fact('可用窗比例', fmtPercent(ratio)),
-      fact('门槛', threshold === null ? '未配置' : fmtPercent(threshold)),
-      fact('判定', el('span', {
-        class: 'badge' + (pick(quality, 'passed') ? ' badge--strong' : ''),
-        text: pick(quality, 'passed') ? '质检通过' : '未达门槛',
-      })),
-    ]);
-    // 「来源 config.quality.valid_ratio_min」这种口径细节对现场没用：从界面上撤掉，
-    // 只在卡片 title（hover）里留一句，便于有人问起时核对。
-    const qualityCard = card('采集质量', el('div', { class: 'gauge-row' }, [gaugeHost, facts]), {
-      sub: '取自最近一次已完成会话的质检记录',
-    });
-    qualityCard.title = threshold === null
-      ? '门槛来源：config.quality.valid_ratio_min（未配置）'
-      : `门槛 ${fmtPercent(threshold)} 来自 config.quality.valid_ratio_min`;
-    page.append(qualityCard);
-  } else {
-    page.append(card('采集质量', [
-      empty('该会话没有质检记录，无法给出可用窗比例。'),
-    ], { sub: '没有质检阶段记录的会话不出这一项' }));
+  /* ------------------------------------------------------ 最近会话表格 */
+  const TERMINAL = new Set(['done', 'failed', 'cancelled', 'canceled', 'error']);
+  const isTerminal = (row) => TERMINAL.has(String(row.status || '').toLowerCase());
+  const sessionRows = latest.map((row) => ({
+    ...row,
+    onOpen: () => ctx.navigate(row.status === 'done'
+      ? `#/report?session=${row.uuid}` : `#/flow?session=${row.uuid}`),
+  }));
+  const sessionsCard = card('最近会话', [
+    sessionRows.length ? table([
+      {
+        title: '参与者 / 会话',
+        render: (row) => el('button', {
+          class: 'overview-session-link', type: 'button',
+          title: row.status === 'done' ? '查看本次评估报告' : '查看会话流程与状态',
+          attrs: { 'aria-label': `打开会话 ${row.uuid}${row.status === 'done' ? ' 的报告' : ' 的流程'}` },
+          onClick: row.onOpen,
+        }, [
+          el('strong', { text: row.participant || DASH }),
+          el('small', { text: `${shortUuid(row)} · ${sourceLabel(row)}` }),
+        ]),
+      },
+      {
+        title: '状态',
+        render: (row) => el('span', {
+          class: 'overview-state', dataset: { state: row.status || 'unknown' },
+          text: statusText(row.status), title: row.error ? `结束原因：${row.error}` : '',
+        }),
+      },
+      {
+        title: '进度 / 结束原因',
+        render: (row) => {
+          const duplicated = String(row.phase || '') === String(row.status || '');
+          if (isTerminal(row) && duplicated) {
+            return row.error
+              ? el('span', { class: 'cell-reason', text: String(row.error), title: String(row.error) })
+              : el('span', { class: 'muted', text: row.status === 'done' ? '报告已生成' : DASH });
+          }
+          return el('span', {}, [
+            el('span', { text: phaseText(row.phase, row.phase_label) }),
+            !isTerminal(row) ? el('small', { class: 'overview-progress', text: fmtPercent(row.progress) }) : null,
+          ]);
+        },
+      },
+      { title: '开始时间', render: (row) => fmtTime(row.started_at, false) },
+    ], sessionRows) : el('div', { class: 'overview-empty' }, [
+      el('span', { class: 'overview-empty__symbol', 'aria-hidden': 'true', text: '◎' }),
+      el('strong', { text: '从第一次评估开始' }),
+      el('p', { text: '连接设备并完成一次评估，结果会自动保存在这里。' }),
+      button('进入评估', () => ctx.navigate('#/start')),
+    ]),
+  ], { class: 'overview-sessions', sub: '已完成会话可直接打开报告',
+    actions: button('全部记录 →', () => ctx.navigate('#/history'), { small: true }) });
+
+  /* ---------------------------------------------------------- 最近结果 */
+  const snapshotBody = el('div', { class: 'overview-snapshot' });
+  const metricSource = sourceLabel({ ...metricRow, runtime: detail?.runtime });
+  if (metricRow) {
+    snapshotBody.append(el('div', { class: 'overview-snapshot__meta' }, [
+      el('strong', { text: metricRow.participant || DASH }),
+      el('span', { class: 'overview-source', text: metricSource,
+        dataset: { simulated: metricSource === '模拟数据' ? 'true' : 'false' } }),
+    ]));
   }
+  snapshotBody.append(el('div', { class: 'overview-focus' }, [
+    el('span', { text: '专注相关指数' }),
+    el('strong', { text: fmtNum(pick(summary, 'focus.mean')) }),
+    el('small', { text: '相对个人基线 · 0–1' }),
+  ]));
+  snapshotBody.append(el('div', { class: 'overview-secondary' }, [
+    el('div', {}, [el('span', { text: '放松指数' }), el('strong', { text: fmtNum(pick(summary, 'relax.mean')) })]),
+    el('div', {}, [el('span', { text: '认知负荷指数' }), el('strong', { text: fmtNum(pick(summary, 'load.mean')) })]),
+  ]));
+  const rawRatio = pick(quality, 'valid_ratio', null);
+  const ratio = typeof rawRatio === 'number' && Number.isFinite(rawRatio) ? rawRatio : null;
+  const threshold = typeof validRatioMin === 'number' && Number.isFinite(validRatioMin) ? validRatioMin : null;
+  snapshotBody.append(el('dl', { class: 'overview-facts' }, [
+    el('div', {}, [el('dt', { text: '质检可用窗比例' }), el('dd', { text: quality ? fmtPercent(ratio) : '无质检记录' })]),
+    el('div', {}, [el('dt', { text: '本次预警' }), el('dd', { text: fmtInt(alertCount) })]),
+  ]));
+  if (quality) {
+    const gaugeHost = el('div', { class: 'overview-quality-gauge' });
+    const qualityDetails = disclosure('查看采集质量明细', [
+      gaugeHost,
+      el('dl', { class: 'overview-facts' }, [
+        el('div', {}, [el('dt', { text: '可用窗 / 总窗' }),
+          el('dd', { text: `${fmtInt(pick(quality, 'usable'))} / ${fmtInt(pick(quality, 'windows'))}` })]),
+        el('div', {}, [el('dt', { text: '通过门槛' }), el('dd', { text: threshold === null ? '未配置' : fmtPercent(threshold) })]),
+        el('div', {}, [el('dt', { text: '质检结果' }), el('dd', { text: pick(quality, 'passed') ? '质检通过' : '未达门槛' })]),
+      ]),
+    ]);
+    qualityDetails.title = '门槛来源：config.quality.valid_ratio_min';
+    let drawn = false;
+    qualityDetails.addEventListener('toggle', () => {
+      if (!qualityDetails.open || drawn || ctx.signal.aborted) return;
+      drawGauge(gaugeHost, ratio, { color: SERIES_COLORS[2], target: threshold, label: '质检可用窗比例仪表' });
+      drawn = true;
+    });
+    snapshotBody.append(qualityDetails);
+  }
+  snapshotBody.append(el('p', { class: 'overview-note', text: '指数描述相对基线的变化，不能解释为专注概率。缺失值不表示低专注。' }));
+  if (metricRow?.status === 'done') snapshotBody.append(button('查看完整报告 →',
+    () => ctx.navigate(`#/report?session=${metricRow.uuid}`)));
+  const snapshotCard = card('最近一次结果', snapshotBody, { class: 'overview-result', sub: metricNote });
+  page.append(el('div', { class: 'overview-main' }, [sessionsCard, snapshotCard]));
 
   /* -------------------------------------------------------------- 趋势图 */
   const trendBody = el('div');
-  const trendCard = card('专注度周趋势', trendBody);
+  const trendCard = card('专注相关指数 · 周趋势', trendBody, { class: 'overview-trend',
+    sub: '按同一参与者的可比会话汇总',
+    actions: button('查看历史趋势 →', () => ctx.navigate('#/history'), { small: true }) });
   page.append(trendCard);
 
-  // 趋势不能被"最新会话"绑死：最新一条可能正在运行（或该被试没有可聚合点），
-  // 于是按最近几条会话的被试去重、依次查询，取第一个 points 非空的结果。
+  /* ------------------------------------------------------------ 运行环境 */
+  const engine = pick(health.data, 'engine', {}) || {};
+  const environmentDetails = disclosure('运行环境与数据存储', [
+    el('dl', { class: 'overview-environment' }, [
+      el('div', {}, [el('dt', { text: '后台会话' }),
+        el('dd', { text: `最多 ${fmtInt(pick(health.data, 'max_active_sessions'))} 个；当前运行 ${fmtInt(list(pick(health.data, 'active_sessions', [])).length)} 个` })]),
+      el('div', {}, [el('dt', { text: '数据目录' }),
+        el('dd', { class: 'mono', text: pick(health.data, 'data_dir', DASH) })]),
+      el('div', {}, [el('dt', { text: '全库累计预警' }), el('dd', { text: fmtInt(totalAlerts) })]),
+    ]),
+  ], 'overview-environment-details');
+  environmentDetails.title = `引擎口径：频谱 ${engine.spectrum || DASH}｜指标 ${engine.indicator || DASH}`
+    + `｜基线 ${engine.baseline || DASH}｜评估 ${engine.assessment || DASH}`;
+  page.append(environmentDetails);
+  container.textContent = '';
+  container.append(page);
+
+  // 先挂载布局再画图，确保图表使用实际可用宽度。
   const trendCandidates = [];
   for (const row of latest) {
     const name = row && row.participant;
@@ -226,164 +303,62 @@ export async function render(container, ctx) {
     if (trendCandidates.length >= 5) break;
   }
   if (!trendCandidates.length) {
-    trendBody.append(empty('还没有可聚合的会话：先创建被试并完成一次会话。'));
-  } else {
-    let shown = null;          // { participant, data, points }
-    let lastData = null;       // 最后一个可用的响应，用于解释空态原因
-    let failed = 0;
-    for (const participant of trendCandidates) {
-      try {
-        const response = await api.reportsTrend({ participant, field: 'focus', period: 'week' });
-        if (ctx.signal.aborted) return;
-        const data = response.data || {};
-        lastData = data;
-        // 趋势聚合只统计已完成会话（运行中的会话会让 points 为空）
-        const points = list(data.points).map(normalizeTrendPoint).filter(Boolean);
-        if (points.length) {
-          shown = { participant, data, points };
-          break;
-        }
-      } catch (error) {
-        failed += 1;
-        lastData = lastData || { error: true };
+    trendBody.append(empty('完成评估后查看每周变化。系统只汇总可比较的已完成会话。'));
+    return;
+  }
+  trendBody.append(el('p', { class: 'muted', text: '正在读取周趋势…' }));
+  let shown = null;
+  let lastData = null;
+  let failed = 0;
+  for (const participant of trendCandidates) {
+    try {
+      const response = await api.reportsTrend({ participant, field: 'focus', period: 'week' });
+      if (ctx.signal.aborted) return;
+      const data = response.data || {};
+      lastData = data;
+      const points = list(data.points).map(normalizeTrendPoint).filter(Boolean);
+      if (points.length) {
+        shown = { participant, data, points };
+        break;
       }
-    }
-    if (!shown) {
-      // 区分"有会话但都不可比"与"还没有已完成会话"，不要让人猜
-      const rejected = Number(pick(lastData, 'rejected', 0)) || 0;
-      const anyDone = Boolean(newestDone);
-      trendBody.append(empty(anyDone
-        ? `暂无趋势点：已按被试 ${trendCandidates.map((name) => `sub-${name}`).join('、')} 逐个查询，`
-          + `均没有可聚合的已完成会话${rejected ? `（其中 ${fmtInt(rejected)} 条因设备/采样率/通道变化被判不可比）` : ''}。`
-        : '暂无趋势点：只统计已完成会话，完成一次会话后再看这里。'
-          + (failed ? `（另有 ${fmtInt(failed)} 次查询失败）` : '')));
-    } else {
-      const { participant, data, points } = shown;
-      trendBody.append(el('p', {
-        class: 'muted',
-        text: `被试 sub-${participant} · 参与聚合 ${fmtInt(data.sessions)} 次会话`
-          + (Number(data.rejected) ? ` · 因跨设备不可比排除 ${fmtInt(data.rejected)} 条` : ''),
-      }));
-      const current = points[points.length - 1];
-      // 只有一个数据点时折线本身几乎不可见，必须把"当期是哪个周期、值是多少"直接写出来
-      trendBody.append(el('p', {
-        class: 'mono',
-        text: `当期 ${current.label}：专注度 ${fmtPercent(current.value, 1)}`
-          + (current.n === null ? '' : `（有效窗 n=${fmtInt(current.n)}）`),
-      }));
-      // 单点 / 双点没有曲线形状信息，等价于"带标注的点位图"：用更矮的画布，
-      // 点数多时才给 220px（drawLineChart 会按容器实测宽度 1:1 出图，不再等比放大）
-      const compact = points.length <= 2;
-      const canvasHost = el('div', { class: 'chart-host' });
-      // 先入 DOM 再画：drawLineChart 需要容器已有真实宽度（clientWidth）
-      trendBody.append(canvasHost);
-      drawLineChart(canvasHost, points.map((point) => ({ label: point.label, values: { focus: point.value } })), {
-        series: ['focus'],
-        colors: [SERIES_COLORS[0]],
-        max: 1,
-        min: 0,
-        percent: true,
-        showValues: true,
-        height: compact ? 170 : 220,
-        label: '专注度周趋势折线图',
-      });
-      trendBody.append(table([
-        { title: '周期', render: (row) => row.label },
-        { title: '专注度均值', align: 'right', render: (row) => fmtPercent(row.value, 1) },
-        { title: '有效窗 n', align: 'right', render: (row) => fmtInt(row.n) },
-      ], points));
-      if (data.note) {
-        trendBody.append(el('p', { class: 'muted', text: `可比性说明：${data.note}` }));
-      }
+    } catch (error) {
+      if (ctx.signal.aborted) return;
+      failed += 1;
     }
   }
-
-  /* ------------------------------------------------------ 最近会话表格 */
-  const TERMINAL = new Set(['done', 'failed', 'cancelled', 'canceled', 'error']);
-  const isTerminal = (row) => TERMINAL.has(String(row.status || '').toLowerCase());
-  const sessionRows = latest.map((row) => ({
-    ...row,
-    onOpen: () => ctx.navigate(`#/live?session=${row.uuid}`),
-  }));
-  const sessionsCard = card('最近会话', [
-    sessionRows.length ? table([
-      {
-        title: '会话',
-        render: (row) => el('button', {
-          class: 'btn btn--sm',
-          type: 'button',
-          text: `${String(row.uuid).slice(0, 8)}…`,
-          title: '打开实时监测视图',
-          // 按钮文字只有"省略号编号"，读屏念不出目标，必须补 aria-label
-          attrs: { 'aria-label': `打开会话 ${row.uuid} 的实时监测` },
-          onClick: row.onOpen,
-        }),
-      },
-      { title: '被试', render: (row) => (row.participant ? `sub-${row.participant}` : DASH) },
-      // 状态格带上"结束原因"的 tooltip：列表接口有 error 字段，失败原因不该只藏在详情里
-      {
-        title: '状态',
-        render: (row) => el('span', {
-          text: statusText(row.status),
-          title: row.error ? `结束原因：${row.error}` : '',
-        }),
-      },
-      // 终态会话的 phase 就是终态本身（failed/cancelled/done），照搬会和"状态"列完全重复
-      // （用户截图里就是"失败｜失败｜0%"三连）。这一格改显示**结束原因**，没有原因才留 —。
-      {
-        title: '阶段 / 结束原因',
-        render: (row) => {
-          const duplicated = String(row.phase || '') === String(row.status || '');
-          if (isTerminal(row) && duplicated) {
-            return row.error
-              ? el('span', { class: 'cell-reason', text: String(row.error), title: String(row.error) })
-              : el('span', { class: 'muted', text: DASH, title: '会话已正常结束，没有结束原因' });
-          }
-          return phaseText(row.phase, row.phase_label);
-        },
-      },
-      // 终态会话（失败/取消）的 progress 恒为 0，直接显示百分比会被读成"什么都没跑"，
-      // 这里只给"进行中/已完成"显示百分比，其余留 —（完整信息在详情页）
-      {
-        title: '进度', align: 'right',
-        render: (row) => (isTerminal(row) && row.status !== 'done'
-          ? el('span', { class: 'muted', text: DASH, title: `会话${statusText(row.status)}，进度不再推进` })
-          : fmtPercent(row.progress)),
-      },
-      { title: '预警', align: 'right', render: (row) => fmtInt(row.alert_count) },
-      { title: '开始时间', render: (row) => fmtTime(row.started_at) },
-    ], sessionRows) : empty('还没有会话记录，点右上角“开始一次检测”走一遍完整流程。'),
-  ], { sub: '点击会话编号进入实时监测；「阶段 / 结束原因」说明会话停在哪一步、为什么' });
-  page.append(sessionsCard);
-
-  /* ------------------------------------------------------------ 运行环境 */
-  const engine = pick(health.data, 'engine', {}) || {};
-  // 口径（product / spectrum / indicator / baseline / assessment）属于"可忽略"的运行细节：
-  // 界面上不再单列一格，只放进卡片 title（hover 可见）；完整口径仍写在报告正文与导出文档里。
-  const environmentCard = card('运行环境', el('div', { class: 'grid grid--2' }, [
-    el('div', {}, [
-      el('p', { class: 'muted', text: '并发上限' }),
-      el('p', { class: 'mono', text: `${fmtInt(pick(health.data, 'max_active_sessions'))} 个会话；当前运行 ${fmtInt(list(pick(health.data, 'active_sessions', [])).length)} 个` }),
-    ]),
-    el('div', { class: 'env-cell' }, [
-      el('p', { class: 'muted', text: '数据目录' }),
-      // 用 `--data D:\...`（文档推荐的换目录方式）时这条路径可达 90+ 字符：
-      // 原先是 `mono nowrap`，在 grid--3 里既不换行也不收缩，把整行撑出 297px 横向滚动。
-      // 现在改成单行省略号（path-ellipsis）+ title 保留完整路径：
-      // 既不撑破布局，也不抬高卡片高度（保证仪表盘整页高度不变），完整路径仍可 hover/复制。
-      el('p', {
-        class: 'mono path-ellipsis',
-        text: pick(health.data, 'data_dir', DASH),
-        title: pick(health.data, 'data_dir', ''),
-      }),
-    ]),
+  if (ctx.signal.aborted) return;
+  trendBody.textContent = '';
+  if (!shown) {
+    const rejected = Number(pick(lastData, 'rejected', 0)) || 0;
+    trendBody.append(empty(newestDone
+      ? '最近参与者尚无可聚合的趋势点。'
+        + (rejected ? ` ${fmtInt(rejected)} 条会话因设备、采样率或通道变化不可比较。` : '')
+      : '完成一次评估后查看周趋势。'));
+    if (failed) trendBody.append(el('p', { class: 'overview-note', text: `${fmtInt(failed)} 次趋势查询失败，请稍后重新打开本页。` }));
+    return;
+  }
+  const { participant, data, points } = shown;
+  const current = points[points.length - 1];
+  trendBody.append(el('div', { class: 'overview-trend-meta' }, [
+    el('span', { text: `${participant} · ${fmtInt(data.sessions)} 次会话`
+      + (Number(data.rejected) ? ` · 排除 ${fmtInt(data.rejected)} 条不可比记录` : '') }),
+    el('span', { text: `${current.label} · 指数 ${fmtNum(current.value)}` }),
   ]));
-  environmentCard.title = `引擎口径：频谱 ${engine.spectrum || DASH}｜指标 ${engine.indicator || DASH}`
-    + `｜基线 ${engine.baseline || DASH}｜评估 ${engine.assessment || DASH}`;
-  page.append(environmentCard);
-
-  container.textContent = '';
-  container.append(page);
+  const canvasHost = el('div', { class: 'chart-host' });
+  trendBody.append(canvasHost);
+  drawLineChart(canvasHost, points.map((point) => ({ label: point.label, values: { focus: point.value } })), {
+    series: ['focus'], colors: [SERIES_COLORS[0]], max: 1, min: 0,
+    showValues: true, height: points.length <= 2 ? 170 : 220,
+    label: '专注相关指数周趋势折线图',
+  });
+  trendBody.append(disclosure('查看趋势数据与可比性说明', [
+    table([
+      { title: '周期', render: (row) => row.label },
+      { title: '指数均值', align: 'right', render: (row) => fmtNum(row.value) },
+      { title: '有效窗 n', align: 'right', render: (row) => fmtInt(row.n) },
+    ], points),
+    data.note ? el('p', { class: 'overview-note', text: data.note }) : null,
+  ]));
 }
 
 export default render;

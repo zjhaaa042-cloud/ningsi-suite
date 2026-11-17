@@ -1,6 +1,7 @@
 # 凝思 · 产品使用说明（系统架构与流程说明）
 
 对应赛题提交材料「（5）① 产品使用说明文档（系统架构与流程说明）」。
+本文保留初版产品说明。当前三包架构、处理策略及模型边界以[系统架构](../../docs/ARCHITECTURE.md)为准，当前操作见各包 README；下文旧版本参数用于理解历史交付。
 版本：0.1.0；口径：`welch-v1` / `indicator-v1` / `baseline-v1` / `joint-assessment-v1` / `neurofeedback-v1` / `logistic-v1`。
 
 ---

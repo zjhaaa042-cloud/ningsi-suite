@@ -1,0 +1,258 @@
+{
+  "spec": "frontal-affect-v1",
+  "electrodes": [
+    "Fp1",
+    "Fp2"
+  ],
+  "features": [
+    "log_rel_theta",
+    "log_rel_alpha",
+    "log_rel_beta"
+  ],
+  "input_rate_hz": 250,
+  "models": {
+    "stress": {
+      "dataset": "SAM40 (Ghosh et al., doi:10.6084/m9.figshare.14562090.v1, CC BY 4.0)",
+      "parameters": {
+        "mean": [
+          -2.0005547503688095,
+          -2.319679308497559,
+          -1.5941498095488527
+        ],
+        "scale": [
+          0.4034502766268094,
+          0.33303146475327855,
+          0.3298634004382326
+        ],
+        "weights": [
+          0.11287371415316473,
+          -0.24151427700726188,
+          0.008521411851994586
+        ],
+        "bias": -2.2755523550161725e-05
+      },
+      "model_id": "be2c69d4160b3d0212916565fe53f6aef8c9541e34daca815810cba267ae5a12",
+      "labels": [
+        "较低自评压力倾向",
+        "较高自评压力倾向"
+      ],
+      "holdout": {
+        "trials_total": 90,
+        "trials_with_binary_rating": 90,
+        "trials_scored": 51,
+        "people_with_both_scored_labels": 5,
+        "scored_people": 9,
+        "labelled_trial_coverage": 0.5666666666666667,
+        "usable_labelled_windows": 105,
+        "labelled_windows_attempted": 450,
+        "eligible_window_coverage": 0.23333333333333334,
+        "trial_positive": 21,
+        "trial_negative": 30,
+        "trial_sensitivity": 0.5714285714285714,
+        "trial_specificity": 0.43333333333333335,
+        "trial_balanced_accuracy": 0.5023809523809524,
+        "trial_balanced_accuracy_ci95": [
+          0.343125,
+          0.6632233796296294
+        ],
+        "all_source_trial_coverage": 0.5666666666666667,
+        "trial_accuracy": 0.49019607843137253,
+        "trial_pooled_auc": 0.4365079365079365,
+        "trial_within_person_macro_auc": 0.5711111111111111,
+        "within_person_macro_auc_ci95": [
+          0.45555555555555555,
+          0.7133333333333333
+        ],
+        "single_window_pooled_auc": 0.42254545454545456,
+        "constant_score_auc_and_balanced_accuracy": 0.5,
+        "development_majority_label": 0,
+        "majority_trial_accuracy": 0.5882352941176471,
+        "task_only_trial_pooled_auc": 0.5206349206349207,
+        "task_only_trial_balanced_accuracy": 0.5,
+        "task_only_development_positive_fraction": {
+          "Arithmetic": 0.45652173913043476,
+          "Mirror_image": 0.32727272727272727,
+          "Stroop": 0.1896551724137931
+        },
+        "within_task_eeg_aucs": {
+          "Arithmetic": 0.4714285714285714,
+          "Mirror_image": 0.48484848484848486,
+          "Stroop": 0.3111111111111111
+        }
+      },
+      "target": "Post-task SAM40 self-rated stress 6–10 vs 1–5 on original 1–10 scale; only three rated tasks.",
+      "source_people": 40,
+      "source_trials": 360,
+      "source_label_counts": {
+        "1": 127,
+        "0": 233
+      },
+      "target_device_validated": false,
+      "trained_people": [
+        1,
+        2,
+        4,
+        5,
+        6,
+        8,
+        9,
+        10,
+        11,
+        14,
+        15,
+        16,
+        17,
+        19,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        31,
+        32,
+        33,
+        37,
+        38,
+        39,
+        40
+      ],
+      "held_out_people": [
+        3,
+        7,
+        13,
+        18,
+        21,
+        29,
+        30,
+        34,
+        35,
+        36
+      ]
+    },
+    "valence": {
+      "dataset": "EmoEEG-MC (Xu et al., OpenNeuro ds005540, CC0)",
+      "parameters": {
+        "mean": [
+          -2.4526822253083953,
+          -2.52004271468021,
+          -1.1293875868754515
+        ],
+        "scale": [
+          0.5867804454754978,
+          0.53962250342597,
+          0.4759573525914316
+        ],
+        "weights": [
+          0.007785446269527249,
+          0.04395220197126066,
+          0.02089384915096716
+        ],
+        "bias": -1.3394309083198165e-07
+      },
+      "model_id": "c76a1994ccec4e54d7c94a04a552002333c2ffeda53873130c5865223f348bd4",
+      "labels": [
+        "负效价倾向",
+        "正效价倾向"
+      ],
+      "holdout": {
+        "trials_total": 294,
+        "trials_with_binary_rating": 172,
+        "trials_scored": 165,
+        "people_with_both_scored_labels": 13,
+        "scored_people": 14,
+        "labelled_trial_coverage": 0.9593023255813954,
+        "usable_labelled_windows": 588,
+        "labelled_windows_attempted": 860,
+        "eligible_window_coverage": 0.6837209302325581,
+        "trial_positive": 90,
+        "trial_negative": 75,
+        "trial_sensitivity": 0.4444444444444444,
+        "trial_specificity": 0.6266666666666667,
+        "trial_balanced_accuracy": 0.5355555555555556,
+        "trial_balanced_accuracy_ci95": [
+          0.46312900777437294,
+          0.6135272336359293
+        ],
+        "all_source_trial_coverage": 0.5612244897959183,
+        "trial_accuracy": 0.5272727272727272,
+        "trial_pooled_auc": 0.5223703703703704,
+        "trial_within_person_macro_auc": 0.5773385080527936,
+        "within_person_macro_auc_ci95": [
+          0.5041464183964186,
+          0.642722058695273
+        ],
+        "single_window_pooled_auc": 0.4996375794986906,
+        "constant_score_auc_and_balanced_accuracy": 0.5,
+        "development_majority_label": 1,
+        "majority_trial_accuracy": 0.5454545454545454
+      },
+      "target": "Video-trial self-rated valence above vs below 3.5 on original 0–7 scale; retain only identifiable same-polarity paired-context ratings for complete participants 1–53.",
+      "source_people": 53,
+      "source_trials": 1113,
+      "source_label_counts": {
+        "None": 425,
+        "1": 368,
+        "0": 320
+      },
+      "target_device_validated": false,
+      "trained_people": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        20,
+        23,
+        24,
+        25,
+        27,
+        29,
+        30,
+        32,
+        33,
+        37,
+        38,
+        39,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        48,
+        49,
+        50,
+        52,
+        53
+      ],
+      "held_out_people": [
+        7,
+        18,
+        19,
+        21,
+        22,
+        26,
+        28,
+        31,
+        34,
+        35,
+        36,
+        40,
+        47,
+        51
+      ]
+    }
+  }
+}

@@ -8,13 +8,14 @@
  *
  * 约束（task-4）：
  * - 接口报错/字段缺失/401/404 一律给空态卡，不允许白屏；
- * - 不做「选会话 / 选被试训练」——后端只用内置仿真被试（sim00 / sim01…），界面必须如实说明；
+ * - 真人模型使用独立采集导出与 human API；旧仿真自检单独折叠显示；
  * - 缺失字段用 DASH（—）占位，不能出现 undefined/NaN。
  */
 
 import { api } from '../api.js';
 import { describeError } from '../store.js';
 import { renderPreviewCard } from '../preview.js';
+import { renderHumanModels } from './human-models.js';
 import {
   DASH, button, card, el, empty, field, fmtInt, fmtNum, fmtPercent, fmtSeconds,
   list, pageFrame, pick, table,
@@ -89,7 +90,7 @@ function renderModelResult(result) {
   });
 }
 
-export const models = {
+const simulatedModels = {
   async render(container, ctx) {
     const host = pageFrame(container, '模型训练', [
       button('刷新', () => ctx.reload()),
@@ -183,9 +184,7 @@ export const models = {
         runButton,
       ]),
       statusHost,
-      el('p', { class: 'muted', text: '本页与「会话流程」第 10 阶段都只用后端内置仿真被试（sim00、sim01…），'
-        + '接口不接受「选会话 / 选被试」。真实数据训练当前没有实现入口（命令行也没有 train 子命令）——'
-        + '这一点如实写在界面上，不做"看起来能用"的暗示。' }),
+      el('p', { class: 'muted', text: '本区域与「会话流程」第 10 阶段使用内置仿真被试，仅用于算法链路自检。真人训练请使用上方采集数据入口。' }),
       errorHost,
     ], {
       sub: '在本机训练，不影响已有会话数据',
@@ -193,6 +192,18 @@ export const models = {
 
     host.append(resultHost);
     renderResult();
+  },
+};
+
+export const models = {
+  async render(container, ctx) {
+    await renderHumanModels(container, ctx);
+    if (ctx.signal.aborted) return;
+    const details = el('details', {}, [el('summary', { text: '仿真模型链路自检' })]);
+    const body = el('div');
+    details.append(body);
+    container.append(details);
+    await simulatedModels.render(body, ctx);
   },
 };
 
@@ -278,7 +289,7 @@ function renderDeviceHealth(devices, hardwareNote) {
 
 export const devices = {
   async render(container, ctx) {
-    const host = pageFrame(container, '设备状态', [
+    const host = pageFrame(container, '设备连接', [
       button('立即刷新', () => ctx.reload()),
     ]);
 

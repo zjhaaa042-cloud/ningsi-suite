@@ -4,7 +4,8 @@ VERSION = "0.1.2"
 SPECTRUM_SPEC = "welch-v1"
 INDICATOR_SPEC = "indicator-v1"
 BASELINE_SPEC = "baseline-v2"
-LABEL_SPEC = "joint-assessment-v2"
+LABEL_SPEC = "joint-assessment-v3"
+TRAINING_SPEC = "neurofeedback-v3"
 
 # Welch 功率谱：4 秒分析窗、2 秒分段、50% 重叠、汉宁窗（对应文档 8.3.1）
 WELCH = {
@@ -79,6 +80,9 @@ STEP_SEC = 2.0
 TRAINING = {
     "full": {"segments": 4, "segment_sec": 120.0},
     "quick": {"segments": 2, "segment_sec": 120.0},
+    "ten_min": {"segments": 4, "segment_sec": 50.0, "rest_sec": 10.0},
+    "baseline_after_sec": 32.0,  # 预留滚动窗建立余量，阶段内有效覆盖仍须至少30秒
+    "min_coverage_ratio": 0.60,  # 覆盖不足时不调整目标；待设备/人群验证的工程规则
     "initial_from": "baseline_median",  # 初始目标取自当次基线中位数对应的评分
     "target_step": 0.05,
     "target_min": 0.40,
@@ -88,6 +92,10 @@ TRAINING = {
     "on_target_raise": 0.70,     # 达标时间占比高 → 提高要求
     "on_target_lower": 0.40,     # 达标时间占比低 → 降低要求
 }
+
+# PVT作答完整性门槛，独立于慢反应阈值；这些工程规则不代表临床效度。
+PVT_VALIDITY = {"min_responses": 5, "min_response_ratio": 0.60,
+                "max_false_start_ratio": 0.25}
 
 # 状态热力图分档（文档 6.6.2）
 HEATMAP_BANDS = [

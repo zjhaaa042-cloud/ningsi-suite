@@ -1,5 +1,43 @@
 # 凝思 Studio 接口契约（/api）
 
+## 开发分析接口（历史展示模块）
+
+下列接口保留供开发分析使用；历史 `#/showcase` 页面已退出正式产品路由。信号分析不修改源数据或既有会话，普通请求仍限制为 1 MiB。返回的实现状态、历史验证摘要和现场验收状态各自保留，不计算虚假的总体达标率。
+
+| 方法与路径 | 请求 / 返回 |
+|---|---|
+| `GET /api/showcase/metadata` | 处理策略、频段、特征、输入规模和解释边界 |
+| `POST /api/showcase/analyze` | `{mode:"demo",artifact:"clean"或"blink"/"muscle"/"movement"/"mixed",state:"focused"}`，或 `{mode:"raw",rate,scale_to_uv,samples:通道×时间,channel_labels?,timestamps?,baseline_samples?,baseline_timestamps?}`；返回来源、三路波形、伪迹掩码、前后 PSD、频带/时域特征、基线、逐窗质量与指数和计算耗时。输入错误 422；没有独立合格基线时指数为空 |
+| `GET /api/showcase/evidence` | 固定来源的脱敏计数与校验值、逐条要求及缺口；打包快照明确来源和日期，不返回身份、原始 EEG 或任意本地文件 |
+| `GET /api/showcase/device-profile` | 当前数据目录中的设备声明、缺失项和待核验状态 |
+| `POST /api/showcase/device-profile` | `{manufacturer,model,electrodes,reference,srate,source_unit,scale_to_uv,unit_basis,document_reference,notes?}`；原子保存本地声明，永远不自动认定合规。资料出处是文本，不触发文件读取 |
+| `POST /api/showcase/demo-session` | 空对象；明确创建双通道、250 Hz、完整协议、0.01 倍率的模拟会话并返回 `session`，201；已有同名演示运行时返回该会话，200。脑电、量表和行为全部标模拟，不改变真人启用模型 |
+
+导入矩阵每通道至少六秒，采样率 100–1000 Hz，最多八通道和 240000 个数值；更大的记录应先截取用于展示的短段。基线与任务必须为同配置的独立输入。无源时间戳时仅按标称采样率回放，不代表设备时钟通过验证。
+
+## 真人数据与模型
+
+详细流程见 [真人模型训练说明](HUMAN_MODEL_TRAINING.md)。普通请求体上限1 MiB，特征导入端点上限16 MiB；其中解码后的特征文本上限12 MiB。原始脑电不上传。
+
+| 方法与路径 | 请求 / 返回 |
+|---|---|
+| `GET /api/models/human` | 已导入数据集摘要、持久化任务和当前启用模型 |
+| `POST /api/models/human/import` | `{files:{"相对目录/文件名":"原始UTF-8文本"}}`；返回数据集ID、人数、标签及排除计数，201 |
+| `POST /api/models/human/import-local` | `{paths:["D:\\采集导出目录"]}`；仅允许本机回环地址调用，复用相同导入校验，201 |
+| `POST /api/models/human/train` | `{dataset_id}`；返回异步任务，运行中202、已有完成结果200 |
+| `GET /api/models/human/jobs/{run_id}` | 任务状态、阶段、进度、完成后的独立测试结果 |
+| `GET /api/models/human/jobs/{run_id}/artifacts/{kind}` | `kind=model/bundle/report/markdown/metrics/predictions`；下载模型、ZIP、HTML、Markdown、JSON、CSV |
+| `POST /api/models/human/activate` | `{run_id}` 或 `{model:模型JSON}` 二选一；验证规格和指纹，对新会话生效 |
+| `DELETE /api/models/human/active` | 停用新会话模型，当前会话保留启动时版本 |
+
+仅采集器特征CSV及配套清单可导入；拒绝路径穿越、重复探针、跨组参与者、校验失败和错误标签方向。相同研究目录锁定人员分组；同一数据集重复训练复用已完成结果。已有测试打开记录的参与者不能再次作为新开发轮次的独立测试组。
+
+本机目录入口拒绝相对路径、网络共享、磁盘根目录及非本机客户端，只读取采集器规定的特征和清单文件。报告下载端点的 `report` 产物增加 `?preview=1` 可在浏览器内预览，默认仍为附件下载。
+
+`window` / 十分钟协议 `feedback` 事件和 `GET /api/sessions/{uuid}/live` 增加 `attention_model`：`available`、`reason`、`model_id`，可用时带 `mind_wandering_probability`、`on_task_probability`、`prediction`、`threshold`、`contributions`、时间区间及适用范围提示。原有 `scores.focus` 含义不变。
+
+模型启用会话另有 `attention_model` 和 `attention_predictions` 下载产物。`POST /api/models/train` 继续是仿真链路自检，输出不作为真人准确率证据。
+
 - 基地址：与前端同端口（默认 `http://127.0.0.1:8765`）
 - 全部接口在 `/api` 前缀下；`GET /api/openapi.json` 返回机器可读描述
 - 请求/响应均为 `application/json; charset=utf-8`
@@ -36,7 +74,7 @@
 {
   "status": "ok", "service": "ningsi-studio", "version": "0.1.0", "product": "0.1.0",
   "engine": { "product": "0.1.0", "spectrum": "welch-v1", "indicator": "indicator-v1",
-              "baseline": "baseline-v2", "assessment": "joint-assessment-v2" },
+              "baseline": "baseline-v2", "assessment": "joint-assessment-v3" },
   "engine_path": ".../ningsi/src/ningsi/__init__.py",
   "db": ".../var/studio/studio.sqlite3", "data_dir": ".../var/studio",
   "runs_root": ".../var/studio/runs",
@@ -181,12 +219,14 @@ DELETE /api/devices/preview          → { "active": false, "stopped": true }
 ### `POST /api/sessions`
 请求：
 ```json
-{ "participant": "p01", "device": "lsl:BioMultiLite EEG-00cde1", "time_scale": 0.05,
+{ "participant": "p01", "device": "lsl:BioMultiLite EEG-00cde1", "time_scale": 1,
   "training_mode": "quick", "srate": 250.0, "channels": 1, "label": "第一次训练",
   "create_subject": true }
 ```
 `time_scale` 取值 `[0.01, 1.0]`；**`time_scale < 0.2` 视为快速演示模式**，量表、SART、PVT 由服务端
 生成确定性作答（无需前端交互），用于评审演示与自动化测试。
+
+LSL 会话要求 `time_scale=1`。可省略 `eeg_calibration` 以使用流声明的电压单位。设备元数据缺失时，经操作者核对厂商配置，可发送 `{"eeg_calibration":{"source_unit":"mV"}}`。支持 nV、uV、mV、V。若设备发送 ADC 计数，需要用实测或厂商提供的倍率，如 `{"eeg_calibration":{"source_unit":"ADC","scale_to_uv":0.25}}`。示例倍率必须换成实际数值。接口将本人选择、来源和转换倍率保存在会话与报告中，只作用于 EEG 通道。与已声明单位冲突会返回 409，旧会话没有确认记录时返回 null。
 
 **`device` 取值规则（2026-10-07 起收紧：不再有"缺省仿真"）**：
 
@@ -238,7 +278,7 @@ DELETE /api/devices/preview          → { "active": false, "stopped": true }
                 "device": "lsl:BioMultiLite EEG-00cde1",
                 "time_scale": 0.05, "training_mode": "quick",
                 "engine_versions": { "spectrum": "welch-v1", "indicator": "indicator-v1",
-                                     "baseline": "baseline-v2", "assessment": "joint-assessment-v2" },
+                                     "baseline": "baseline-v2", "assessment": "joint-assessment-v3" },
                 "source": "lsl:BioMultiLite EEG-00cde1", "srate": 250.0, "channels": 2,
                 "started_at": "...", "ended_at": null, "created_at": "...", "error": null },
   "events_url": "/api/sessions/<uuid>/events",
@@ -309,6 +349,7 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 | `assessment` | 同 `GET .../assessment` |
 | `scales` | `results[]`（SAS/SDS 计分结果汇总，量表阶段结束时下发一次） |
 | `model` | `spec, features[], subject_split, train, validation, test, model_path` |
+| `model_prediction` | SART期间的真人模型结果：`available, reason, model_id, mind_wandering_probability, prediction, contributions` |
 | `artifacts` | `kind -> path` |
 | `cancelled` | `message` |
 | `error` | `message, detail` |
@@ -332,6 +373,8 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 随后若总线已关闭会立刻收到 `closed`，客户端据此结束连接。
 
 ### `GET /api/sessions/{uuid}/signal?hz=10&seconds=10&points=1200`
+同一会话支持 Studio 与管理者平台同时订阅；每个连接独立保留 `hz`、`seconds`、`points` 显示参数。关闭一个连接不会中止会话或其他连接，频谱计算缓存仍在会话内共享。
+
 **高频原始信号 SSE**（`text/event-stream`）：给"实时监测"页的波形与频谱供数，
 与 4 秒分析窗**解耦**——按 `hz`（默认 10 帧/秒，上限 25）直接读采集缓冲的最新样本。
 
@@ -363,6 +406,14 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 ### `GET /api/sessions/{uuid}/live`
 轮询兜底：`status, phase, progress, indicator_summary, alerts[], awaiting_input[], runtime_alive`。
 
+另含 `checkins_open`、`checkins` 和 `affect_model`。监测与训练窗在适配电极、频率、电压单位且质量合格时可记录压力与情绪效价的连续研究分数。会话页面在受试者作答期间隐藏模型方向和分数。低质量、模拟或不匹配输入返回缺失和原因。
+
+### `POST /api/sessions/{uuid}/state-checkins`
+
+在运行中会话的量表、监测或训练阶段提交当下自评。请求体含客户端生成的 32 位十六进制 `request_id`，`stress`（0–10 压力）与 `valence`（0–10 愉悦程度）至少填写一个整数，另一项可为 null。相同请求可以安全重试。同一编号改填不同答案或在已关闭阶段新增作答将返回 409。压力自评达到 7 分即记录 `self_reported_high_stress` 提醒，阈值属于工程设置。
+
+返回 `record` 和 `high_stress`，记录含阶段、真实接收时间、会话内时刻和来源。相同阶段最近四秒内有质量合格、已确认单位的 EEG 分析窗时，`eeg_context` 附该窗频带特征与模型输出，缺失保留 null。会话 JSON 报告 `extras.state_observations` 保留全部自评和汇总，Markdown 与离线 HTML 展示自评、提醒及监测窗模型覆盖。自发作答时间可能有选择偏倚。
+
 ### `GET /api/sessions/{uuid}/heatmap`
 ```json
 { "uuid": "...", "columns": 30,
@@ -378,9 +429,11 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 `index = -1` 即缺失窗，其 `score` 为 `null`（前端必须画成灰色块，不得当作 0 或状态变化）。
 
 ### `GET /api/sessions/{uuid}/trend?field=focus&period=week`
-`field ∈ {focus, relax, load}`，`period ∈ {week, month}`；
+`field ∈ {focus, relax, load, stress}`，`period ∈ {week, month}`；
 `points[{period, mean, n, std}]`，另返回 `sessions / comparable / rejected / rejected_reasons`
 （设备、采样率或通道数变化的历史记录会被排除在聚合之外）。
+
+`field=stress` 使用已完成现场 LSL 会话的本人压力自评（0–10 分），先求各会话均值，再按周或月对会话等权平均。模拟记录与未作答会话不参与，`n` 为会话数，`ledger_points` 为空。同一统计适用于全局趋势端点，可用 `participant` 选择个体。
 
 ---
 
@@ -447,6 +500,12 @@ lapse_rate, false_starts, valid`。
   baseline_after, target_rationale, baseline_comparable`，另含 `describe`（训练方案：
   `mode, segments, segment_sec, target, rationale, initial_from, target_step, hold_sec`，
   与 `training_start` 事件同一份）。
+  `neurofeedback-v3` 的均值和波动对 `n > 0` 的轮次等权平均；全无有效数据时为 `null`。
+  `on_target_ratio` 改为达标秒数/全部训练段时长（含缺失轮次）；
+  `valid_time_ratio` 为有效秒数/全部训练段时长，`on_target_valid_ratio` 为达标秒数/有效秒数。
+  无有效数据时两种达标率为 `null`，覆盖率为0。旧版占比按有效样本统计，页面标识旧版，不能直接比较。
+  `first_to_last_change` 仅在至少两轮且首末轮均有有效数据时计算，否则为 `null`。
+  空 `summary: {}` 不代表训练结束；实时反馈缺测时显示缺测，训练结束后才展示保存结果。
 - `GET /api/sessions/{uuid}/report` → 报告 JSON（`spec/participant/indicators/quality/scales/
   behavior/assessment/extras`），并附 `report_markdown`（报告原文，Markdown 文本）与
   `report_markdown_path`；尚未生成时返回 `202` 且带 `partial: true` 与阶段进度。
@@ -516,7 +575,12 @@ lapse_rate, false_starts, valid`。
 
 窗口 `quality.metrics.channels` 为各通道的 `channel`（零基索引）、`emg_rel`、`eog_rel`；顶层两个频带代理值是通道最大值。任一通道不合格则整窗拒绝。该门控仍为伪迹粗筛，阈值待验证。
 
-PVT `scoring_spec=pvt-scoring-v2`，保留主 `lapse_sec=0.5`、`lapse_operator=>`；增加 `comparison_lapse_sec=0.355`、`comparison_lapse_operator=>=`、`lapses_355ms`、`lapse_rate_355ms`、`omission_rate`、`invalid_responses`、`rate_denominators`、`unavailable_reasons`、`protocol_note`、`threshold_status`。Studio 另有 `completed`。已作答的 RT<100 ms 视为抢答，负数/缺失/非有限 RT 视为无效；抢答不进入反应时统计和漏答分母。正常漏答不再被零慢反应率掩盖，联合评估检查既有 10% 漏答率阈值（待验证）。调用方须先检查 `valid`，不可将不可用结果中的零统计解释成正常状态。
+PVT `scoring_spec=pvt-scoring-v3`，保留主 `lapse_sec=0.5`、`lapse_operator=>`；增加 `comparison_lapse_sec=0.355`、`comparison_lapse_operator=>=`、`lapses_355ms`、`lapse_rate_355ms`、`omission_rate`、`invalid_responses`、`rate_denominators`、`unavailable_reasons`、`protocol_note`、`threshold_status`。Studio 另有 `completed`。已作答的 RT<100 ms 视为抢答，负数/缺失/非有限 RT 视为无效；抢答不进入反应时统计和漏答分母。正常漏答不再被零慢反应率掩盖，联合评估检查既有 10% 漏答率阈值（待验证）。调用方须先检查 `valid`，不可将不可用结果中的零统计解释成正常状态。
+
+v3另检查有效反应≥5次、有效反应/全部试次≥60%、抢答/全部试次≤25%、无非法反应时；
+Studio还要求任务完成。这些是待验证的工程完整性门槛，由 `/api/config.pvt_validity` 给出。
+结果包含 `response_ratio`、`false_start_ratio`、`validity_thresholds`；失败原因包括
+`insufficient_response_coverage`、`excessive_false_starts`。原始任务成绩仍保留，不可用任务不进入联合评定。
 
 完整说明见 [测量有效性](../../ningsi/docs/MEASUREMENT_VALIDITY.md)。
 
@@ -524,3 +588,35 @@ PVT `scoring_spec=pvt-scoring-v2`，保留主 `lapse_sec=0.5`、`lapse_operator=
 ### v0.1.2 十分钟协议扩展
 
 `POST /api/sessions` 的 `protocol` 新增 `ten_min`；`GET /api/config` 返回三个协议档。新阶段为 `practice`、`baseline_after`。十分钟PVT作答须携带 `phase: "practice" | "main"`，旧协议不要求。`feedback` 增加 `feedback_mode`、`mode_label`、`grade`；非eeg模式 `score=null`、`usable=false`。报告 `extras.ten_min` 包含阶段时长、前后同通道描述性统计及分轮反馈时长；`signal_diagnostics.grades` 返回A/B/C窗数。旧字段和旧协议语义保持兼容。
+
+十分钟完成页通过 `GET /api/sessions/{uuid}` 的 `result_overview` 读取训练指数：
+`source_phase="training"`、`source_label`、`summary.{focus,relax,load}.{mean,std,n}`、
+`quality.{windows_total,windows_usable,windows_scored,valid_ratio,scored_ratio}`、
+`available`、`reason`、`note`、`excluded_reasons`。仅使用训练阶段严格合格、A级且已有完整有效指数的窗口，
+按窗等权汇总未平滑分数；包含反馈升级等待窗，与平滑奖励分数口径不同。
+`windows_usable` 是信号严格质检通过数；`windows_scored` 还要求A级与有效基线，两者不能混用。
+新会话把同一对象保存至 `runs[training].payload.indicator_overview` 和 `extras.ten_min.indicator_overview`。
+训练最终摘要也写入 `runs[training].payload.training`，可由 `/training` 读取。
+旧会话可从已保存报告的 `signal_diagnostics.windows` 只读恢复；无逐窗记录时返回空 `summary` 与原因，绝不填零。
+`indicator_summary` 继续仅代表独立监测阶段，训练指数不进入联合评估、历史趋势或跨协议对比。
+完成页的启动质检窗数仅描述最初质检阶段；十分钟训练另显示可评分窗数。
+完整窗口、基线、分级与评分公式见 [脑电窗口与评分口径](EEG_SCORING.md)。
+
+### 2026-11-13 流程修复：时间、阶段边界与证据措辞
+
+- `segment.stats`新增 `valid_seconds, on_target_seconds, valid_time_ratio, on_target_valid_ratio,
+  on_target_sample_ratio, coverage_sufficient, timing_spec`。时间以段起点为零，每个有效反馈最多覆盖后续2秒，
+  在下一事件、不可用标记或段末截断；长缺口不补齐。`interruptions[]`保存不可用时间点，明确打断连续保持。
+  覆盖率不足60%时保持目标；提高目标还要求实际达到连续保持时长。
+- 完整/短协议基线与十分钟协议均排除跨阶段滚动窗。普通采集在每个间隔末读取，
+  完整协议训练后安排32秒，留出滚动窗建立余量；有效覆盖门槛仍为30秒。
+- `/api/sessions`创建响应、详情与`started.phases`均按该会话的协议/训练模式提供阶段表。
+  训练阶段有`training_plan{segments,segment_sec,rest_sec,baseline_after_sec,min_wall_segment_sec}`，
+  `duration_sec`包含该阶段实际安排。十分钟训练240秒，普通quick/full训练含后基线分别272/512秒。
+  协议档`total_sec_by_training_mode`供开始页显示时间，`saved_sec`按同一阶段表计算。
+- 联合评定升级为`joint-assessment-v3`：维度状态为`证据不足`、`未触发工程阈值`、
+  `单一来源提示偏离`、`部分提示偏离`、`一致提示偏离`。后两种要求至少两个不同来源。
+  `dimension_states`增加`sources,source_count,within_source_mixed`；多个脑电指标属于同一来源。
+  单独PVT提示明确标注仅有PVT行为证据及缺少其他来源交叉验证，不据此输出个人能力等级。
+  未采集独立监测时，建议区说明训练记录单独查看；仅基线无效时才暂停脑电训练目标。
+  网页优先显示服务器保存的`report_markdown`，与导出原文一致；只有旧版纯JSON报告使用兼容排版。

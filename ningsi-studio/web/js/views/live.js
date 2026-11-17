@@ -10,9 +10,12 @@
  */
 
 import { api } from '../api.js';
+import { stateCheckinPanel } from './state-checkins.js';
+import { managerURL } from '../manager-link.js';
 import { describeError, toast } from '../store.js';
 import { connectSessionEvents, connectSignalStream } from '../sse.js';
 import { renderPreviewCard } from '../preview.js';
+import { attentionPredictionCard } from './attention-prediction.js';
 import {
   DASH, button, card, el, empty, fmtInt, fmtNum, fmtPercent, fmtSeconds, fmtTime,
   list, pageFrame, phaseText, pick, statusText, table,
@@ -71,13 +74,7 @@ function bandOf(score, bands) {
 export function render(container, ctx) {
   const uuid = ctx.params.get('session') || pick(ctx.store.state.currentSession, 'uuid', null);
   const actions = uuid ? [
-    button('NeuroFocus 监测台', () => {
-      const target = new URL('/neurofocus/', window.location.origin);
-      target.searchParams.set('session', uuid);
-      const token = new URLSearchParams(window.location.search).get('token');
-      if (token) target.searchParams.set('token', token);
-      window.location.assign(target.href);
-    }),
+    button('管理者平台 ↗', () => window.open(managerURL(uuid), '_blank', 'noopener,noreferrer')),
     button('流程视图', () => ctx.navigate(`#/flow?session=${uuid}`)),
     button('训练视图', () => ctx.navigate(`#/training?session=${uuid}`)),
     button('报告', () => ctx.navigate(`#/report?session=${uuid}`)),
@@ -110,6 +107,7 @@ export function render(container, ctx) {
   const local = {
     uuid,
     scores: {},
+    attentionModel: null,
     indicatorReason: '等待采集并建立个体基线',
     signal: null,
     cells: [],
@@ -141,13 +139,15 @@ export function render(container, ctx) {
   /* ---------------------------------------------------------- 页面分区 */
   const stateHost = el('div');
   const metricHost = el('div');
+  const modelHost = el('div');
   const signalHost = el('div');
   const heatHost = el('div');
   const alertHost = el('div');
   const extraHost = el('div');
   const qualityHost = el('div');
   const noticeHost = el('div');
-  host.append(stateHost, metricHost, signalHost, heatHost, alertHost, extraHost, qualityHost, noticeHost);
+  const checkinPanel = stateCheckinPanel(uuid, () => loadLive());
+  host.append(stateHost, metricHost, modelHost, signalHost, checkinPanel.node, heatHost, alertHost, extraHost, qualityHost, noticeHost);
 
   // SSE / 轮询句柄集中放这里：404 静默分支要能把它们全部停掉
   const connections = { events: null, signal: null };
@@ -168,6 +168,7 @@ export function render(container, ctx) {
   const markMissing = (error) => {
     if (local.missing) return;
     local.missing = true;
+    checkinPanel.node.hidden = true;
     stopPolling();
     connections.events?.close();
     connections.signal?.close();
@@ -191,6 +192,7 @@ export function render(container, ctx) {
   const markEnded = () => {
     if (local.missing || local.ended) return;
     local.ended = true;
+    checkinPanel.update({ open: false, model: null });
     local.signalLive = false;
     stopPolling();                      // 终态后 /live 与 /heatmap 都不再变化，停止轮询
     connections.signal?.close();        // 服务端已停止推帧，前端不再保持这条流
@@ -300,6 +302,8 @@ export function render(container, ctx) {
   };
 
   const renderMetrics = () => {
+    const modelCard = attentionPredictionCard(local.attentionModel);
+    modelHost.replaceChildren(...(modelCard ? [modelCard] : []));
     if (local.missing) return;
     metricHost.textContent = '';
     const alerts = alertsConfig();
@@ -531,6 +535,8 @@ export function render(container, ctx) {
       if (ctx.signal.aborted) return;
       const data = response.data || {};
       const session = { ...(ctx.store.state.currentSession || {}) };
+      if (data.attention_model) local.attentionModel = data.attention_model;
+      checkinPanel.update({ open: Boolean(data.checkins_open), checkins: data.checkins, model: data.affect_model || null });
       session.uuid = uuid;
       session.status = data.status;
       session.phase = data.phase;
@@ -607,6 +613,8 @@ export function render(container, ctx) {
         break;
       }
       case 'window': {
+        checkinPanel.update({ model: payload.affect_model || null });
+        local.attentionModel = payload.attention_model || null;
         const reasonLabels = {
           baseline_invalid: '睁眼基线尚未通过窗数、有效时长或可用比例审核，请检查电极并完成基线采集。',
           baseline_configuration_mismatch: '当前采样率或通道数与基线不一致，请重新建立基线。',
@@ -618,6 +626,12 @@ export function render(container, ctx) {
           flat_channel: '通道接近平直，请检查电极接触。',
           channel_span: '通道差异过大，请检查电极。',
           emg: '肌电干扰偏高，请放松面部和肩部。',
+          muscle_burst: '检测到短时高频干扰，请放松下颌和额部。',
+          ocular_transient: '检测到显著慢瞬态，请检查眼动和电极接触。',
+          electrode_step: '电极信号突跳，请保持静止并检查电极接触。',
+          motion_reference_excursion: '同步加速度显示明显活动，本窗暂停评分。',
+          motion_reference_unavailable: '所选动作参考缺失或未同步，请检查动作流名、单位及连接。',
+          emg_reference_burst: '同步肌电参考显示明显活动，本窗暂停评分。',
           eog: '低频或眼动干扰偏高，请减少眨眼和头部运动。',
         };
         local.indicatorReason = Object.keys(payload.scores || {}).length ? ''
@@ -652,6 +666,11 @@ export function render(container, ctx) {
         if (list(payload.alerts).length) renderAlerts();
         break;
       }
+      case 'model_prediction': {
+        local.attentionModel = payload;
+        renderMetrics();
+        break;
+      }
       case 'monitor': {
         const summary = payload.summary || {};
         const indicators = summary.indicators || summary;
@@ -663,6 +682,11 @@ export function render(container, ctx) {
         break;
       }
       case 'feedback': {
+        checkinPanel.update({ model: payload.affect_model || null });
+        if (payload.attention_model) {
+          local.attentionModel = payload.attention_model;
+          renderMetrics();
+        }
         local.lastFeedback = payload;
         renderExtra();
         break;
@@ -678,6 +702,7 @@ export function render(container, ctx) {
         break;
       }
       case 'phase': {
+        checkinPanel.update({ open: !local.ended && payload.state === 'running' && ['scales', 'monitor', 'training'].includes(payload.key), model: null });
         const session = { ...(ctx.store.state.currentSession || {}) };
         session.phase = payload.key;
         session.phase_label = payload.label;

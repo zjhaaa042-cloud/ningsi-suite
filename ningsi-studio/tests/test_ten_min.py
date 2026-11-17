@@ -56,6 +56,11 @@ class TenMinuteSessionTests(StudioTestCase):
         self.assertFalse(report['extras']['baseline_eyes_open']['valid'])
         self.assertIsNone(report['extras']['training']['mean_focus'])
         self.assertFalse(report['extras']['ten_min']['changes'])
+        overview = detail['result_overview']
+        self.assertFalse(overview['available'])
+        self.assertEqual(overview['summary'], {})
+        self.assertEqual(overview['quality']['windows_scored'], 0)
+        self.assertTrue(overview['reason'])
         for segment in report['extras']['ten_min']['segments']:
             self.assertFalse(segment['achieved'])
             self.assertNotIn('eeg',segment['mode_seconds'])
@@ -80,6 +85,25 @@ class TenMinuteSessionTests(StudioTestCase):
         ten = report['extras']['ten_min']
         self.assertEqual(len(ten['segments']),4)
         self.assertEqual(ten['budget_sec'],600)
+        overview = detail['result_overview']
+        self.assertTrue(overview['available'])
+        self.assertEqual(set(overview['summary']), {'focus', 'relax', 'load'})
+        self.assertGreater(overview['quality']['windows_scored'], 0)
+        self.assertEqual(overview, ten['indicator_overview'])
+        self.assertEqual(detail['indicator_summary'], {}, '训练不混入独立测评指标')
+        self.assertEqual(report['indicators']['summary'], {})
+        self.assertIn('训练阶段脑电指数（描述性）', report['report_markdown'])
+        eeg = next(x for x in report['assessment']['evidence'] if x['code']=='eeg_unavailable')
+        self.assertIn('未采集独立监测', eeg['summary'])
+        training = self.json_body(self.get('/api/sessions/'+uuid+'/training'),200)
+        self.assertEqual(training['summary']['mode'], 'ten_min')
+        self.assertEqual(training['summary']['spec'], 'neurofeedback-v3')
+        self.assertIn('训练时间统计', report['report_markdown'])
+        for segment in training['segments']:
+            stats = segment['stats']
+            self.assertEqual(stats['timing_spec'], 'neurofeedback-v3')
+            self.assertLessEqual(stats['on_target_ratio'], stats['valid_time_ratio'])
+            self.assertAlmostEqual(stats['on_target_ratio'], stats['on_target_seconds'] / 50, places=4)
         for ref in (*ten['baseline_before'].values(), *ten['baseline_after'].values()):
             self.assertLessEqual(ref['usable_seconds'],60)
         self.assertLessEqual(report['extras']['baseline_eyes_open']['quality']['usable_seconds'],60)
@@ -90,6 +114,8 @@ class TenMinuteSessionTests(StudioTestCase):
         self.assertEqual(sum(report['extras']['signal_diagnostics']['grades'].values()),
                          report['extras']['signal_diagnostics']['total'])
         self.assertIn('十分钟分级反馈',report['report_markdown'])
+        self.assertIn('SART：未采集', report['report_markdown'])
+        self.assertIn('未采集独立监测窗口', report['report_markdown'])
 
 
 if __name__ == '__main__':

@@ -106,6 +106,14 @@ def _doctor(args) -> int:
         overview = repo.overview(conn)
     row("库内统计", f"被试 {overview['subjects']} 名 / 会话 {overview['sessions']} 次"
                     f"（已完成 {overview['sessions_done']} 次）/ 预警 {overview['alerts']} 条")
+    from ningsi.models.affect import load_models
+    try:
+        models = load_models()
+        for key, label in (("stress", "压力研究模型"), ("valence", "情绪效价研究模型")):
+            row(label, f"权重校验通过 {models[key]['model_id'][:12]}")
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        row("研究模型自检失败", str(error))
+        return 1
     return 0
 
 
@@ -153,6 +161,14 @@ def _demo_session(args, app) -> int:
                       "artifacts": [{"kind": item["kind"], "path": item["path"]} for item in artifacts]},
                      ensure_ascii=False, indent=2))
     return 0 if final["status"] == "done" else 1
+
+
+def _evaluate_field(args) -> int:
+    from ningsi_studio.tools.field_validation import evaluate
+    result = evaluate(args.database)
+    # Keep redirected JSON portable across Windows console code pages.
+    print(json.dumps(result, ensure_ascii=True, indent=2, allow_nan=False))
+    return 0
 
 
 def _check(args) -> int:
@@ -266,6 +282,19 @@ def _export_ledger(args) -> int:
     return 0
 
 
+def _train_real(args) -> int:
+    from ningsi.models.human_data import files_from_paths, import_files
+    from ningsi.models.human import run_training
+    try:
+        data = import_files(files_from_paths(args.input))
+        result = run_training(data, args.output, lambda stage, fraction: None)
+    except (ValueError, OSError) as exc:
+        print(f"真人训练失败：{exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ningsi-studio",
@@ -317,9 +346,17 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--data", default=None, help="数据目录（默认 var/studio）")
     demo.set_defaults(func=_demo)
 
+    field = sub.add_parser("evaluate-field", help="只读核算现场脑电研究预测与压力、情绪自评的配对覆盖和个体内 AUROC")
+    field.add_argument("--database", required=True, type=Path, help="已有 Studio 会话库 studio.sqlite3")
+    field.set_defaults(func=_evaluate_field)
+
     ledger = sub.add_parser("export-ledger", help="从数据库重放 JSONL 审计台账")
     ledger.add_argument("--data", default=None, help="数据目录（默认 var/studio）")
     ledger.set_defaults(func=_export_ledger)
+    real = sub.add_parser("train-real", help="导入采集器导出目录，按被试训练并生成独立测试报告与模型包")
+    real.add_argument("--input", action="append", required=True, help="导出目录、包含多个导出的父目录或合并数据集；可重复")
+    real.add_argument("--output", required=True, help="新的训练成果目录（已有目录不会被覆盖）")
+    real.set_defaults(func=_train_real)
     return parser
 
 

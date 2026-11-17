@@ -105,17 +105,17 @@ def subject_session_counts(conn, subject_id: int) -> dict:
 
 def create_session(conn, subject_id: int, *, label=None, device="sim-bsense", srate=250.0,
                    channels=1, source="sim-bsense", time_scale=1.0,
-                   training_mode="quick", engine_versions=None, protocol="full") -> dict:
+                   training_mode="quick", engine_versions=None, protocol="full", eeg_calibration=None) -> dict:
     session_uuid = uuid.uuid4().hex
     stamp = utcnow()
     cursor = conn.execute(
         """INSERT INTO sessions (uuid, subject_id, label, device, srate, channels, source,
                                  time_scale, training_mode, protocol, status, phase, progress,
-                                 engine_versions, started_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'qc', 0.0, ?, ?, ?)""",
+                                 engine_versions, started_at, created_at, eeg_calibration)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'qc', 0.0, ?, ?, ?, ?)""",
         (session_uuid, subject_id, label, device, srate, channels, source,
          float(time_scale), training_mode, str(protocol or "full"), _dump(engine_versions),
-         stamp, stamp),
+         stamp, stamp, _dump(eeg_calibration) if eeg_calibration is not None else None),
     )
     return get_session_pk(conn, int(cursor.lastrowid))
 

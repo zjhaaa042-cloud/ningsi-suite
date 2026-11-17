@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from ningsi import config
 from ningsi.assessment.joint import assess as joint_assess
 from ningsi.assessment.report import SessionReport
@@ -13,12 +15,28 @@ def eeg_summary(*, baseline, quality, indicator_summary) -> dict:
         item = (indicator_summary or {}).get(name) or {}
         return item.get("mean")
 
+    values = {name: mean_of(name) for name in ("focus", "relax", "load")}
+    baseline_valid = bool(baseline is not None and baseline.valid)
+    scores_valid = all(isinstance(values[name], (int, float)) and math.isfinite(values[name])
+                       for name in ("focus", "load"))
+    if not baseline_valid:
+        reason = "睁眼基线不可用"
+        reason_code = "baseline_invalid"
+    elif not (quality or {}).get("windows_total") and not indicator_summary:
+        reason = "未采集独立监测阶段脑电；训练指数单独展示"
+        reason_code = "monitor_not_collected"
+    elif not scores_valid:
+        reason = "监测阶段缺少有效的专注或负荷指数"
+        reason_code = "missing_indicators"
+    else:
+        reason = ""
+        reason_code = ""
     return {
-        "available": bool(baseline is not None and baseline.valid),
+        "available": baseline_valid and scores_valid,
+        "unavailable_reason": reason,
+        "unavailable_code": reason_code,
         "valid_ratio": (quality or {}).get("valid_ratio", 0.0),
-        "focus": mean_of("focus"),
-        "relax": mean_of("relax"),
-        "load": mean_of("load"),
+        **values,
         "spec": config.INDICATOR_SPEC,
         "baseline_spec": config.BASELINE_SPEC,
     }

@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     channels        INTEGER,
     source          TEXT,                          -- 实际数据源：sim-bsense / lsl:<name>（LSL 未就绪而降级时会回写为 sim-bsense）
     time_scale      REAL NOT NULL DEFAULT 1.0,
+    eeg_calibration TEXT,
     training_mode   TEXT NOT NULL DEFAULT 'quick',
     protocol        TEXT NOT NULL DEFAULT 'full',  -- full（完整 11 步）/ short（短协议：去掉训练与模型，SART/PVT 减半）
     status          TEXT NOT NULL DEFAULT 'queued',-- queued|running|done|failed|cancelled
@@ -45,6 +46,21 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_subject ON sessions(subject_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status, created_at);
+
+CREATE TABLE IF NOT EXISTS state_checkins (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    stress INTEGER CHECK(stress BETWEEN 0 AND 10),
+    valence INTEGER CHECK(valence BETWEEN 0 AND 10),
+    source_kind TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    t_sec REAL NOT NULL,
+    eeg_context TEXT,
+    CHECK(stress IS NOT NULL OR valence IS NOT NULL),
+    UNIQUE(session_id, request_id)
+);
 
 -- 阶段运行记录：每个阶段一行，带口径留痕与错误
 CREATE TABLE IF NOT EXISTS runs (

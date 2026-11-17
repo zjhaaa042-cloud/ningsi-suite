@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 from ningsi import config
 from ningsi.signal.baseline import Baseline, can_compare
@@ -41,12 +42,38 @@ class Segment:
     hold_sec: float
     samples: list = field(default_factory=list)   # [(t, focus_score)]
     excluded_windows: int = 0
+    interruptions: list = field(default_factory=list)  # 无效反馈时间点，绝不以零分替代
 
     def stats(self) -> dict:
-        values = [value for _, value in self.samples]
+        events = sorted([(float(t), float(v)) for t, v in self.samples
+                         if math.isfinite(t) and math.isfinite(v) and 0 <= t < self.duration_sec]
+                        + [(float(t), None) for t in self.interruptions
+                           if math.isfinite(t) and 0 <= t < self.duration_sec],
+                        key=lambda item: item[0])
+        values = [value for _, value in events if value is not None]
+        valid_seconds = target_seconds = 0.0
+        for index, (timestamp, value) in enumerate(events):
+            # A value describes at most the next nominal update interval.
+            # Invalid events stop that interval; gaps are never interpolated.
+            right = min(timestamp + config.STEP_SEC, self.duration_sec,
+                        events[index + 1][0] if index + 1 < len(events) else self.duration_sec)
+            seconds = max(0.0, right - max(0.0, timestamp))
+            if value is not None:
+                valid_seconds += seconds
+                if value >= self.target:
+                    target_seconds += seconds
+        duration = max(0.0, self.duration_sec)
+        timing = {"valid_seconds": round(valid_seconds, 4),
+                  "on_target_seconds": round(target_seconds, 4),
+                  "valid_time_ratio": round(valid_seconds / duration, 4) if duration else 0.0,
+                  "on_target_ratio": round(target_seconds / duration, 4) if duration and values else None,
+                  "on_target_valid_ratio": round(target_seconds / valid_seconds, 4) if valid_seconds else None,
+                  "coverage_sufficient": bool(duration and valid_seconds / duration >= config.TRAINING["min_coverage_ratio"]),
+                  "timing_spec": config.TRAINING_SPEC}
         if not values:
-            return {"mean": 0.0, "on_target_ratio": 0.0, "volatility": 0.0, "n": 0,
-                    "achieved": False, "max_hold_sec": 0.0, "current_hold_sec": 0.0}
+            return {"mean": None, "volatility": None, "n": 0,
+                    "achieved": False, "max_hold_sec": 0.0, "current_hold_sec": 0.0,
+                    "on_target_sample_ratio": None, **timing}
         mean = sum(values) / len(values)
         if len(values) > 1:
             volatility = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** 0.5
@@ -56,8 +83,8 @@ class Segment:
         current_hold = max_hold = 0.0
         previous = None
         previous_on_target = False
-        for timestamp, value in self.samples:
-            if value >= self.target:
+        for timestamp, value in events:
+            if value is not None and value >= self.target:
                 delta = timestamp - previous if previous is not None else 0.0
                 if previous_on_target and 0 < delta <= config.STEP_SEC * 1.5:
                     current_hold += delta
@@ -66,15 +93,16 @@ class Segment:
                 max_hold = max(max_hold, current_hold)
             else:
                 current_hold = 0.0
-            previous, previous_on_target = timestamp, value >= self.target
+            previous, previous_on_target = timestamp, value is not None and value >= self.target
         return {
             "mean": round(mean, 4),
-            "on_target_ratio": round(on_target / len(values), 4),
+            "on_target_sample_ratio": round(on_target / len(values), 4),
             "volatility": round(volatility, 4),
             "n": len(values),
             "max_hold_sec": round(max_hold, 4),
             "current_hold_sec": round(current_hold, 4),
             "achieved": max_hold >= self.hold_sec,
+            **timing,
         }
 
     def as_dict(self) -> dict:
@@ -84,6 +112,7 @@ class Segment:
             "target": round(self.target, 4),
             "hold_sec": self.hold_sec,
             "excluded_windows": self.excluded_windows,
+            "interruptions": list(self.interruptions),
             "stats": self.stats(),
         }
 
@@ -100,7 +129,7 @@ class NeurofeedbackSession:
     rationale: str = ""
     baseline_before: dict = field(default_factory=dict)
     baseline_after: dict = field(default_factory=dict)
-    spec: str = "neurofeedback-v2"
+    spec: str = config.TRAINING_SPEC
 
     def plan(self) -> dict:
         return dict(config.TRAINING[self.mode])
@@ -110,17 +139,18 @@ class NeurofeedbackSession:
         settings = config.TRAINING
         step = settings["target_step"]
         target, hold = self.target, self.hold_sec
-        if stats.get("n", 0) == 0:
+        if not stats.get("coverage_sufficient"):
             return target
-        if stats["on_target_ratio"] >= settings["on_target_raise"] and stats["volatility"] <= settings["volatility_high"]:
+        ratio = stats["on_target_valid_ratio"]
+        if stats["achieved"] and ratio >= settings["on_target_raise"] and stats["volatility"] <= settings["volatility_high"]:
             target = clamp(target + step, settings["target_min"], settings["target_max"])
             self.hold_sec = min(self.hold_sec + 2.0, 20.0)
-        elif stats["on_target_ratio"] < settings["on_target_lower"] or stats["volatility"] > settings["volatility_high"]:
+        elif ratio < settings["on_target_lower"] or stats["volatility"] > settings["volatility_high"]:
             target = clamp(target - step, settings["target_min"], settings["target_max"])
             self.hold_sec = max(self.hold_sec - 2.0, 6.0)
         return target
 
-    def add_segment(self, samples, duration_sec: float, excluded_windows: int = 0) -> Segment:
+    def add_segment(self, samples, duration_sec: float, excluded_windows: int = 0, interruptions=None) -> Segment:
         segment = Segment(
             index=len(self.segments) + 1,
             duration_sec=float(duration_sec),
@@ -128,6 +158,7 @@ class NeurofeedbackSession:
             hold_sec=self.hold_sec,
             samples=[(float(t), float(v)) for t, v in samples],
             excluded_windows=int(excluded_windows),
+            interruptions=list(interruptions or []),
         )
         self.segments.append(segment)
         self.target = self.next_target(segment.stats())
@@ -135,8 +166,15 @@ class NeurofeedbackSession:
 
     def summary(self, baseline_before: Baseline | None = None, baseline_after: Baseline | None = None) -> dict:
         stats = [segment.stats() for segment in self.segments]
-        means = [s["mean"] for s in stats]
-        change = round(means[-1] - means[0], 4) if len(means) > 1 else 0.0
+        # Missing segments are retained in the record but are not zero scores.
+        # Keep the existing equal weighting of segments that contain data.
+        usable_stats = [s for s in stats if s["n"] > 0]
+        means = [s["mean"] for s in usable_stats]
+        duration = sum(segment.duration_sec for segment in self.segments)
+        valid_seconds = sum(s["valid_seconds"] for s in stats)
+        target_seconds = sum(s["on_target_seconds"] for s in stats)
+        change = (round(stats[-1]["mean"] - stats[0]["mean"], 4)
+                  if len(stats) > 1 and stats[0]["n"] > 0 and stats[-1]["n"] > 0 else None)
         comparable, reason = (True, "no_baseline")
         if baseline_before is not None and baseline_after is not None:
             comparable, reason = can_compare(baseline_before, baseline_after.srate, baseline_after.channels, baseline_after.device)
@@ -150,9 +188,14 @@ class NeurofeedbackSession:
             "target_rationale": self.rationale,
             "initial_target": round(self.target, 4) if not self.segments else self.segments[0].target,
             "final_target": round(self.target, 4),
-            "mean_focus": round(sum(means) / len(means), 4) if means else 0.0,
-            "on_target_ratio": round(sum(s["on_target_ratio"] for s in stats) / len(stats), 4) if stats else 0.0,
-            "volatility": round(sum(s["volatility"] for s in stats) / len(stats), 4) if stats else 0.0,
+            "mean_focus": round(sum(means) / len(means), 4) if means else None,
+            "on_target_ratio": round(target_seconds / duration, 4) if duration and usable_stats else None,
+            "valid_time_ratio": round(valid_seconds / duration, 4) if duration else 0.0,
+            "on_target_valid_ratio": round(target_seconds / valid_seconds, 4) if valid_seconds else None,
+            "valid_seconds": round(valid_seconds, 4),
+            "on_target_seconds": round(target_seconds, 4),
+            "volatility": (round(sum(s["volatility"] for s in usable_stats) / len(usable_stats), 4)
+                           if usable_stats else None),
             "first_to_last_change": change,
             "baseline_comparable": comparable,
             "baseline_comparability": reason,

@@ -68,7 +68,7 @@ export async function render(container, ctx) {
   statusSelect.value = view.status;
 
   const fieldSelect = el('select', { id: 'history-field' });
-  for (const [value, text] of [['focus', '专注度'], ['relax', '放松度'], ['load', '认知负荷']]) {
+  for (const [value, text] of [['focus', '专注度'], ['relax', '放松度'], ['load', '认知负荷'], ['stress', '当前压力自评（0–10 分）']]) {
     fieldSelect.append(el('option', { value, text }));
   }
   fieldSelect.value = view.field;
@@ -99,7 +99,7 @@ export async function render(container, ctx) {
       view.period = periodSelect.value;
       applyFilters();
     }),
-  ]), { sub: '趋势只聚合"可比"记录：设备、采样率或通道数变化会被排除（可比性保护）' });
+  ]), { sub: '可按被试选择趋势。脑电指标按设备配置筛选，压力自评取现场会话中本人填写的分数。' });
   host.append(filterCard);
 
   /* -------------------------------------------------------- 会话表格 */
@@ -217,8 +217,8 @@ export async function render(container, ctx) {
         series: ['value'],
         colors: [SERIES_COLORS[0]],
         min: 0,
-        max: 1,
-        percent: true,
+        max: view.field === 'stress' ? 10 : 1,
+        percent: view.field !== 'stress',
         label: '跨会话趋势折线图',
       });
       trendHost.append(chartHost);
@@ -227,7 +227,8 @@ export async function render(container, ctx) {
         { title: '均值', align: 'right', render: (row) => fmtNum(row.value, 3) },
       ], points));
     } else {
-      trendHost.append(empty('暂无趋势点（会话尚未完成，或因跨设备不可比被排除）。'));
+      trendHost.append(empty(view.field === 'stress'
+        ? '暂无已完成现场会话的压力自评。' : '暂无趋势点（会话尚未完成，或因跨设备不可比被排除）。'));
     }
     if (data.note) {
       trendHost.append(el('p', { class: 'muted', text: `不可比说明：${data.note}` }));

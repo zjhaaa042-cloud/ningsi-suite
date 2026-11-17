@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import threading
@@ -32,7 +33,7 @@ from ningsi_studio.domain import assessment as assessment_domain
 from ningsi_studio.domain import behavior as behavior_domain
 from ningsi_studio.domain import export as export_domain
 from ningsi_studio.domain import indicators as indicators_domain
-from ningsi_studio.domain import model_training, scales as scales_domain
+from ningsi_studio.domain import model_training, scales as scales_domain, state_checkins, eeg_units
 from ningsi_studio.domain import training as training_domain
 from ningsi_studio.http.sse import EventBus
 from ningsi_studio.settings import Settings
@@ -102,6 +103,14 @@ class SessionRuntime:
         self.diagnostic_started = time.monotonic()
         self.artifacts: dict[str, Path] = {}
         self.summary: dict = {}
+        self.human_model = None
+        self.human_predictor = None
+        self.human_model_error = None
+        self.latest_model_prediction = None
+        self.affect_snapshot = None
+        self.attention_predictions = []
+        self._last_attention_tick = 0.
+        self._attention_tick_phase = None
 
         # 交互状态
         self.sart_task = None
@@ -246,6 +255,15 @@ class SessionRuntime:
             # 没有脑机信号就不使用仿真，直接如实报"无信号"）。
             raise RuntimeError("会话没有指定数据源：请新建会话并选择设备 / 数据源"
                                "（实时设备填 lsl:<流名称>；仅演示时显式选仿真源 sim-bsense）")
+        from ningsi_studio.domain.human_models import load_active
+        try:
+            self.human_model = load_active(self.settings.data_dir)
+            if self.human_model is not None:
+                from ningsi_studio.core.human_inference import HumanAttentionPredictor
+                self.human_predictor = HumanAttentionPredictor(self.human_model)
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            self.human_model_error = str(exc)
+            self.human_predictor = None
         try:
             self.source = build_source(
                 device,
@@ -255,12 +273,29 @@ class SessionRuntime:
                 # 真实流正常在推时样本是毫秒级到达的；8 秒足够，且能让
                 # "流在但没数据"的情况在 HTTP 请求里尽快失败（不拖到 15 秒）。
                 ready_timeout=8.0,
+                **({"research_timing": True} if self.human_predictor is not None else {}),
             )
         except Exception as exc:  # noqa: BLE001 - 不再降级为仿真：没有真实信号就如实失败
             self.source = None
             self.device_error = str(exc)
             raise RuntimeError(f"无信号：数据源 {device} 不可用（{exc}）") from exc
         self.device_error = None
+        self.eeg_calibration = json.loads(self.session["eeg_calibration"] or "null")
+        if self.eeg_calibration:
+            eeg_units.verify_descriptor(self.eeg_calibration, self.source.engine.descriptor_dict())
+            self.source.engine.operator_eeg_scale_to_uv = self.eeg_calibration["scale_to_uv"]
+        if self.human_predictor is not None and self.source.kind == "lsl":
+            try:
+                profile = self.human_predictor.match_profile(self.source.engine.descriptor_dict())
+                if self.eeg_calibration and profile["scale_to_uv"] != self.eeg_calibration["scale_to_uv"]:
+                    self.human_predictor = None
+                    raise ValueError("device_channels_units_mismatch")
+                # Baseline/legacy indicators and the research model must agree on
+                # physical amplitude units; the atomic model snapshot stays raw.
+                self.source.engine.research_scale_to_uv = float(profile["scale_to_uv"])
+                self.source.engine.research_profile = profile
+            except ValueError as exc:
+                self.human_model_error = str(exc)
 
     @property
     def scale(self) -> float:
@@ -297,6 +332,7 @@ class SessionRuntime:
         started = time.time()
         run_id = None
         with store.connect(self.db_path) as conn:
+            self.affect_snapshot = None
             run_id = repo.start_run(conn, self.session["id"], key)
             repo.update_session(conn, self.uuid, phase=key,
                                 progress=phase_module.progress_for(key, 0.0, self.protocol))
@@ -355,9 +391,91 @@ class SessionRuntime:
         except Exception:  # noqa: BLE001
             pass
 
+    def _predict_attention(self, phase):
+        prediction = None
+        if getattr(self, "human_predictor", None) is not None:
+            try:
+                prediction = self.human_predictor.update(
+                    self.source.engine, phase, baseline_valid=bool(self.engine.baseline is not None and self.engine.baseline.valid))
+            except (ValueError, TypeError, KeyError, IndexError, FloatingPointError) as exc:
+                prediction = self.human_predictor.unavailable(f"model_input_error: {exc}")
+        elif getattr(self, "human_model_error", None):
+            prediction = {"available": False, "reason": self.human_model_error}
+        self.latest_model_prediction = prediction
+        if prediction is not None:
+            self.attention_predictions.append({"phase": phase,
+                "elapsed_sec": round(time.monotonic() - self.diagnostic_started, 3), "prediction": prediction})
+        return prediction
+
+    def _tick_attention_model(self, phase):
+        """Read raw history during SART, without generating synthetic analysis steps."""
+        if self.human_predictor is None:
+            return
+        now = time.monotonic()
+        if phase == self._attention_tick_phase and now - self._last_attention_tick < 2.:
+            return
+        self._attention_tick_phase, self._last_attention_tick = phase, now
+        self.bus.publish("model_prediction", self._predict_attention(phase))
+
+    def elapsed_now(self):
+        return round(time.monotonic() - self.diagnostic_started, 3)
+
+    def current_affect(self):
+        snapshot = self.affect_snapshot
+        if snapshot and self.elapsed_now() - snapshot["elapsed_sec"] <= 4:
+            return snapshot["prediction"]
+        return None
+
+    def checkin_context(self, phase):
+        snapshot = self.affect_snapshot
+        if (snapshot and snapshot["phase"] == phase and snapshot["quality_ok"]
+                and self.elapsed_now() - snapshot["elapsed_sec"] <= 4):
+            return snapshot
+        return None
+
+    def _affect_observation(self, step, phase):
+        if phase not in ("monitor", "training"):
+            return None
+        hardware = getattr(self.source, "is_real", False)
+        descriptor = self.source.engine.descriptor_dict() if hardware else {}
+        from ningsi.signal.live_artifacts import voltage_scales
+        labels = descriptor.get("channel_labels") or []
+        indices = eeg_units.eeg_indices(descriptor)
+        channels = [labels[i] if i < len(labels) else "" for i in indices]
+        reason = ""
+        if not hardware or self.scale != 1:
+            reason = "simulation_source"
+        elif not step.usable:
+            reason = "quality_rejected"
+        else:
+            units = descriptor.get("declared_units") or []
+            scales = voltage_scales(units, descriptor.get("channel_count") or len(labels), None)
+            calibration = getattr(self, "eeg_calibration", None)
+            if calibration:
+                try:
+                    eeg_units.verify_descriptor(calibration, descriptor)
+                except ValueError:
+                    reason = "unconfirmed_input_units"
+            if len(indices) != step.window.channels or (not calibration and any(scales[i] is None for i in indices)):
+                reason = "unconfirmed_input_units"
+        if reason:
+            prediction = {key: {"available": False, "score": None, "reason": reason,
+                                "label": "", "model_id": None} for key in ("stress", "valence")}
+        else:
+            from ningsi.models.affect import predict_window
+            prediction = predict_window(step.window, channels, self.source.srate)
+        self.affect_snapshot = {"phase": phase, "elapsed_sec": self.elapsed_now(),
+            "quality_ok": not reason, "prediction": prediction, "channel_labels": channels,
+            "srate": step.window.srate, "window_index": step.index,
+            "eeg_calibration": getattr(self, "eeg_calibration", None),
+            "relative_band_powers": dict(step.window.rel) if not reason else {}}
+        return prediction
+
     def _record_diagnostic(self, step, phase: str) -> None:
         """诊断单独留存，不改变指标序列、预警或反馈节拍。"""
+        step.attention_model = self._predict_attention(phase) or {}
         diagnostic = step.payload(include_signal=False)
+        diagnostic["affect_model"] = self._affect_observation(step, phase)
         diagnostic.update(phase=phase, source_kind=self.source.kind,
                           elapsed_sec=round(time.monotonic() - self.diagnostic_started, 3))
         if self.source.kind == "lsl":
@@ -366,12 +484,13 @@ class SessionRuntime:
 
     def _publish_window(self, step, *, phase: str, include_signal: bool) -> None:
         """推送一窗结果。总进度由 `_progress()` 按窗序号推进，这里不再重复计算。"""
+        self._record_diagnostic(step, phase)
         payload = step.payload(include_signal=include_signal)
+        payload["affect_model"] = self.current_affect()
         payload["phase"] = phase
         payload["source_kind"] = self.source.kind
         if self.source.kind == "lsl":
             payload["state"] = "unknown"  # 采集指令不是被试真实状态标签
-        self._record_diagnostic(step, phase)
         self.bus.publish("window", payload)
         try:
             with store.connect(self.db_path) as conn:
@@ -412,13 +531,13 @@ class SessionRuntime:
             "protocol": self.protocol,
             "protocol_label": phase_module.PROFILES[self.protocol]["label"],
             "protocol_note": phase_module.PROFILES[self.protocol]["caveat"],
-            "phases": phase_module.as_list(self.protocol),
+            "phases": phase_module.as_list(self.protocol, self.session["training_mode"]),
             "engine_versions": {"spectrum": config.SPECTRUM_SPEC,
                                 "indicator": config.INDICATOR_SPEC,
                                 "baseline": config.BASELINE_SPEC,
                                 "assessment": config.LABEL_SPEC,
                                     "preprocess": "preprocess-v2",
-                                    "training": "neurofeedback-v2"},
+                                    "training": config.TRAINING_SPEC},
         })
         if self.source.kind != "lsl":
             self.bus.publish("notice", {
@@ -430,6 +549,12 @@ class SessionRuntime:
         self.engine = indicators_domain.WindowEngine(
             self.source.engine, self.source.srate, device=self.source.device
         )
+        if self.human_model is not None:
+            from ningsi.models.human import write_json
+            model_path = self.runs_root / "models" / "attention_model.json"
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            write_json(model_path, self.human_model)
+            self.artifacts["attention_model"] = model_path
 
         if self.protocol == "ten_min":
             return self._run_ten_min(auto)
@@ -575,17 +700,26 @@ class SessionRuntime:
         """按时间倍率逐窗采集静息基线；返回 (Baseline, steps)。"""
         total = max(1, int(round(float(seconds) / config.STEP_SEC)))
         steps = []
+        real_source = self.source.kind == "lsl"
+        phase_start = time.monotonic() if real_source else self.engine.t
         for index in range(total):
             self._check_cancel()
+            # Read at the end of each scheduled interval. The first rolling
+            # window still straddles the phase start and is diagnostic only.
+            if real_source:
+                self._sleep_real(max(0.0, phase_start + (index + 1) * config.STEP_SEC * self.scale
+                                     - time.monotonic()))
             step = self.engine.step(state)
-            if self.source.kind == "lsl" and step.window is not None:
+            if real_source and step.window is not None:
                 # 真实采集按经过的时间覆盖计时，禁止加速演示虚增基线时长。
                 step.window = replace(step.window, t_end=time.monotonic())
-            steps.append(step)
+            if step.window is not None and step.window.t_end - config.WINDOW_SEC >= phase_start:
+                steps.append(step)
             self._publish_window(step, phase=key, include_signal=(index % 5 == 0))
             if progress and index % 5 == 0:
                 self._progress(key, (index + 1) / total, windows_done=index + 1, windows_total=total)
-            self._sleep(config.STEP_SEC)
+            if not real_source:
+                self._sleep(config.STEP_SEC)
         windows = [step.window for step in steps if step.window is not None]
         from ningsi.signal.baseline import build_baseline as engine_baseline
         baseline = engine_baseline(windows, device=self.source.device, srate=self.source.srate,
@@ -691,12 +825,14 @@ class SessionRuntime:
             # 下发给前端的是**折算过时间倍率的真实秒数**：前端定时器走的是真实时间，
             # 而演示模式（time_scale<0.2）希望整体节奏跟着快起来，两边必须同一口径。
             window = max(MIN_TRIAL_WINDOW, SART_TRIAL_WINDOW[phase] * self.scale)
+            trial_started = time.monotonic()
             responded, rt = self._auto_sart_response(nxt["digit"], rng,
                                                      practice=(nxt["phase"] == "practice"))
             answer = self._wait_trial("sart", {"task": "sart", **nxt}, auto=auto,
                                       fallback={"responded": responded, "rt": rt}, window=window)
             task.submit(phase=nxt["phase"], index=nxt["index"],
                         responded=schemas_bool(answer.get("responded")), rt=answer.get("rt"))
+            self._tick_attention_model("sart" if phase == "main" else "sart_practice")
             if nxt["phase"] == "main" and (nxt["index"] + 1) % 45 == 0:
                 self._progress("sart", (nxt["index"] + 1) / total,
                                trials_done=nxt["index"] + 1, trials_total=total)
@@ -704,7 +840,7 @@ class SessionRuntime:
             # 这样 Go 与 No-Go 的刺激间隔一致（反应时/变异系数才可比），
             # 也不会出现"No-Go 试次把节拍拖长一倍"的问题。window 已折算，故用 _sleep_real。
             if not auto:
-                self._sleep_real(max(0.0, window - float(answer.get("__elapsed") or 0.0)))
+                self._sleep_real(max(0.0, window - (time.monotonic() - trial_started)))
         result = task.result()
         self._persist_behavior("sart", result, task.trials_payload())
         return result
@@ -809,6 +945,8 @@ class SessionRuntime:
         interval = wall_segment / max_windows
         for index in range(int(describe["segments"])):
             self._check_cancel()
+            segment_started = time.monotonic()
+            segment_t = self.engine.t
             states = ("focused", "drowsy")
             deadline = time.time() + wall_segment
             step_index = 0
@@ -817,8 +955,11 @@ class SessionRuntime:
                 self._record_diagnostic(step, "training")
                 step_index += 1
                 score = step.focus
-                trainer.feed(score, step.t_end, usable=step.usable)
+                sample_time = ((time.monotonic() - segment_started) / self.scale
+                               if self.source.kind == "lsl" else step.t_end - segment_t - config.STEP_SEC)
+                trainer.feed(score, sample_time, usable=step.usable)
                 self.bus.publish("feedback", {
+                    "affect_model": self.current_affect(),
                     "segment": index + 1,
                     "target": trainer.target,
                     "score": None if score is None else round(score, 4),
@@ -833,8 +974,9 @@ class SessionRuntime:
             self.bus.publish("segment", segment)
             self._progress("training", (index + 1) / max(1, describe["segments"]),
                            segments_done=index + 1, segments_total=describe["segments"])
-        self.bus.publish("notice", {"level": "info", "message": "训练结束，请静息30秒，正在采集训练后基线。"})
-        baseline_after, _ = self._collect_baseline("rest", 30.0, "training", progress=False)
+        after_seconds = config.TRAINING["baseline_after_sec"]
+        self.bus.publish("notice", {"level": "info", "message": f"训练结束，请静息{after_seconds:g}秒，正在采集训练后基线。"})
+        baseline_after, _ = self._collect_baseline("rest", after_seconds, "training", progress=False)
         summary = trainer.summary(self.engine, baseline_after=baseline_after)
         summary["describe"] = describe
         return summary
@@ -860,6 +1002,12 @@ class SessionRuntime:
         root = self.runs_root
         reports = root / "reports"
         reports.mkdir(parents=True, exist_ok=True)
+        with store.read_only(self.db_path) as conn:
+            observations = state_checkins.report_data(conn, self.session["id"], self.diagnostic_windows)
+        if self.eeg_calibration:
+            observations["summary_lines"].append(
+                f"本次由操作者确认 EEG 源单位为 {self.eeg_calibration['source_unit']}，"
+                f"换算倍率为 {self.eeg_calibration['scale_to_uv']:g} µV/源单位。")
         band_z = {}
         for step in reversed(monitor["steps"]):
             candidate = step.payload().get("band_z") or {}
@@ -875,6 +1023,11 @@ class SessionRuntime:
             behavior={"sart": sart_result, "pvt": pvt_result},
             assessment=assessment_result,
             extras={
+                "state_observations": observations,
+                "eeg_calibration": self.eeg_calibration,
+                "attention_model": {"model_id": self.human_model.get("model_id") if self.human_model else None,
+                                    "latest": self.latest_model_prediction, "error": self.human_model_error,
+                                    "scope": "探针相关的任务专注/内部走神研究模型；其他阶段尚未独立验证"},
                 "signal_diagnostics": summarize_windows(self.diagnostic_windows),
                 "ten_min": getattr(self, "ten_min_result", None),
                 "device": self.source.device,
@@ -906,11 +1059,16 @@ class SessionRuntime:
                                     "baseline": config.BASELINE_SPEC,
                                     "assessment": config.LABEL_SPEC,
                                     "preprocess": "preprocess-v2",
-                                    "training": "neurofeedback-v2"},
+                                    "training": config.TRAINING_SPEC},
             },
         )
         paths = assessment_domain.write_report(report, reports, stem)
         self.artifacts.update(paths)
+        if self.human_model is not None:
+            from ningsi.models.human import write_json
+            predictions_path = reports / "attention_predictions.json"
+            write_json(predictions_path, self.attention_predictions)
+            self.artifacts["attention_predictions"] = predictions_path
 
         heatmap_path = reports / f"{stem}_heatmap.svg"
         heatmap_path.write_text(

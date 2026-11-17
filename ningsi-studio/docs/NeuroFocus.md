@@ -1,18 +1,26 @@
-# NeuroFocus 神经专注监测台
+# 凝思 Studio 管理者平台（NeuroFocus）
 
-更新：2026-10-16。支持本地 DEMO 和现有 Studio 会话的 REST/SSE 接入。沿用原生 ES Modules、SVG/Canvas 与 Python 服务。
+更新：2026-11-13。默认连接现有 Studio 后台，可在独立标签页或窗口查看检测与训练，与参与者使用的 Studio 同时打开。沿用原生 ES Modules、SVG/Canvas 与同一个 Python 服务。
 
 ## 启动与操作
 
-工作区根目录运行 `run.bat`，或 `.\run.ps1 -Action serve -NoBrowser`，访问 `http://127.0.0.1:8765/neurofocus/`。
+在仓库根目录运行 `ningsi-studio\run.bat`，启动后访问 `http://127.0.0.1:8765/`。展开左侧 **设置与管理**，点击 **管理控制台 ↗**，或直接在另一窗口打开 `http://127.0.0.1:8765/neurofocus/`。如启动器使用其他端口，两页须使用同一端口。
 
-**本地演示**：默认选中 DEMO，但不自动开始。显式开始后才生成固定种子的合成 EEG、演示分数与模拟频段。支持暂停/继续、结束、通道/窗口选择、趋势游标、波形冻结、减少动态效果和异常场景。
+**管理者后台**：
+
+- 后台会话列表每 5 秒刷新；先打开平台也可以，Studio 开始检测后自动连接首个运行中的会话。
+- 顶部展示运行会话、参与者编号、阶段、总进度、设备、等待作答提示与最近预警。多个会话可点击切换，一次查看一个会话的实时脑电、专注趋势与频段。
+- “最近会话与报告”读取后台持久化记录；报告和 Studio 操作入口均独立打开。
+- 指定会话的链接始终跟随该会话，不会在其结束后自动切换到另一位参与者。
+- 管理页隐藏到后台时仍订阅数据。暂停查看、断开监测、刷新或关闭管理页都不会取消 Studio 的检测与保存；行为任务仍在 Studio 作答。
+
+**本地演示**：在“数据与设备”显式切换为 DEMO，或用 `?source=demo` 打开。显式开始后才生成固定种子的合成 EEG、演示分数与模拟频段。支持暂停/继续、结束、通道/窗口选择、趋势游标、波形冻结、减少动态效果和异常场景。
 
 **后台接入**：
 
 1. 先在原 Studio 开始检测，明确选择 LSL 或仿真源。LSL 会话必须使用时间倍率 **1.0**。
-2. 从原“实时监测”页点击“NeuroFocus 监测台”直达；或在新页“数据与设备”选择“Studio 会话”。
-3. 服务启用鉴权时填写访问令牌，刷新后台会话，明确选择运行中的会话，再点击“开始后台监测”。深链接只选中会话，不自动记录。
+2. 从“设置与管理 → 管理控制台 ↗”或“实时监测”页的管理者平台入口独立打开；从实时监测页进入会自动连接指定会话。
+3. 服务启用鉴权时，Studio 入口沿用当前访问令牌；也可在新页“数据与设备”填写令牌。后台列表自动刷新；断开后可用“连接监测”再次连接。
 4. 波形可以先于评分出现。个体基线未建立、质量不足或数据失效时保持 `--`，不把会话汇总均值当作实时值。
 5. **暂停、结束只控制本页订阅和记录，不取消后台实验。** 后台检测与保存继续；取消实验应回到原 Studio 操作。
 6. 后台完成、取消、失败或不再运行后，关闭订阅并结束本页记录，不继续显示旧评分为实时值。
@@ -56,7 +64,9 @@ JSON 包含后台会话 ID、来源、设备/算法元数据及变化、原分�
 | `/api/sessions/{uuid}` | 来源、运行状态、来源说明 |
 | `/api/sessions/{uuid}/events` | 评分/质量 window 与终态 |
 | `/api/sessions/{uuid}/signal` | 未抽稀显示窗 |
-| `/api/sessions/{uuid}/live` | 每 2 秒检查后台是否仍运行 |
+| `/api/sessions?status=running` | 每 5 秒单独查询运行会话，避免被近期历史挤出列表 |
+| `/api/sessions` | 最近 8 次后台会话与报告入口 |
+| `/api/sessions/{uuid}/live` | 每 2 秒检查运行状态、阶段、进度、预警与等待作答 |
 
 适配层校验会话 ID、源类型、事件 ID、分析窗标识、时间新鲜度和单位。重连时旧消息不会被重新当作当前评分。两条 SSE 独立清理；错误时清除旧评分并由浏览器重试，停止时关闭流、定时器和未完成请求。
 
@@ -67,12 +77,12 @@ JSON 包含后台会话 ID、来源、设备/算法元数据及变化、原分�
 工作区根目录：
 
 ```powershell
-node ningsi/ningsi-studio/scripts/neurofocus-check.mjs
-.\run.ps1 -Action check
-.\run.ps1 -Action test
+node ningsi-studio/scripts/neurofocus-check.mjs
+.\ningsi-studio\run.ps1 -Action check
+.\ningsi-studio\run.ps1 -Action test
 ```
 
-第一条检查六个运行资产、DOM/导入契约及两组前端单元测试，生成 `verification/2026-10-16/neurofocus/static-build/` 和 SHA-256。现有项目没有 TypeScript/ESLint 工具链，不把原生语法检查称为 tsc/ESLint。
+第一条检查七个运行资产、DOM/导入契约及三组前端单元测试，生成 `var/verification/manager/static-build/` 和 SHA-256。现有项目没有 TypeScript/ESLint 工具链，不把原生语法检查称为 tsc/ESLint。
 
 模拟 LSL 测试需要 Node、Playwright、Edge 与现有 Python `.venv`：
 

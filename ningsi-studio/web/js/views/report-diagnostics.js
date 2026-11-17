@@ -1,6 +1,6 @@
 import { card, el, fmtNum, fmtPercent } from '../util.js';
 
-const labels = { amplitude: '幅值超限', eog: '低频占比偏高（眼电/漂移代理）', emg: '高频占比偏高（肌电代理）', channel_span: '通道差异过大', flat_channel: '平直通道', signal_too_short: '未满4秒', no_data: '无样本', non_finite_signal: '非有限值' };
+const labels = { amplitude: '幅值超限', eog: '低频占比偏高（眼电/漂移代理）', emg: '高频占比偏高（肌电代理）', channel_span: '通道差异过大', flat_channel: '平直通道', signal_too_short: '未满4秒', no_data: '无样本', non_finite_signal: '非有限值', electrode_step: '电极突跳或移动', ocular_transient: '显著慢瞬态', muscle_burst: '短时高频肌电代理', emg_reference_burst: '同步肌电参考活动', motion_reference_excursion: '同步加速度参考活动', motion_reference_unavailable: '动作参考缺失或未同步' };
 
 function bar(label, value, max, rejected = false) {
   const number = Number.isFinite(value) ? value : 0;
@@ -23,6 +23,15 @@ export function renderDiagnostics(report) {
   const ten = report.extras?.ten_min;
   if (ten) {
     root.append(el('h3', { text: '十分钟测试＋训练：分级利用' }), el('p', { text: ten.note }));
+    const overview = ten.indicator_overview;
+    if (overview) {
+      root.append(el('h3', { text: '训练阶段脑电指数（描述性）' }), el('p', { text: overview.note }));
+      for (const [key, label] of [['focus', '专注相关指数'], ['relax', '放松度'], ['load', '认知负荷']]) {
+        const stat = overview.summary?.[key];
+        root.append(el('p', { text: `${label}：${fmtNum(stat?.mean, 3)}（n=${stat?.n ?? 0}）` }));
+      }
+      if (overview.reason) root.append(el('p', { text: overview.reason }));
+    }
     for (const [grade, label] of [['A', '严格可用'], ['B', '受限片段可用'], ['C', '不可解释']]) root.append(bar(label, d?.grades?.[grade] || 0, total));
     root.append(el('p', { text: ten.comparison_note }));
     for (const [ch, change] of Object.entries(ten.changes || {})) root.append(el('p', { text: `通道${ch}：log(β/θ)中位数变化 ${fmtNum(change, 4)}` }));
@@ -33,6 +42,8 @@ export function renderDiagnostics(report) {
     const modes = { eeg: '探索性脑电反馈', quality: '质量反馈', guided: '固定引导' };
     for (const seg of ten.segments || []) {
       root.append(el('h3', { text: `训练第${seg.index}轮（另含10秒休息）` }));
+      if (seg.stats?.timing_spec) root.append(el('p', { text:
+        `有效时间覆盖 ${fmtPercent(seg.stats.valid_time_ratio)}；整段达标 ${fmtPercent(seg.stats.on_target_ratio)}；有效时间内达标 ${fmtPercent(seg.stats.on_target_valid_ratio)}。${seg.adaptation_reason || ''}` }));
       root.append(bar('未反馈（采样/计算）秒', seg.unobserved_seconds ?? null, 50));
       for (const [mode, seconds] of Object.entries(seg.mode_seconds || {})) root.append(bar(`${modes[mode] || mode} 秒`, seconds, 50));
     }

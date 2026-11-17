@@ -1,0 +1,119 @@
+{
+  "spec": "attlapse-healthy-fp1-minus-fp2-v1",
+  "source_doi": "10.5281/zenodo.23592484",
+  "cohort": "healthy_controls",
+  "attribution": "Horáková, Weibel, Tissot, Pham, Costache & Bonnefond. ATTLAPSE v2.0.1 (CC BY 4.0).",
+  "montage": [
+    "Fp1",
+    "Fp2"
+  ],
+  "derivation": "Fp1 minus Fp2, after quality checks on both source channels",
+  "source_preprocessing": "Source only: subtract the least-squares projection onto centered bipolar vertical and horizontal EOG, per EEG channel, using [-18,-2] seconds per probe; then apply the unmodified quality and spectral pipeline. No answer or post-probe data used. Live Capture uses physical QC without EOG channels.",
+  "labels": {
+    "0": "on_task",
+    "1": "spontaneous_or_deliberate_mind_wandering"
+  },
+  "threshold": 0.5,
+  "parameters": {
+    "mean": [
+      0.08683797717670297,
+      0.07274712570203597,
+      0.3715168594695844,
+      1.6186778989493285,
+      -1.7963480233442204,
+      0.17767012439489177
+    ],
+    "scale": [
+      0.05097169119213894,
+      0.04867769778859806,
+      0.1484057519154781,
+      1.1176971570855152,
+      1.0490321845361585,
+      0.5184927575400488
+    ],
+    "weights": [
+      0.43086977745489735,
+      -0.8619614568729169,
+      -0.3348319993799925,
+      0.26731057132551883,
+      -0.2078926209528508,
+      -0.15561686088949675
+    ],
+    "bias": -0.025230351238530676
+  },
+  "l2": 0.01,
+  "feature_contract": {
+    "spec": "capture-probe-6features-v1",
+    "feature_names": [
+      "rel_theta",
+      "rel_alpha",
+      "rel_beta",
+      "log_beta_theta",
+      "log_alpha_beta",
+      "log_theta_alpha"
+    ],
+    "window_sec": 4,
+    "step_sec": 2,
+    "context_sec": 6,
+    "lookback_sec": [
+      -12,
+      -2
+    ],
+    "min_windows": 3,
+    "min_seconds": 6,
+    "min_valid_ratio": 0.6,
+    "min_srate": 100,
+    "max_gap_sec": 0.1,
+    "max_rate_error": 0.05,
+    "aggregation": "arithmetic_mean_of_fully_contained_valid_windows"
+  },
+  "source_rate_hz": 512,
+  "baseline_policy": "Source training uses absolute spectral features with no verified Ningsi baseline; live scoring requires a valid local calibration.",
+  "intended_use": "Blinded research score at scheduled SART probes; target-device performance and calibration unverified.",
+  "training_participants": [
+    "sub-T07",
+    "sub-T13",
+    "sub-T14",
+    "sub-T19",
+    "sub-T27",
+    "sub-T28",
+    "sub-T29",
+    "sub-T31",
+    "sub-T34",
+    "sub-T35",
+    "sub-T36",
+    "sub-T37",
+    "sub-T39",
+    "sub-T40",
+    "sub-T41",
+    "sub-T42",
+    "sub-T43",
+    "sub-T47",
+    "sub-T52",
+    "sub-T54",
+    "sub-T57",
+    "sub-T58",
+    "sub-T59",
+    "sub-T60",
+    "sub-T62",
+    "sub-T63"
+  ],
+  "training_probes": 171,
+  "feature_rows_sha256": "f04526eeed32968780f0f416fdb6257a95044002079e16d0c5537396d6b14b41",
+  "montage_fingerprint": "4c875da713a4f018999a1a0d2c8803c174d61bf95d3ee4328fc57e32391c7bff",
+  "engine_fingerprint": {
+    "config.py": "aff5ca42a5e0f56cf62a577d8167a3ecb7b27c01be9954d12285351c4b48f55f",
+    "signal/preprocess.py": "05d2afe7e7f9f61e02f75e58322f2f8ced1c64c7e81710efb98b3a21db271a22",
+    "signal/window.py": "c0caf2288266b6eab7434563210cce3787fd732327c8d48cffc5cac0aa695c8a",
+    "signal/artifacts.py": "06c35ce7ce778de1b734f21b92ab68e6d359d1c69f27f07e1e19e7bcf06af175",
+    "signal/spectrum.py": "9cdf183daa326d198885c1d3d4d8111e06662455617142a08c1d015918a768b7",
+    "signal/bands.py": "b44ad8ecc4bf7021b91787d097fbe3d68c021d98542b83fb26db5255b155dc0c",
+    "signal/baseline.py": "cb745f979baf82fe892d2d550caa62cabb7ee8dff4ee84a58f5d6df2c57f15d3",
+    "signal/indicators.py": "4820bb85106f5abfd3e39494a896b8133b5265deff5e0daea13be33158dd4ed1"
+  },
+  "implementation_fingerprint": {
+    "models/research_features.py": "4fe70c7b7f8574b774d29e8b41e85a7aad2953d0fc98ae92217669f89347be1b",
+    "models/logistic.py": "1bcfc0dc8c3f37581a6252283be15573c30b925c47fac02ceb572bcd6a1719f6"
+  },
+  "model_id": "2397eeec4018aa914c0b7fc8906a197477388a54b65762018f1d48bb06fb9347"
+}

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from ningsi import config
 
 # 推进方式：与参考工程 Step.advance 的 timed / operator / form 对应
 ADVANCE_AUTO = "auto"          # 后端按时间自动推进（被试只需保持状态）
@@ -54,16 +55,16 @@ class Phase:
 PHASES: tuple[Phase, ...] = (
     Phase(
         "qc", "设备质检", 0.04, False,
-        "4 个静息窗 + 1 个伪迹窗，逐窗质检并统计不可用原因",
+        "逐窗启动质检，统计严格合格窗与不可用原因；仿真可包含测试伪迹",
         headline="先坐好别动，正在检查信号质量",
         details=(
             "保持自然坐姿、双手放松，尽量不说话、不吞咽大动作",
             "这一阶段只判断信号能不能用，不出指标",
         ),
         duration_sec=24.0,
-        next_hint="信号可用窗比例达标就进入静息基线采集",
+        next_hint="随后进入静息基线；是否可评分还需核对基线与后续窗口",
         auto_note="质检由服务端自动完成，只需等待",
-        why="这段数据能不能用全靠这一步判定：报告里的「可用窗比例」与「质检是否达标」来自它；不达标时后面所有指标都会标注为需谨慎解释。",
+        why="这里只检查最初的信号，不能代替基线、监测或训练阶段的质量判定。低质量数据仍保留行为与采集诊断结果。",
     ),
     Phase(
         "baseline_open", "睁眼基线", 0.10, False,
@@ -253,7 +254,9 @@ PHASE_BY_KEY["practice"] = Phase("practice", "PVT练习（不计分）", .05, Tr
 PHASE_BY_KEY["baseline_after"] = Phase("baseline_after", "训练后睁眼采集", .1,
     headline="保持睁眼，安静坐一分钟", duration_sec=60)
 TEN_DURATIONS = {"qc": 30, "baseline_open": 60, "practice": 30, "pvt": 180,
-                 "training": 240, "baseline_after": 60, "assessment": 0, "report": 0}
+                 "training": config.TRAINING["ten_min"]["segments"] *
+                             (config.TRAINING["ten_min"]["segment_sec"] + config.TRAINING["ten_min"]["rest_sec"]),
+                 "baseline_after": 60, "assessment": 0, "report": 0}
 PROFILES[PROFILE_TEN] = {
     "key": PROFILE_TEN, "label": "十分钟测试＋训练", "summary": "质检、睁眼基线、PVT练习和3分钟测试、4轮训练、训练后采集",
     "phases": tuple(TEN_DURATIONS), "pvt_duration_sec": 180.0, "sart_sec_estimate": 0,
@@ -297,7 +300,16 @@ def progress_for(key: str, within: float = 0.0, profile: object = PROFILE_FULL) 
     return round(done / total, 4)
 
 
-def as_list(profile: object = PROFILE_FULL) -> list[dict]:
+def training_plan(profile=PROFILE_FULL, mode="quick") -> dict:
+    ten = normalize_profile(profile) == PROFILE_TEN
+    plan = dict(config.TRAINING["ten_min" if ten else (mode if mode in ("quick", "full") else "quick")])
+    plan.update(rest_sec=plan.get("rest_sec", 0),
+                baseline_after_sec=0 if ten else config.TRAINING["baseline_after_sec"],
+                min_wall_segment_sec=0 if ten else 4)
+    return plan
+
+
+def as_list(profile: object = PROFILE_FULL, training_mode="quick") -> list[dict]:
     """按协议档给出阶段定义；**时长按档案校正**（SART/PVT 在短协议下会变）。
 
     界面用这个时长显示"预计"，所以不能直接回 phases.py 里的名义值——短协议下
@@ -309,16 +321,28 @@ def as_list(profile: object = PROFILE_FULL) -> list[dict]:
         row = phase.as_dict()
         if phase.key == "sart":
             row["duration_sec"] = round(float(item.get("sart_sec_estimate") or row["duration_sec"]), 1)
-            row["details"] = list(row["details"]) + [
-                f"本次协议：{item['sart_practice_trials']} 练习 + {item['sart_trials']} 正式试次"
-                f"（其中 {item['sart_nogo_trials']} 个 No-Go）"
+            row["description"] = f"{item['sart_practice_trials']}练习＋{item['sart_trials']}正式试次，{item['sart_nogo_trials']}个No-Go"
+            row["next_hint"] = f"随后进行{item['pvt_duration_sec']:g}秒PVT任务"
+            row["details"] = [
+                f"{item['sart_practice_trials']}个练习试次不计分，用来熟悉节奏",
+                f"正式{item['sart_trials']}试次，其中{item['sart_nogo_trials']}个是3（不要按键）",
+                "尽量又快又准；按键记录反应时",
             ]
         elif phase.key == "pvt":
             row["duration_sec"] = float(item["pvt_duration_sec"])
+            row["description"] = f"{item['pvt_duration_sec']:g}秒，慢反应率与中位反应时"
+            row["details"] = [f"测试持续{item['pvt_duration_sec']:g}秒，中间会有长短不一的等待",
+                              "刺激出现后尽快按空格；出现前按键会记为抢答",
+                              "抢答率和有效反应覆盖均参与任务有效性检查；门槛待验证"]
+        elif phase.key == "training":
+            plan = training_plan(profile, training_mode)
+            row["training_plan"] = plan
+            row["duration_sec"] = plan["segments"] * (plan["segment_sec"] + plan["rest_sec"]) + plan["baseline_after_sec"]
+            row["description"] = f"{plan['segments']}段，每段{plan['segment_sec']:g}秒"
         if item["key"] == PROFILE_TEN:
             row["duration_sec"] = TEN_DURATIONS[phase.key]
             if phase.key == "baseline_open":
-                row.update(headline="保持睁眼，安静坐一分钟", details=["固定60秒，不因基线不足追加时间"], next_hint="接下来练习PVT")
+                row.update(headline="保持睁眼，安静坐一分钟", description="睁眼静息60秒，建立个人稳健基线", details=["固定60秒，不因基线不足追加时间"], next_hint="接下来练习PVT")
             if phase.key == "training":
                 row.update(headline="按当前反馈模式练习，低质量时跟随固定节奏", details=["4轮，每轮50秒训练＋10秒休息", "脑电／质量／固定引导自动切换；受限信号不发注意力奖励"], next_hint="随后静息一分钟")
             if phase.key == "qc":
@@ -336,22 +360,16 @@ def profiles_as_list() -> list[dict]:
     full = PROFILES[PROFILE_FULL]
     for key in PROFILES:
         item = PROFILES[key]
-        active = [PHASE_BY_KEY[name] for name in item["phases"]]
-        # 总时长按**实际**行为任务秒数算：SART 的阶段名义时长（420s）是完整协议的值，
-        # 短协议下会缩到 ~208s，直接用名义值会少报节省。
-        total = sum(phase.duration_sec for phase in active if phase.key != "sart")
-        total += float(item.get("sart_sec_estimate") or 0.0)
-        total -= PHASE_BY_KEY["pvt"].duration_sec
-        total += float(item["pvt_duration_sec"])
+        totals = {mode: round(sum(row["duration_sec"] for row in as_list(key, mode)), 1)
+                  for mode in ("quick", "full")}
+        full_total = sum(row["duration_sec"] for row in as_list(PROFILE_FULL))
         rows.append({
             **{name: value for name, value in item.items() if name != "phases"},
             "phases": list(item["phases"]),
             "phase_count": len(item["phases"]),
-            "total_sec": 600 if key == PROFILE_TEN else round(total, 1),
+            "total_sec": totals["quick"],
+            "total_sec_by_training_mode": totals,
             "dropped_phases": [name for name in PHASE_KEYS if name not in item["phases"]],
-            "saved_sec": round(float(full.get("sart_sec_estimate", 0)) + full["pvt_duration_sec"]
-                               + sum(PHASE_BY_KEY[name].duration_sec
-                                     for name in full["phases"] if name not in item["phases"])
-                               - float(item.get("sart_sec_estimate", 0)) - item["pvt_duration_sec"], 1),
+            "saved_sec": round(full_total - totals["quick"], 1),
         })
     return rows

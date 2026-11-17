@@ -7,8 +7,8 @@ import assert from 'node:assert/strict';
 
 const studio = fileURLToPath(new URL('../', import.meta.url));
 const source = path.join(studio, 'web/neurofocus');
-const files = ['index.html', 'style.css', 'core.mjs', 'charts.mjs', 'app.mjs', 'studio-adapter.mjs'];
-const out = path.resolve(studio, '../../verification/2026-10-16/neurofocus');
+const files = ['index.html', 'style.css', 'core.mjs', 'charts.mjs', 'app.mjs', 'studio-adapter.mjs', 'manager.mjs'];
+const out = path.resolve(studio, '../var/verification/manager');
 const results = [];
 for (const file of files.filter((f) => f.endsWith('.mjs'))) {
   const result = spawnSync(process.execPath, ['--check', path.join(source, file)], { encoding:'utf8' });
@@ -26,7 +26,7 @@ for(const file of files.filter((f)=>f.endsWith('.mjs'))) {
   assert.ok(!/\beval\(|new Function\(/.test(body),'Unsafe dynamic evaluation');
 }
 results.push({check:'HTML references, unique IDs, module imports',passed:true});
-const tests=spawnSync(process.execPath,['--test',path.join(studio,'scripts/neurofocus.test.mjs'),path.join(studio,'scripts/neurofocus-studio.test.mjs')],{encoding:'utf8'});
+const tests=spawnSync(process.execPath,['--test',path.join(studio,'scripts/neurofocus.test.mjs'),path.join(studio,'scripts/neurofocus-studio.test.mjs'),path.join(studio,'scripts/manager.test.mjs')],{encoding:'utf8'});
 process.stdout.write(tests.stdout); process.stderr.write(tests.stderr);
 assert.equal(tests.status,0,'Data-layer tests failed');
 await mkdir(out,{recursive:true});

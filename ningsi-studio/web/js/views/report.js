@@ -250,7 +250,8 @@ export async function render(container, ctx) {
     } else if (typeof data === 'string') {
       host.append(card('评估报告', renderMarkdown(data)));
     } else {
-      const markdown = composeMarkdown(data || {});
+      const markdown = typeof data.report_markdown === 'string' && data.report_markdown.trim()
+        ? data.report_markdown : composeMarkdown(data || {});
       const simulated = pick(data, 'extras.source_kind') === 'sim';
       const summary = el('div', { class: 'report-summary' }, [
         el('h2', { text: simulated ? '模拟演示结果' : pick(data, 'assessment.conclusion', '暂无可用结论') }),
@@ -260,16 +261,25 @@ export async function render(container, ctx) {
         el('p', { class: 'summary-note', text: data.extras?.protocol === 'ten_min' ? '本协议未采集独立任务态评分；请查看PVT、分级信号与训练记录。' : simulated ? '以上为模拟脑电的平均指标（0–1）。' : '指标为本次有效脑电窗口的均值（0–1）。' }),
       ]);
       host.append(card(null, summary));
-      host.append(renderDiagnostics(data || {}));
-      const details = el('details', { class: 'result-details' }, [
-        el('summary', { text: '查看完整报告与评估证据' }),
-        renderMarkdown(markdown),
-      ]);
       const boundary = pick(data, 'assessment.boundary', null) || pick(config, 'privacy.boundary', null);
       const advice = list(pick(data, 'assessment.advice', [])).filter(item => item !== boundary);
       if (!simulated && advice.length) {
         host.append(card('改善建议', el('ul', {}, advice.map(item => el('li', { text: String(item) })))));
       }
+      const observations = data.extras?.state_observations;
+      if (observations) {
+        host.append(el('details', { class: 'result-details' }, [
+          el('summary', { text: '查看当下压力与情绪' }),
+          ...observations.summary_lines.map(text => el('p', { text })),
+        ]));
+      }
+      host.append(el('details', { class: 'result-details' }, [
+        el('summary', { text: '查看采集质量与行为分析' }), renderDiagnostics(data || {}),
+      ]));
+      const details = el('details', { class: 'result-details' }, [
+        el('summary', { text: '查看完整报告与评估证据' }),
+        renderMarkdown(markdown),
+      ]);
       host.append(card(null, details));
     }
   } catch (error) {

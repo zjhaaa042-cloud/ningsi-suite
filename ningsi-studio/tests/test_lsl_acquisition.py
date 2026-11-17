@@ -141,8 +141,7 @@ class DescriptorTest(unittest.TestCase):
         self.assertIsNotNone(descriptor)
         self.assertEqual(descriptor.kind, "eeg")
         self.assertEqual(descriptor.channel_count, 2)
-        # 厂商 XML 描述为空（真机 desc 就是空的）时必须给 Fp1/Fp2 这类兜底标签
-        self.assertEqual(tuple(descriptor.channel_labels), ("Fp1", "Fp2"))
+        self.assertEqual(tuple(descriptor.channel_labels), ("Ch1", "Ch2"))
 
     def test_describe_stream_rejects_unsupported_and_empty(self):
         self.assertIsNone(describe_stream(FakeStreamInfo("Marker", stream_type="Markers")))
@@ -308,6 +307,21 @@ class SimulatedOutletLabellingTest(unittest.TestCase):
                               "channel_labels": ["Fp1", "Fp2"]}, "BioMulti Lite EEG-00cde1", 250.0)
         self.assertIn("真实 LSL 流", hardware)
         self.assertNotIn("非真实设备", hardware)
+
+    def test_external_simulation_is_explicit_only_and_not_selected_by_default(self):
+        from unittest.mock import patch
+        from ningsi_studio.core.live_source import default_device, list_available
+        for name, source_id in (("QA-simulation-EEG", "qa-id"), ("EEG", "qa-synthetic-outlet")):
+            stream = {"supported": True, "kind": "eeg", "name": name, "source_id": source_id,
+                      "nominal_srate": 250., "channel_count": 2}
+            with patch("ningsi_studio.acquisition.lsl.probe_streams", return_value=[stream]):
+                rows = list_available()
+            self.assertTrue(rows[0]["simulated"] and rows[0]["explicit_only"])
+            self.assertFalse(rows[0]["real"])
+            self.assertIn("模拟", rows[0]["note"])
+            self.assertIsNone(default_device(rows))
+            real = {"key": "lsl:actual", "kind": "lsl", "stream_kind": "eeg", "simulated": False}
+            self.assertEqual(default_device([*rows, real]), real["key"])
 
 
 if __name__ == "__main__":

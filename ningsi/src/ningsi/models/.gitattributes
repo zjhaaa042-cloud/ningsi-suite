@@ -1,0 +1,2 @@
+# Preserve the byte identity of the frozen benchmark artifact on all platforms.
+attlapse_shadow_250.json -text

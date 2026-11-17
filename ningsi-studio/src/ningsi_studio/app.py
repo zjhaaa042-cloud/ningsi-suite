@@ -42,6 +42,9 @@ class Application:
         try:
             self.server.stop()
         finally:
+            human_models = getattr(self.server.router, "human_models", None)
+            if human_models is not None:
+                human_models.close()
             self.manager.shutdown()
             if self.manager.idle():
                 self.data_lock.release()

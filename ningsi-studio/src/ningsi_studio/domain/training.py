@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from ningsi import config
 from ningsi.signal.indicators import compute_indicators
 from ningsi.signal.window import analyze_window
@@ -20,6 +22,7 @@ class StudioTraining:
         self.segment_index = 0
         self.samples: list[tuple[float, float]] = []
         self.excluded = 0
+        self.interruptions: list[float] = []
 
     # ------------------------------------------------------------------ 信息
     def describe(self) -> dict:
@@ -32,6 +35,8 @@ class StudioTraining:
             "initial_from": config.TRAINING["initial_from"],
             "target_step": config.TRAINING["target_step"],
             "hold_sec": config.TRAINING["hold_sec"],
+            "rest_sec": self.plan.get("rest_sec", 0),
+            "baseline_after_sec": 0 if self.inner.mode == "ten_min" else config.TRAINING["baseline_after_sec"],
         }
 
     @property
@@ -39,14 +44,16 @@ class StudioTraining:
         return round(float(self.inner.target), 4)
 
     def feed(self, score: float | None, t_sec: float, usable: bool = True) -> None:
-        if score is None or not usable:
+        if score is None or not usable or not math.isfinite(score):
             self.excluded += 1
+            self.interruptions.append(float(t_sec))
             return
         self.samples.append((float(t_sec), float(score)))
 
     def feedback_status(self) -> dict:
         stats = Segment(self.segment_index + 1, self.plan["segment_sec"],
-                        self.target, self.inner.hold_sec, self.samples).stats()
+                        self.target, self.inner.hold_sec, self.samples,
+                        interruptions=self.interruptions).stats()
         return {"hold_sec": self.inner.hold_sec,
                 "current_hold_sec": stats["current_hold_sec"],
                 "max_hold_sec": stats["max_hold_sec"],
@@ -57,7 +64,8 @@ class StudioTraining:
         target_before = round(float(self.inner.target), 4)
         hold_before = round(float(self.inner.hold_sec), 4)
         segment = self.inner.add_segment(
-            list(self.samples), self.plan["segment_sec"], excluded_windows=self.excluded
+            list(self.samples), self.plan["segment_sec"], excluded_windows=self.excluded,
+            interruptions=self.interruptions,
         )
         stats = segment.stats()
         payload = {
@@ -71,6 +79,11 @@ class StudioTraining:
             "excluded_windows": segment.excluded_windows,
             "samples": [[round(float(t), 3), round(float(v), 4)] for t, v in segment.samples],
             "stats": stats,
+            "interruptions": list(self.interruptions),
+            "valid_time_ratio": stats["valid_time_ratio"],
+            "on_target_valid_ratio": stats["on_target_valid_ratio"],
+            "adaptation_reason": ("覆盖不足，保持目标" if not stats["coverage_sufficient"] else
+                                  "按有效时间内表现与连续保持调整；工程规则待验证"),
             "mean_score": stats.get("mean"),
             "on_target_ratio": stats.get("on_target_ratio"),
             "volatility": stats.get("volatility"),
@@ -80,6 +93,7 @@ class StudioTraining:
         self.segment_index += 1
         self.samples = []
         self.excluded = 0
+        self.interruptions = []
         return payload
 
     def summary(self, window_engine, seconds_after: float = 30.0, *, baseline_after=None) -> dict:

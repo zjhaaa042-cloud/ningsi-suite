@@ -7,7 +7,9 @@ from statistics import median
 from ningsi import config
 from ningsi.signal.baseline import build_baseline, index_values
 from ningsi.signal.graded import FeedbackGate, robust_reference
+from ningsi_studio.domain.results import training_indicator_overview
 from ningsi_studio.domain.training import StudioTraining
+from ningsi_studio.core.phases import TEN_DURATIONS
 
 LABELS = {"eeg": "探索性脑电反馈：保持稳定，不代表已验证的注意力水平",
           "quality": "质量反馈：自然呼吸、减少动作；不计注意力奖励",
@@ -20,7 +22,7 @@ def run(runtime, auto):
     r.engine.graded_enabled = True
     started = time.monotonic()
     timings = {}
-    r.ten_min_result = {"budget_sec": 600, "timings": timings,
+    r.ten_min_result = {"budget_sec": sum(TEN_DURATIONS.values()), "timings": timings,
                         "note": "描述性前后变化不证明训练疗效；三级规则及阈值待验证。"}
     r.skipped_phases = ["baseline_closed", "scales", "sart", "monitor", "model"]
     r.training_skipped, r.model_skipped = False, True
@@ -66,20 +68,21 @@ def run(runtime, auto):
                        quality={**b.quality, "estimator": "median_MAD", "validated": False})
 
     with r._phase("qc") as ctx:
-        steps = collect("qc", 30)
+        steps = collect("qc", TEN_DURATIONS["qc"])
         usable = sum(s.usable for s in steps)
         qc = {"windows": len(steps), "usable": usable,
               "passed": bool(steps and usable / len(steps) >= config.QUALITY["valid_ratio_min"])}
         r._merge_run_payload(ctx["run_id"], qc)
         r.bus.publish("quality", qc)
     with r._phase("baseline_open") as ctx:
-        before = collect("baseline_open", 60)
+        before = collect("baseline_open", TEN_DURATIONS["baseline_open"])
         base = baseline(before)
         r.baselines = {"baseline_open": base}
         r.engine.baseline = base
         r._merge_run_payload(ctx["run_id"], {"baseline": base.as_dict()})
         r.bus.publish("baseline", {"key": "baseline_open", "baseline": base.as_dict()})
-    for key, seconds, practice in (("practice", 30, True), ("pvt", 180, False)):
+    for key, practice in (("practice", True), ("pvt", False)):
+        seconds = TEN_DURATIONS[key]
         with r._phase(key) as ctx:
             begin = time.monotonic()
             result = r._run_pvt(auto, practice=practice)
@@ -92,19 +95,21 @@ def run(runtime, auto):
 
     segments = []
     gate = FeedbackGate()
-    trainer = StudioTraining(r.subject["public_id"], "01", "001", base)
-    trainer.plan = {"segments": 4, "segment_sec": 50}
+    trainer = StudioTraining(r.subject["public_id"], "01", "001", base, mode="ten_min")
+    rounds, segment_sec = trainer.plan["segments"], trainer.plan["segment_sec"]
+    round_sec = segment_sec + trainer.plan["rest_sec"]
     with r._phase("training") as ctx:
+        training_run_id = ctx["run_id"]
         begin = time.monotonic()
         r.bus.publish("training_start", {**trainer.describe(), "rationale": LABELS["guided"]})
-        for index in range(4):
+        for index in range(rounds):
             round_start = time.monotonic()
             gate = FeedbackGate()
             counts = Counter()
             smooth = None
-            for tick in range(25):
+            for tick in range(int(segment_sec / config.STEP_SEC)):
                 r._check_cancel()
-                if time.monotonic() >= round_start + 50*r.scale:
+                if time.monotonic() >= round_start + segment_sec*r.scale:
                     break
                 step = r.engine.step("focused")
                 r._record_diagnostic(step, "training")
@@ -119,15 +124,17 @@ def run(runtime, auto):
                 trainer.feed(smooth, sample_time, usable=smooth is not None)
                 display_start = time.monotonic()
                 r.bus.publish("feedback", {"segment": index+1, "feedback_mode": mode,
+                    "affect_model": r.current_affect(),
+                    "attention_model": step.attention_model,
                     "mode_label": LABELS[mode], "grade": step.graded["grade"],
                     "score": smooth, "target": trainer.target if mode == "eeg" else None,
                     "usable": smooth is not None, "on_target": smooth is not None and smooth >= trainer.target,
                     **trainer.feedback_status()})
-                r._sleep_real(max(0, round_start+(tick+1)*2*r.scale-time.monotonic()))
-                counts[mode] += max(0, min(time.monotonic(), round_start+50*r.scale)-display_start)/r.scale
+                r._sleep_real(max(0, round_start+(tick+1)*config.STEP_SEC*r.scale-time.monotonic()))
+                counts[mode] += max(0, min(time.monotonic(), round_start+segment_sec*r.scale)-display_start)/r.scale
             segment = trainer.close_segment()
             segment["mode_seconds"] = {key: round(value, 3) for key,value in counts.items()}
-            segment["unobserved_seconds"] = round(max(0, 50-sum(counts.values())), 3)
+            segment["unobserved_seconds"] = round(max(0, segment_sec-sum(counts.values())), 3)
             if not segment["n"]:
                 segment.update(mean_score=None, on_target_ratio=None, volatility=None)
                 segment["stats"].update(mean=None, on_target_ratio=None, volatility=None)
@@ -135,12 +142,14 @@ def run(runtime, auto):
             r._persist_training_segment(segment)
             r.bus.publish("segment", segment)
             r.bus.publish("feedback", {"segment": index+1, "feedback_mode": "rest", "mode_label": LABELS["rest"], "score": None, "usable": False})
-            r._sleep_real(max(0, round_start+60*r.scale-time.monotonic()))
-            r._progress("training", (index+1)/4)
+            r._sleep_real(max(0, round_start+round_sec*r.scale-time.monotonic()))
+            r._progress("training", (index+1)/rounds)
         timings["training"] = round((time.monotonic()-begin)/r.scale, 3)
-        r._merge_run_payload(ctx["run_id"], {"segments": segments})
+        overview = training_indicator_overview(r.diagnostic_windows)
+        r.ten_min_result["indicator_overview"] = overview
+        r._merge_run_payload(ctx["run_id"], {"segments": segments, "indicator_overview": overview})
     with r._phase("baseline_after") as ctx:
-        after = collect("baseline_after", 60)
+        after = collect("baseline_after", TEN_DURATIONS["baseline_after"])
         post = baseline(after)
         r._merge_run_payload(ctx["run_id"], {"baseline": post.as_dict()})
         r.bus.publish("baseline", {"key": "baseline_after", "baseline": post.as_dict()})
@@ -148,12 +157,13 @@ def run(runtime, auto):
     training["segments"] = segments
     training["mode"] = "ten_min"
     training["describe"] = {**trainer.describe(), "mode": "ten_min", "rest_sec": 10}
-    training["target_plan"] = {"segments": 4, "segment_sec": 50, "rest_sec": 10}
+    training["target_plan"] = dict(trainer.plan)
     if not any(seg["n"] for seg in segments):
         for name in ("mean_focus", "on_target_ratio", "volatility", "first_to_last_change"):
             training[name] = None
     if not segments[0]["n"] or not segments[-1]["n"]:
         training["first_to_last_change"] = None
+    r._merge_run_payload(training_run_id, {"training": training})
     before_ref = robust_reference(s.graded for s in before)
     after_ref = robust_reference(s.graded for s in after)
     r.ten_min_result.update({"baseline_before": before_ref, "baseline_after": after_ref,

@@ -30,3 +30,6 @@ ningsi = "ningsi.app.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"ningsi.models" = ["attlapse_healthy_model.json", "attlapse_shadow_250.json", "frontal_affect.json"]

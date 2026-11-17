@@ -9,11 +9,12 @@ from dataclasses import dataclass, field
 import math
 
 from ningsi.behavior import metrics
+from ningsi import config
 
 LAPSE_SEC = 0.5
 COMPARISON_LAPSE_SEC = 0.355
 MIN_RT_SEC = 0.1
-SCORING_SPEC = "pvt-scoring-v2"
+SCORING_SPEC = "pvt-scoring-v3"
 DURATION_SEC = 180.0
 ISI_RANGE = (1.0, 4.0)
 
@@ -48,7 +49,20 @@ class PvtResult:
         # 保留原来的 >500 ms 主阈值；355 ms 仅作论文口径对照，不替换判断阈值。
         lapses = [rt for rt in rts if rt > LAPSE_SEC]
         opportunities = len(rts) + missed
-        valid = len(rts) >= 5 and invalid == 0
+        total = len(self.trials)
+        response_ratio = len(rts) / total if total else 0.0
+        false_start_ratio = false_starts / total if total else 0.0
+        rules = config.PVT_VALIDITY
+        reasons = []
+        if len(rts) < rules["min_responses"]:
+            reasons.append("insufficient_valid_responses")
+        if invalid:
+            reasons.append("invalid_response_time")
+        if response_ratio < rules["min_response_ratio"]:
+            reasons.append("insufficient_response_coverage")
+        if false_start_ratio > rules["max_false_start_ratio"]:
+            reasons.append("excessive_false_starts")
+        valid = not reasons
         return {
             "task": "pvt-b",
             "duration_sec": self.duration_sec,
@@ -73,10 +87,11 @@ class PvtResult:
             "threshold_status": "pending_validation",
             "protocol_note": "定时刺激变体，尚未完成等效性验证；120 秒短版不继承标准 PVT-B 效度。",
             "rate_denominators": {"lapse_rate": len(rts), "omission_rate": opportunities},
-            "unavailable_reasons": ([] if valid else
-                                    (["insufficient_valid_responses"] if len(rts) < 5 else [])
-                                    + (["invalid_response_time"] if invalid else [])),
+            "unavailable_reasons": reasons,
             "false_starts": false_starts,
+            "response_ratio": round(response_ratio, 4),
+            "false_start_ratio": round(false_start_ratio, 4),
+            "validity_thresholds": dict(rules),
             "valid": valid,
         }
 

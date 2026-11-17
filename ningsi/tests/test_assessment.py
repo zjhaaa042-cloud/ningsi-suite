@@ -156,6 +156,45 @@ class HeatmapHistoryTest(unittest.TestCase):
 
 
 class TrainingTest(unittest.TestCase):
+    def test_summary_excludes_empty_segments_from_averages(self):
+        session = NeurofeedbackSession("p01", "01", "001", target=0.5)
+        for samples in ([(0, 0.6), (2, 1.0)], [], [(0, 0.6), (2, 1.0)], []):
+            session.add_segment(samples, 50)
+        summary = session.summary()
+        self.assertEqual(summary["mean_focus"], 0.8)
+        self.assertEqual(summary["on_target_ratio"], 0.04)
+        self.assertEqual(summary["on_target_valid_ratio"], 1.0)
+        self.assertAlmostEqual(summary["volatility"], 0.2828)
+        self.assertIsNone(summary["first_to_last_change"])
+        self.assertEqual([s["stats"]["n"] for s in summary["segments"]], [2, 0, 2, 0])
+
+    def test_summary_change_requires_both_endpoint_segments(self):
+        for values, expected in (([0.6, None, 0.8], 0.2),
+                                 ([None, 0.6, 0.8], None),
+                                 ([0.6, 0.8, None], None), ([0.6], None)):
+            with self.subTest(values=values):
+                session = NeurofeedbackSession("p01", "01", "001")
+                for value in values:
+                    session.add_segment([] if value is None else [(0, value)], 50)
+                self.assertEqual(session.summary()["first_to_last_change"], expected)
+
+    def test_summary_without_usable_segments_has_no_scores(self):
+        session = NeurofeedbackSession("p01", "01", "001")
+        for empty_count in (0, 2):
+            with self.subTest(empty_count=empty_count):
+                for _ in range(empty_count):
+                    session.add_segment([], 50, excluded_windows=25)
+                for key in ("mean_focus", "on_target_ratio", "volatility", "first_to_last_change"):
+                    self.assertIsNone(session.summary()[key])
+
+    def test_summary_preserves_genuine_zero_scores(self):
+        session = NeurofeedbackSession("p01", "01", "001")
+        for samples in ([(0, 0.0)], [], [(0, 0.0)]):
+            session.add_segment(samples, 50)
+        summary = session.summary()
+        for key in ("mean_focus", "on_target_ratio", "volatility", "first_to_last_change"):
+            self.assertEqual(summary[key], 0.0)
+
     def test_initial_target_comes_from_baseline_median(self):
         _, baseline = make_baseline()
         target, rationale = initial_target(baseline)
@@ -166,9 +205,9 @@ class TrainingTest(unittest.TestCase):
 
     def test_adaptation_raises_and_lowers_target(self):
         session = NeurofeedbackSession("p01", "01", "001", target=0.5)
-        session.add_segment([(index * 2.0, 0.9) for index in range(10)], 120.0)
+        session.add_segment([(index * 2.0, 0.9) for index in range(60)], 120.0)
         self.assertGreater(session.target, 0.5)
-        session.add_segment([(index * 2.0, 0.1) for index in range(10)], 120.0)
+        session.add_segment([(index * 2.0, 0.1) for index in range(60)], 120.0)
         self.assertLess(session.target, 0.55)
 
     def test_segment_stats(self):
@@ -176,7 +215,9 @@ class TrainingTest(unittest.TestCase):
         segment = session.add_segment([(0.0, 0.6), (2.0, 0.4), (4.0, 0.8)], 120.0)
         stats = segment.stats()
         self.assertAlmostEqual(stats["mean"], 0.6, places=4)
-        self.assertAlmostEqual(stats["on_target_ratio"], 2 / 3, places=4)
+        self.assertEqual(stats["on_target_ratio"], 0.0333)
+        self.assertEqual(stats["valid_time_ratio"], 0.05)
+        self.assertAlmostEqual(stats["on_target_valid_ratio"], 2 / 3, places=4)
 
     def test_continuous_hold_rejects_fragmented_and_missing_windows(self):
         from ningsi.training.neurofeedback import Segment

@@ -83,5 +83,5 @@ def engine_versions() -> dict:
         "baseline": config.BASELINE_SPEC,
         "assessment": config.LABEL_SPEC,
         "preprocess": "preprocess-v2",
-        "training": "neurofeedback-v2",
+        "training": config.TRAINING_SPEC,
     }

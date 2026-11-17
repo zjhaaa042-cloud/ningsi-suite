@@ -440,7 +440,8 @@ export function drawWaveform(container, signal, options = {}) {
     container.append(el('p', { class: 'empty', text: options.emptyText || '本次会话没有触发预警' }));
     return container;
   }
-  const kindLabels = { low_focus: '专注度偏低', high_load: '认知负荷偏高', poor_signal: '信号质量差' };
+  const kindLabels = { low_focus: '专注度偏低', high_load: '认知负荷偏高', poor_signal: '信号质量差',
+    self_reported_high_stress: '自报压力较高' };
   const stateLabels = { triggered: '触发', active: '持续', released: '解除' };
   const items = rows.map((alert) => el('div', { class: 'timeline__item' }, [
     el('span', { class: 'timeline__dot' }),

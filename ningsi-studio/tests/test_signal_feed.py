@@ -103,6 +103,32 @@ class SignalFeedTests(StudioTestCase):
         registry.drop("a")
         self.assertEqual(registry.count, 0)
 
+    def test_studio_and_manager_keep_independent_waveform_settings(self) -> None:
+        """同一会话的两个窗口不能互相改刷新率、显示跨度或原始点数。"""
+        feed = sf.SignalFeed("dual", fake_source, srate=250.0, channels=2)
+        studio, _ = feed.subscribe(sf.SignalConfig(
+            window_sec=10.0, refresh_hz=20.0, max_points_per_channel=200, queue_size=100))
+        manager, _ = feed.subscribe(sf.SignalConfig(
+            window_sec=2.0, refresh_hz=5.0, max_points_per_channel=4000, queue_size=100))
+        try:
+            time.sleep(0.7)
+            self.assertGreater(studio.events.qsize(), manager.events.qsize())
+            for subscriber, seconds, raw_points, hz in ((studio, 10.0, 2500, 20), (manager, 2.0, 500, 5)):
+                while not subscriber.events.empty():
+                    frame = subscriber.events.get_nowait()
+                    self.assertEqual(frame["window_sec"], seconds)
+                    self.assertEqual(frame["refresh_hz"], hz)
+                    self.assertEqual(frame["channels"][0]["raw_points"], raw_points)
+                    if subscriber is manager:
+                        self.assertEqual(frame["channels"][0]["points"], raw_points)
+            feed.unsubscribe(manager)
+            self.assertEqual(feed.subscriber_count, 1)
+            self.assertEqual(studio.events.get(timeout=1)["window_sec"], 10.0)
+            self.assertTrue(feed._thread.is_alive())
+        finally:
+            feed.unsubscribe(manager)
+            feed.unsubscribe(studio)
+
 
 class SpectrumProbeTests(StudioTestCase):
     def test_probe_returns_curve_and_bands(self) -> None:

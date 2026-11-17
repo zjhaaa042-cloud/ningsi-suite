@@ -1,24 +1,32 @@
 # 凝思（Ningsi）
 
-**A09 赛题**「AI+便携脑电设备的专注力强化训练系统」的完整实现：算法引擎 + Web 应用，单仓库管理。
+**A09 赛题**「AI+便携脑电设备的专注力强化训练系统」。项目包含算法引擎、Studio 评估平台和独立实验采集器。
 
-本 monorepo 由两个包组成，它们是同一个系统的上下两层，依赖严格单向：
+当前源码版本为引擎 0.1.2、Studio 0.1.9、Capture 0.4.0，以各包 `pyproject.toml` 为准。Capture 提供连续原始采集、因果调理与伪迹标记；Studio 提供联合评估、反馈、历史趋势及真人模型训练与部署。已有 Windows 包以包内构建记录为准。
+
+Studio 按「评估与训练」「记录与结果」组织日常操作；设备连接、参与者和模型管理集中在默认折叠的「设置与管理」。赛事展示页已退出产品导航与路由，保留的开发分析模块与接口见[开发说明](ningsi-studio/docs/SHOWCASE.md)。
+
+项目按“采集 → 预处理 → 特征 → 状态估计 → 联合评估 → 反馈”组织。开发先看[系统架构](docs/ARCHITECTURE.md)，技术验收看[验证计划](docs/VALIDATION_PLAN.md)。A09 没有给出准确率或毫秒时延门槛；公开数据研究尚未证实三类状态在目标设备上的稳定识别，最新个人校准量实验见本机 [研究结果](var/calibration-dose-20261116/RESULTS.md)。
+
+Studio 和 Capture 分别使用同一仓库的算法引擎。Capture 通过研究数据导出与 Studio 训练入口衔接。
 
 ```
-ningsi-studio/   Web 产品层：浏览器 + HTTP 服务 + SQLite/JSONL 持久化
-      │  单向依赖（64 处 import / 22 个文件）
-      ▼
-ningsi/          算法引擎：信号处理、量表、行为任务、联合评估、训练、预警、模型
+ningsi-studio/ ──┐  评估、监测、反馈、训练与持久化
+                ├──▶ ningsi/  共用算法引擎与逐窗应用服务
+ningsi-capture/ ─┘  原始记录、研究任务、探针与导出
+
+Capture ──带版本与校验值的导出文件──▶ Studio 真人模型训练
 ```
 
 | 目录 | 包名 / 命令 | 职责 | 独立运行 |
 |---|---|---|---|
+| [`ningsi-capture/`](ningsi-capture/README.md) | `ningsi-capture` | 连续 LSL 原始采集、任务事件、走神探针、质量筛查与训练数据导出 | 随 Windows 程序包含所需引擎 |
 | [`ningsi/`](ningsi/README.md) | `ningsi` / `ningsi` | 算法引擎 + CLI + Tkinter 桌面版。输入便携脑电（LSL 真机或仿真源），输出专注/放松/负荷三指标、量表 + 行为 + 脑电联合评估、神经反馈训练、报告 / 热力图 / 趋势、逻辑回归基线模型 | ✅ 仅依赖 NumPy |
-| [`ningsi-studio/`](ningsi-studio/README.md) | `ningsi-studio` / `ningsi-studio` | Web 产品层。自研标准库 HTTP 服务、SSE 实时流、SQLite(WAL) 权威库 + JSONL 审计台账、原生 ES Module 前端（10 个视图）、11 阶段会话状态机、NeuroFocus 监测台、可打包单文件 exe | ❌ 需要引擎 |
+| [`ningsi-studio/`](ningsi-studio/README.md) | `ningsi-studio` / `ningsi-studio` | Web 产品层：HTTP/SSE、会话状态机、SQLite/JSONL、NeuroFocus、模型训练与报告 | 需要引擎；便携包包含所需运行资源 |
 
 ## 发行版下载与使用（Windows x64）
 
-无需安装 Python。当前发行版为 **v0.1.2**，源码见 [v0.1.2 标签](https://github.com/zjhaaa042-cloud/ningsi-suite/tree/v0.1.2)，精确构建提交见发行附件 `BUILD.json`。
+以下为 **v0.1.2** 历史发行版的使用说明。该版无需安装 Python，源码见 [v0.1.2 标签](https://github.com/zjhaaa042-cloud/ningsi-suite/tree/v0.1.2)，构建提交见其发行附件 `BUILD.json`。
 
 - [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.2)
 - [下载 Windows x64 便携版 ZIP（约 22 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.2/ningsi-studio-0.1.2-win-x64.zip)
@@ -114,43 +122,59 @@ ningsi self-test          # 运行引擎全部测试
 ```
 ningsi-suite/
 ├── README.md                 本文件：整体说明与快速开始
-├── LICENSE                   MIT（覆盖两个包）
+├── LICENSE                   MIT（自研代码）
+├── docs/                     当前系统架构与技术验证计划
+├── scripts/                  整仓验证与架构依赖检查
 ├── ningsi/                   算法引擎包
 │   ├── src/ningsi/           signal / scales / behavior / assessment / training /
-│   │                         monitoring / models / acquisition / adapters / app
-│   ├── tests/                63 个用例（信号、量表、行为、评估、预警、热力图、趋势、训练、模型、端到端）
+│   │                         monitoring / models / acquisition / processing / adapters / app
+│   ├── tests/                算法、共享逐窗服务与端到端测试
 │   ├── examples/sample_run/  一次完整会话的示例产物（免运行查看）
 │   ├── docs/                 产品使用说明、赛题覆盖对照、文档口径修订清单
 │   ├── tools/                PPT / docx / 演示视频等交付物生成脚本
 │   └── scripts/verify.ps1    一键验证：跑测试 + 端到端演示
-└── ningsi-studio/            Web 应用包
-    ├── src/ningsi_studio/    http / api / core / domain / db / acquisition / settings
-    ├── web/                  原生 ES Module 前端（含 neurofocus/ 独立监测台）
-    ├── tests/                187 个用例（API、会话并发、SSE、数据库、LSL、协议、前端契约）
-    ├── docs/                 接口契约与 NeuroFocus 说明
-    └── run.bat / start.bat   启动器（另有 run.ps1 / run.sh）
+├── ningsi-studio/            Web 应用包
+│   ├── src/ningsi_studio/    http / api / core / domain / db / acquisition / settings
+│   ├── web/                  原生 ES Module 前端（含 neurofocus/ 独立监测台）
+│   ├── tests/                API、会话、数据库、协议、跨端一致性与前端契约测试
+│   ├── docs/                 接口契约与 NeuroFocus 说明
+│   └── run.bat / start.bat   启动器（另有 run.ps1 / run.sh）
+└── ningsi-capture/           独立研究采集器
+    ├── src/ningsi_capture/   acquisition / storage / protocol / export / gui
+    └── tests/               采集、时标、质控、探针预测与导出测试
 ```
 
 ## 关系与口径
 
-- **单向依赖**：`ningsi-studio` 通过 `bootstrap.py` 定位并 `import ningsi`；`ningsi` 不引用 Web 应用，可独立安装与运行。
-- **口径单一来源**：所有可复算参数集中在 `ningsi/src/ningsi/config.py`（`welch-v1` / `indicator-v1` / `baseline-v2` / `joint-assessment-v2` / `neurofeedback-v2` 等），CLI、桌面版、Web 三端结论一致。
+- **单向依赖**：Studio 和 Capture 分别通过 `bootstrap.py` 定位引擎，产品包之间不互相导入；引擎可独立安装与运行。
+- **按用途固定口径**：相对指数参数在 `ningsi/src/ningsi/config.py`，调理和研究特征另有版本契约；模型核对训练时的来源与实现指纹。CLI 任务监测与 Studio 共用 `ningsi.processing.process_window`，相同输入、基线和质量证据得到相同逐窗指标。
+- **分开解释输出**：相对基线指数、模型估计、自评和信号质量各自保存。无效信号保持缺失，不作为低专注分数。
 - **数据一致**：SQLite 为权威库，另以与引擎同格式的 JSONL 台账双写（`history/sessions.jsonl`、`scales/*.jsonl`），可用 `python -m ningsi_studio export-ledger` 从库重放。
 - **上游**：`bsense-lsl` / `bsense-dataset-studio` 保持只读，本仓库不复制其代码，只通过公开接口读取其数据产物。
 
 ## 测试
 
-两个包的测试都只用标准库 `unittest`，不需要浏览器、真实设备或外网：
+三个包使用标准库 `unittest`。在根目录运行整仓验证（Python 3.11+，优先使用工作区 `.venv`；部分测试需要本机回环 HTTP）：
 
 ```powershell
-# 可选：先安装两个包（也可不装，用 PYTHONPATH 指向 src）
-pip install -e ningsi -e ningsi-studio
+.\scripts\verify.ps1
+.\scripts\verify.ps1 -ArchitectureOnly
+```
+
+也可分别运行：
+
+```powershell
+# 可选：安装三个包（也可不装，用 PYTHONPATH 指向 src）
+pip install -e ningsi -e ningsi-studio -e ningsi-capture
 
 cd ningsi
-python -m unittest discover -s tests -t .        # 63 个用例
+python -m unittest discover -s tests -t .
 
 cd ..\ningsi-studio
-python -m unittest discover -s tests -t .        # 187 个用例
+python -m unittest discover -s tests -t .
+
+cd ..\ningsi-capture
+python -m unittest discover -s tests -t .
 ```
 
 未安装时可在各包目录下 `$env:PYTHONPATH="src"` 后再执行同一条命令；
@@ -161,7 +185,8 @@ python -m unittest discover -s tests -t .        # 187 个用例
 
 ## 文档
 
-- 引擎：[产品使用说明（系统架构与流程）](ningsi/docs/PRODUCT_GUIDE.md) · [赛题要求覆盖对照](ningsi/docs/REQUIREMENT_COVERAGE.md) · [文档口径修订清单](ningsi/docs/DOC_ALIGNMENT.md)
+- 当前开发：[系统架构](docs/ARCHITECTURE.md) · [技术验证计划](docs/VALIDATION_PLAN.md) · [真人模型训练](ningsi-studio/docs/HUMAN_MODEL_TRAINING.md) · [Capture 说明](ningsi-capture/README.md)
+- 历史与研究：[产品使用说明初版](ningsi/docs/PRODUCT_GUIDE.md) · [赛题要求覆盖快照](ningsi/docs/REQUIREMENT_COVERAGE.md) · [文档口径修订清单](ningsi/docs/DOC_ALIGNMENT.md) · [新队列验证](ningsi/docs/NEW_COHORT_VALIDATION.md)
 - Web：[使用说明（零基础）](ningsi-studio/使用说明.md) · [STUDIO-GUIDE](ningsi-studio/STUDIO-GUIDE.md) · [接入真实脑电数据](ningsi-studio/接入真实脑电数据.md) · [接口契约](ningsi-studio/docs/API.md)
 
 ## 许可证

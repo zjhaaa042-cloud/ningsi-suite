@@ -10,14 +10,18 @@
 <meta name="ningsi-api-token" content="">
 <title>凝思 Studio</title>
 <link rel="stylesheet" href="./css/app.css">
+<link rel="stylesheet" href="./css/workspace.css">
+<link rel="stylesheet" href="./css/overview.css">
 </head>
 <body>
+<a class="skip-link" href="#view">跳到主要内容</a>
 <!-- 顶栏固定：数据来源徽标 / 引擎口径 / 当前会话状态与进度 -->
 <header class="topbar" role="banner">
   <div class="topbar__brand">
-    <span class="topbar__logo" aria-hidden="true">NS</span>
-    <span class="brand-stack"><span class="topbar__title">凝思 Studio</span><span class="brand-caption">专注力评估与训练</span></span>
+    <span class="topbar__logo" aria-hidden="true">∿</span>
+    <span class="brand-stack"><span class="topbar__title">凝思 <span>Studio</span></span><span class="brand-caption">专注力评估与训练</span></span>
   </div>
+  <div class="topbar__location"><span>工作空间</span><span aria-hidden="true">/</span><strong id="page-location">开始评估</strong></div>
   <div class="topbar__meta">
     <span id="source-badge" class="badge" title="数据来源">数据来源：—</span>
     <span hidden id="engine-badge" class="badge" title="引擎口径版本">口径：—</span>
@@ -35,8 +39,9 @@
 
 <div class="layout">
   <nav class="sidenav" aria-label="主导航">
-    <button id="nav-toggle" class="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-list">导航 · 开始检测</button>
+    <button id="nav-toggle" class="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-list">导航 · 开始评估</button>
     <ul id="nav-list" class="sidenav__list"></ul>
+    <div class="sidenav__foot"><span class="workspace-indicator">本地工作空间</span><p>每一次专注，都有迹可循。</p><span class="sidenav__version">NINGSI STUDIO</span></div>
   </nav>
   <main id="view" class="view" role="main" tabindex="-1">
     <p class="muted">正在加载…</p>

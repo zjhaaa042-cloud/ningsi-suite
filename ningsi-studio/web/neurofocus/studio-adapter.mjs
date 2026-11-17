@@ -25,21 +25,31 @@ export function studioMetadata(session, config) {
 }
 
 export class StudioAdapter {
-  constructor(emit, { fetcher = (...args) => fetch(...args), eventSource = (url) => new EventSource(url), clock = () => Date.now(), token = '', onNotice = () => {}, onTerminal = () => {}, onMetadata = () => {} } = {}) {
-    Object.assign(this, { emit, fetcher, eventSource, clock, token, onNotice, onTerminal, onMetadata });
+  constructor(emit, { fetcher = (...args) => fetch(...args), eventSource = (url) => new EventSource(url), clock = () => Date.now(), token = '', onNotice = () => {}, onTerminal = () => {}, onMetadata = () => {}, onSnapshot = () => {} } = {}) {
+    Object.assign(this, { emit, fetcher, eventSource, clock, token, onNotice, onTerminal, onMetadata, onSnapshot });
     this.streams = []; this.timer = null; this.seq = 0; this.generation = 0;
     this.meta = null; this.lastEventId = -1; this.lastFrameSeq = -1; this.seenWindows = new Set(); this.offset = null;
   }
   async request(path, signal) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
+    const timeout = setTimeout(abort, 12000);
+    try {
     const before = this.clock();
-    const response = await this.fetcher(path, { signal, headers: this.token ? { 'X-API-Token': this.token } : {} });
-    if (!response.ok) throw new Error(`Studio HTTP ${response.status}${response.status === 401 ? '：请检查访问令牌' : ''}`);
+    const response = await this.fetcher(path, { signal: controller.signal, headers: this.token ? { 'X-API-Token': this.token } : {} });
+    if (!response.ok) throw new Error(`Studio HTTP ${response.status}${[401, 403].includes(response.status) ? '：请在“数据与设备”填写访问令牌' : ''}`);
     const after = this.clock(), date = Date.parse(response.headers?.get('date'));
     if (this.offset === null && finite(date)) this.offset = date - (before + after) / 2;
     const body = await response.json();
     return body.data ?? body;
+    } finally { clearTimeout(timeout); signal?.removeEventListener('abort', abort); }
   }
-  async list() { return (await this.request('/api/sessions?limit=50&page=1')).items || []; }
+  async list({ status = '', limit = 50, signal } = {}) {
+    const query = new URLSearchParams({ limit: String(limit), page: '1' });
+    if (status) query.set('status', status);
+    return (await this.request(`/api/sessions?${query}`, signal)).items || [];
+  }
   async prepare(uuid) {
     if (!/^[a-f\d]{32}$/i.test(uuid)) throw new Error('请选择有效的 Studio 会话');
     this.stop(); this.offset = null; this.controller = new AbortController();
@@ -53,10 +63,11 @@ export class StudioAdapter {
     this.staleMs = Math.max(3000, (config.window_sec + config.step_sec) * 1000 + 2000);
     this.meta.serverClockOffsetMs = this.offset;
     this.lastEventId = -1; this.lastFrameSeq = -1; this.seenWindows.clear(); this.seq = 0;
+    this.session = session; this.onSnapshot(session);
     return this.meta;
   }
   send(e) { this.emit({ ...e, seq: this.seq++ }); }
-  status(connection) { this.send({ type: 'device_status', timestampMs: this.clock(), connection }); }
+  status(connection) { this.connection = connection; this.send({ type: 'device_status', timestampMs: this.clock(), connection }); }
   metadata() { if (this.meta) { this.emit(structuredClone(this.meta)); this.onMetadata(this.meta); } }
   start() {
     if (!this.meta || this.timer !== null) return;
@@ -80,6 +91,8 @@ export class StudioAdapter {
       try {
         const data = await this.request(`/api/sessions/${this.uuid}/live`, this.controller.signal);
         if (generation !== this.generation) return;
+        this.session = { ...this.session, ...data, phase_label: (this.session.phases || this.config.phases || []).find((phase) => phase.key === data.phase)?.label || data.phase };
+        this.onSnapshot(this.session);
         if (!data.runtime_alive || terminal.has(data.status)) this.finish(`后台会话已${data.status === 'done' ? '完成' : '停止'}，监测已结束`);
       } catch (error) { if (generation === this.generation) { this.status('connecting'); this.onNotice(error.message); } }
       finally { this.polling = false; }
@@ -131,6 +144,9 @@ export class StudioAdapter {
       || channels.some((c) => !Array.isArray(c.samples) || c.points !== c.raw_points || c.samples.length !== c.raw_points || c.unit !== 'uV')) {
       this.onNotice('波形帧缺少原始采样位置或单位，拒绝按原始 EEG 绘制'); return;
     }
+    // A participant may be answering scales/tasks, with no new analysis window.
+    // Fresh EEG confirms the transport, without implying a valid focus score.
+    if (['connecting', 'disconnected'].includes(this.connection)) this.status('connected');
     const labels = channels.map((c) => c.label);
     if (JSON.stringify(labels) !== JSON.stringify(this.meta.device.channels) || frame.srate !== this.meta.device.samplingRateHz) {
       this.meta.device.channels = labels; this.meta.device.samplingRateHz = frame.srate; this.meta.device.eegUnit = 'µV'; this.meta.capabilities.rawEEG = true; this.metadata();

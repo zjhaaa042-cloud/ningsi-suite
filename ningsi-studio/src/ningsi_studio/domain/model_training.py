@@ -4,11 +4,9 @@
 这不是"暂时用仿真顶着"，而是当前唯一的实现——所以本模块产出的指标口径是
 **算法基线 / 链路自检**，不能当成对真实被试的结论；界面（#/models）与报告都按这个口径写。
 
-原 docstring 曾写"可通过 `windows_from_records` 换成真实特征"，但该函数**从未实现**
-（2026-10-07 核对：全仓库只有这句注释里提到它）。界面上一度写着"真实数据训练请用命令行脚本"，
-而 CLI 里并没有 train 子命令（只有 serve / doctor / check / lsl-check / simulate-outlet /
-ui-check / demo / export-ledger）。两处都已按事实改正，不做"看起来能用"的暗示。
-真实数据训练要做的话，需要新增：按会话/被试导出窗特征 → 标签来源 → 训练入口（接口或 CLI）。
+真人数据训练由独立的 human_models 服务和 ningsi.models.human 实现，入口为
+POST /api/models/human/train 或 CLI train-real。本模块保留为仿真链路自检，
+两类模型使用不同文件，标签 1 在此模块表示 focused，在真人模型表示内部走神。
 """
 
 from __future__ import annotations

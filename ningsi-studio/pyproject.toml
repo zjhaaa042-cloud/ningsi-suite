@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ningsi-studio"
-version = "0.1.2"
+version = "0.1.9"
 description = "凝思 Studio —— A09 便携脑电专注力训练与心理状态评估的 Web 应用（前端 + 后端 + 数据保存）"
 readme = "README.md"
 license = { text = "MIT" }
@@ -29,4 +29,4 @@ ningsi-studio = "ningsi_studio.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-ningsi_studio = ["db/*.sql"]
+ningsi_studio = ["db/*.sql", "domain/showcase_evidence_snapshot.json"]

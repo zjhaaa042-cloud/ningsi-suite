@@ -21,6 +21,7 @@ from ningsi.models import logistic as features
 from ningsi.monitoring import history as history_module
 from ningsi.monitoring.alerts import AlertEngine
 from ningsi.monitoring.heatmap import render_svg as heatmap_svg
+from ningsi.processing import process_window
 from ningsi.scales.scoring import score_scale
 from ningsi.scales.store import save_scale_run as save_scale
 from ningsi.signal.baseline import build_baseline
@@ -181,8 +182,14 @@ class SessionRunner:
         for state, count in self.config.task_plan:
             for _ in range(count):
                 t_end += config.STEP_SEC
-                window = analyze_window(self.eeg.window(state), self.config.srate, t_end=t_end)
-                result = compute_indicators(window, baseline) if window.usable else None
+                if hasattr(self.eeg, "analysis_window"):
+                    raw, evidence = self.eeg.analysis_window(state)
+                else:
+                    raw, evidence = self.eeg.window(state), {}
+                processed = process_window(raw, self.config.srate, t_end=t_end,
+                                           baseline=baseline, artifact_evidence=evidence)
+                window = processed.window
+                result = processed.indicators if window.usable else None
                 windows.append(window)
                 if result is not None:
                     results.append(result)
@@ -240,11 +247,12 @@ class SessionRunner:
         states = ["focused", "drowsy"]
         for index in range(plan["segments"]):
             state = states[index % len(states)]
-            wins = [analyze_window(self.eeg.window(state), self.config.srate, t_end=500.0 + index * 120.0 + step * config.STEP_SEC)
-                    for step in range(10)]
+            wins = [analyze_window(self.eeg.window(state), self.config.srate, t_end=step * config.STEP_SEC)
+                    for step in range(int(plan["segment_sec"] / config.STEP_SEC))]
             results = [compute_indicators(w, baseline_before) for w in wins]
-            samples = [(w.t_end, r.score("focus")) for w, r in zip(wins, results)]
-            session.add_segment(samples, plan["segment_sec"], excluded_windows=sum(1 for w in wins if not w.usable))
+            samples = [(w.t_end, r.score("focus")) for w, r in zip(wins, results) if r.available]
+            gaps = [w.t_end for w, r in zip(wins, results) if not r.available]
+            session.add_segment(samples, plan["segment_sec"], excluded_windows=len(gaps), interruptions=gaps)
         after_windows = self.collect_baseline(seconds=30.0)
         baseline_after = build_baseline(after_windows, device=self.config.device, srate=self.config.srate)
         return session.summary(baseline_before, baseline_after)

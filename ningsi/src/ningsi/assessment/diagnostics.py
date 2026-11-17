@@ -7,6 +7,10 @@ import math
 from ningsi import config
 
 REASONS = {
+    'electrode_step': '电极突跳或接触移动', 'ocular_transient': '显著慢瞬态（眼动或漂移代理）',
+    'muscle_burst': '短时高频肌电代理', 'emg_reference_burst': '同步肌电参考活动',
+    'motion_reference_excursion': '同步加速度参考活动',
+    'motion_reference_unavailable': '已指定的动作参考缺失或未同步',
     'amplitude': '幅值超限', 'flat_channel': '平直通道', 'channel_span': '通道差异过大',
     'emg': '高频占比偏高（肌电代理）', 'eog': '低频占比偏高（眼电/漂移代理）',
     'no_data': '无样本', 'signal_too_short': '未满4秒', 'non_finite_signal': '非有限值',
@@ -66,9 +70,22 @@ def render_html(report):
              f'<section><h2>1. 数据可用性</h2><p>严格合格窗 <b>{accepted}/{total}</b>。' + ('本次没有可用个体脑电评分；仍可查看采集质量和行为表现。' if not report.get('indicators', {}).get('summary') else '个体指标见完整证据。') + '</p>',
              f'<p>{esc(d.get("scope", ""))}</p><p class="muted">{esc(d.get("note", "旧版未保存完整逐窗数据，以下仅展示已有汇总，不能重建频谱或重新判定质量。"))}</p>',
              bar('严格合格', accepted, total), bar('排除', max(0,total-accepted),total,'#b35b45')]
+    observations = report.get('extras', {}).get('state_observations')
+    if observations:
+        parts.append('</section><section><h2>当下压力与情绪</h2>')
+        parts.extend('<p>' + esc(line) + '</p>' for line in observations['summary_lines'])
     ten = report.get('extras', {}).get('ten_min')
     if ten:
         parts.append('<section><h2>十分钟测试＋训练</h2><p>' + esc(ten.get('note')) + '</p>')
+        overview = ten.get('indicator_overview') or {}
+        if overview:
+            parts.append('<h3>训练阶段脑电指数（描述性）</h3><p>' + esc(overview.get('note', '')) + '</p>')
+            for key, label in [('focus', '专注相关指数'), ('relax', '放松度'), ('load', '认知负荷')]:
+                stat = overview.get('summary', {}).get(key)
+                if stat:
+                    parts.append('<p>' + label + '：' + esc(stat['mean']) + '；n=' + esc(stat['n']) + '</p>')
+            if overview.get('reason'):
+                parts.append('<p>' + esc(overview['reason']) + '</p>')
         for grade, label in [('A', '严格可用'), ('B', '受限片段可用'), ('C', '不可解释')]:
             parts.append(bar(label, d.get('grades', {}).get(grade, 0), total))
         parts.append('<p>等级按窗口计数，重叠窗不是独立样本。B级仅作描述与质量反馈。</p>')
@@ -81,6 +98,11 @@ def render_html(report):
             for ch, ref in ten.get(key, {}).items():
                 parts.append('<p>' + esc(label) + '通道' + esc(ch) + '：去重覆盖 ' + esc(ref.get('usable_seconds', '未知')) + ' 秒；MAD ' + esc(ref.get('mad')) + '</p>')
         for segment in ten.get('segments', []):
+            stats = segment.get('stats') or {}
+            if stats.get('timing_spec'):
+                parts.append('<p>训练时间统计：有效覆盖 ' + esc(stats.get('valid_time_ratio'))
+                             + '；整段达标 ' + esc(stats.get('on_target_ratio'))
+                             + '；有效时间内达标 ' + esc(stats.get('on_target_valid_ratio')) + '</p>')
             parts.append('<p>训练轮 ' + esc(segment['index']) + '（秒）：' + esc(segment.get('mode_seconds', {})) + '；未反馈秒数 ' + esc(segment.get('unobserved_seconds', '未知')) + '</p>')
         parts.append('<p>实际采集耗时 ' + esc(ten.get('elapsed_sec')) + ' 秒；倍率 ' + esc(ten.get('time_scale')) + '</p></section>')
     for key,label in [('baseline_eyes_open' ,'睁眼'),('baseline_eyes_closed','闭眼')]:

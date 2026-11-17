@@ -20,6 +20,7 @@ param(
     [ValidateSet("onefile", "onedir")]
     [string]$Mode = "onefile",
     [string]$Name = "ningsi-studio",
+    [string]$PythonExe,
     [switch]$Clean,
     [switch]$NoPip
 )
@@ -33,13 +34,14 @@ $Root = Split-Path -Parent $Studio                  # workspace root
 $Dist = Join-Path $Studio "dist"
 $Work = Join-Path $Studio "build\pyinstaller"
 $Spec = Join-Path $Studio "build"
+$env:PYINSTALLER_CONFIG_DIR = Join-Path $Spec "pyinstaller-cache"
 $Entry = Join-Path $PSScriptRoot "frozen_entry.py"
 
 function Write-Step([string]$Text) { Write-Host ("  [build] " + $Text) }
 function Fail([string]$Text) { Write-Host ("  [build] ERROR: " + $Text) -ForegroundColor Red; exit 1 }
 
 # ------------------------------------------------------------------ python
-$Python = Join-Path $Studio ".venv\Scripts\python.exe"
+$Python = if ($PythonExe) { $PythonExe } else { Join-Path $Studio ".venv\Scripts\python.exe" }
 if (-not (Test-Path $Python)) {
     $Python = Join-Path $Root ".venv\Scripts\python.exe"
 }
@@ -105,8 +107,14 @@ $Arguments = @(
     "--paths", $StudioSrc,
     "--paths", $EngineSrc,
     "--add-data", ($WebDir + ";web"),
+    # Preserve the exact feature-engine source bytes used by capture fingerprints.
+    "--add-data", ((Join-Path $EngineSrc "ningsi\config.py") + ";capture_engine_source"),
+    "--add-data", ((Join-Path $EngineSrc "ningsi\signal") + ";capture_engine_source/signal"),
+    "--add-data", ((Join-Path $EngineSrc "ningsi\models\research_features.py") + ";capture_engine_source/models"),
+    "--add-data", ((Join-Path $EngineSrc "ningsi\models\logistic.py") + ";capture_engine_source/models"),
     "--collect-all", "pylsl",
     "--collect-submodules", "ningsi",
+    "--add-data", ((Join-Path $EngineSrc "ningsi\models\frontal_affect.json") + ";ningsi/models"),
     "--collect-submodules", "ningsi_studio",
     # schema.sql 是包内的运行期数据文件（建库时读）。--collect-submodules 只收模块，
     # --collect-data 在本机实测没有把它带进来，所以这里再显式 add-data 一份（幂等）。

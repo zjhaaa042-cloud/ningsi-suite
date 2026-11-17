@@ -13,6 +13,7 @@ export const EVENT_TYPES = [
   'started', 'notice', 'phase', 'progress', 'quality', 'baseline', 'window',
   'scale_request', 'scale_scored', 'behavior_request', 'trial', 'behavior',
   'monitor', 'training_start', 'feedback', 'segment', 'assessment', 'model',
+  'model_prediction',
   'artifacts', 'cancelled', 'error', 'finished', 'scales', 'closed',
 ];
 

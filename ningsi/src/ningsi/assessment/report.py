@@ -55,7 +55,7 @@ class SessionReport:
                 "baseline": config.BASELINE_SPEC,
                 "assessment": config.LABEL_SPEC,
                 "preprocess": "preprocess-v2",
-                "training": "neurofeedback-v2",
+                "training": config.TRAINING_SPEC,
             },
             "indicators": self.indicators,
             "quality": self.quality,
@@ -74,7 +74,7 @@ class SessionReport:
             f"# 凝思状态评估报告（sub-{self.participant} / ses-{self.session} / run-{self.run}）",
             "",
             f"- 指标口径：{config.INDICATOR_SPEC}；基线口径：{config.BASELINE_SPEC}；处理链：{config.SPECTRUM_SPEC}",
-            f"- 软件版本：{config.VERSION}；预处理协议：preprocess-v2；训练协议：neurofeedback-v2",
+            f"- 软件版本：{config.VERSION}；预处理协议：preprocess-v2；训练协议：{config.TRAINING_SPEC}",
             f"- 解释边界：{config.VALIDATION_NOTE}",
             "",
         ]
@@ -107,6 +107,24 @@ class SessionReport:
                           "- 质量等级窗数：" + json.dumps(self.extras["signal_diagnostics"].get("grades"), ensure_ascii=False),
                           "- 同通道中位数变化：" + json.dumps(ten["changes"], ensure_ascii=False),
                           "- 分轮反馈时长：" + json.dumps([x["mode_seconds"] for x in ten["segments"]], ensure_ascii=False)])
+            for segment in ten["segments"]:
+                stats = segment.get("stats") or {}
+                if stats.get("timing_spec"):
+                    lines.append(f"- 第{segment['index']}轮训练时间统计：有效覆盖{stats['valid_time_ratio']:.1%}；"
+                                 f"整段达标{stats['on_target_ratio']:.1%}；有效时间内达标{stats['on_target_valid_ratio']:.1%}。"
+                                 + segment.get("adaptation_reason", "") if stats.get("valid_seconds", 0) > 0 else
+                                 f"- 第{segment['index']}轮无有效脑电反馈；有效覆盖0%，不计算达标率、不调整目标。")
+            overview = ten.get("indicator_overview") or {}
+            if overview:
+                lines.extend(["", "### 训练阶段脑电指数（描述性）", overview.get("note", "")])
+                for key, label in (("focus", "专注相关指数"), ("relax", "放松度"), ("load", "认知负荷")):
+                    stat = overview.get("summary", {}).get(key)
+                    if stat:
+                        lines.append(f"- {label}：{stat['mean']:.4f}（波动 {stat['std']:.4f}，n={stat['n']}）")
+                quality = overview.get("quality", {})
+                lines.append(f"- 训练可评分窗：{quality.get('windows_scored', 0)}/{quality.get('windows_total', 0)}")
+                if overview.get("reason"):
+                    lines.append("- " + overview["reason"])
         indicator_summary = self.indicators.get("summary", {}) if isinstance(self.indicators, dict) else {}
         labels = {"focus": "专注相关脑电指数", "relax": "放松度", "load": "认知负荷"}
         if indicator_summary:
@@ -115,7 +133,8 @@ class SessionReport:
                 if stat:
                     lines.append(f"- {label}：{stat['mean']:.2f}（波动 {stat['std']:.2f}，n={stat['n']}）")
         else:
-            lines.append("- 无可用指标（见采集质量）")
+            lines.append("- 本协议未采集独立监测阶段指数；训练指数与PVT结果单独展示。" if ten
+                         else "- 无可用指标（见采集质量）")
         if isinstance(self.indicators, dict) and self.indicators.get("band_z"):
             band_text = "、".join(f"{k} {v:+.2f}" for k, v in sorted(self.indicators["band_z"].items()))
             lines.append(f"- 相对基线的频带 z 值：{band_text}")
@@ -130,10 +149,13 @@ class SessionReport:
                              f"前后半段对数比值均值差 {quality.get('half_mean_difference')}；"
                              f"质检原因 {baseline.get('reasons') or '无'}。稳定性尚未验证。")
         q = self.quality or {}
-        lines.append(
-            f"- 4 秒窗 {q.get('windows_usable', 0)}/{q.get('windows_total', 0)} 可用"
-            f"（可用窗比例 {q.get('valid_ratio', 0):.0%}）"
-        )
+        if (self.extras or {}).get("protocol") == "ten_min" and not q.get("windows_total"):
+            lines.append("- 本协议未采集独立监测窗口；启动质检、基线与训练质量见分级窗口统计。")
+        else:
+            lines.append(
+                f"- 4 秒窗 {q.get('windows_usable', 0)}/{q.get('windows_total', 0)} 可用"
+                f"（可用窗比例 {q.get('valid_ratio', 0):.0%}）"
+            )
         if q.get("unusable_reasons"):
             detail = "、".join(f"{k}×{v}" for k, v in sorted(q["unusable_reasons"].items()))
             lines.append(f"- 排除原因：{detail}（含伪迹窗不计入指标）")
@@ -157,6 +179,9 @@ class SessionReport:
         lines += ["", "## 四、行为任务"]
         if self.behavior:
             for name, result in sorted(self.behavior.items()):
+                if not result:
+                    lines.append(f"- {name.upper()}：未采集")
+                    continue
                 if name == "sart":
                     lines.append(
                         f"- SART：{result.get('trials', '—')} 试次（No-Go {result.get('nogo_trials', '—')}），"
@@ -193,4 +218,8 @@ class SessionReport:
             for item in a.evidence:
                 state = "可用" if item.available else "不可用"
                 lines.append(f"- [{item.code}]（{item.source}/{state}）{item.summary}；引用 {json.dumps(item.ref, ensure_ascii=False)}")
+        observations = (self.extras or {}).get("state_observations")
+        if observations:
+            lines.extend(["", "## 当下压力与情绪", ""])
+            lines.extend(f"- {item}" for item in observations["summary_lines"])
         return "\n".join(lines)
