@@ -28,6 +28,19 @@ Capture ──带版本与校验值的导出文件──▶ Studio 真人模型�
 
 ## 发行版下载与使用（Windows x64）
 
+当前正式版为 **v0.1.11**，包含 Studio 0.1.11、Capture 0.4.1 和引擎 0.1.2，无需安装 Python。
+
+- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.11)
+- [下载 Windows x64 完整便携套件（约 49 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.11/ningsi-product-0.1.11-20261117.zip)
+- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.11/ningsi-product-0.1.11-20261117.zip.sha256)
+- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.11/README.zh-CN.txt) · [构建记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.11/BUILD.json) · [EXE 验收记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.11/FROZEN_VERIFICATION.json)
+
+完整解压到可写目录，保留整个 `_internal`，双击 `01-Start-Studio.bat` 打开平台，或 `02-Start-Capture.bat` 打开采集器。升级请使用新目录；需要原会话时先备份数据，再按包内说明指定旧数据目录。
+
+本版修复热力图准备窗误标和训练窗口遗漏，增加覆盖与原因摘要、分页筛选、设备档案及开始前配置检查。完整回归 573 项通过、3 项可选检查跳过，EXE 通过 25 项验收。程序未签名；真人识别与训练效果仍需独立验证。套件不含私人脑电或会话数据库。
+
+### v0.1.2 历史发行版
+
 以下为 **v0.1.2** 历史发行版的使用说明。该版无需安装 Python，源码见 [v0.1.2 标签](https://github.com/zjhaaa042-cloud/ningsi-suite/tree/v0.1.2)，构建提交见其发行附件 `BUILD.json`。
 
 - [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.2)
