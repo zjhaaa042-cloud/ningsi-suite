@@ -32,16 +32,16 @@ Capture ──带版本与校验值的导出文件──▶ Studio 真人模型�
 
 ## 发行版下载与使用（Windows x64）
 
-当前正式版为 **v0.1.12**，包含 Studio 0.1.12、Capture 0.4.1 和引擎 0.1.2，无需安装 Python。
+当前正式版为 **v0.1.13**，包含 Studio 0.1.13、Capture 0.4.1 和引擎 0.1.2，无需安装 Python。
 
-- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.12)
-- [下载 Windows x64 完整便携套件（约 49 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.12/ningsi-product-0.1.12-20261117.zip)
-- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.12/ningsi-product-0.1.12-20261117.zip.sha256)
-- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.12/README.zh-CN.txt) · [构建记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.12/BUILD.json) · [EXE 验收记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.12/FROZEN_VERIFICATION.json)
+- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.13)
+- [下载 Windows x64 完整便携套件（约 49 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/ningsi-product-0.1.13-20261117.zip)
+- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/ningsi-product-0.1.13-20261117.zip.sha256)
+- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/README.zh-CN.txt) · [构建记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/BUILD.json) · [EXE 验收记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.13/FROZEN_VERIFICATION.json)
 
 完整解压到可写目录，保留整个 `_internal`，双击 `01-Start-Studio.bat` 打开平台，或 `02-Start-Capture.bat` 打开采集器。升级请使用新目录；需要原会话时先备份数据，再按包内说明指定旧数据目录。
 
-本版增加有效时长训练、坏窗暂停与有限补采，分开显示有效时间内达标率、覆盖和用时，并保留热力图、设备档案及开始前配置检查。完整回归运行 619 项：616 项通过、3 项可选检查跳过，最终 EXE 通过 35 项验收。程序未签名；真人识别与训练效果仍需独立验证。套件不含私人脑电或会话数据库。
+本版补充 BSense-R 手册参考、安全资料草稿、连接与录制提示，并改善被拒绝请求的连接收尾；原有效时长训练与质量门继续保留。完整回归运行 635 项：632 项通过、3 项可选检查跳过，最终 EXE 通过 38 项验收。程序未签名；真人识别与训练效果仍需独立验证。套件不含私人脑电或会话数据库。
 
 ### v0.1.2 历史发行版
 
