@@ -17,7 +17,7 @@ import re
 import sys
 import tempfile
 
-from ningsi.acquisition.eeg import UNIT_FACTORS
+from ningsi_studio.domain.device_profiles import empty_profile as _empty_profile, normalize_profile as _normalize_profile
 
 
 EVIDENCE_SCHEMA = "ningsi-showcase-evidence-v1"
@@ -288,52 +288,6 @@ def build_evidence(workspace=None) -> dict:
             snapshot["snapshot_note"] = "随软件提供的脱敏开发证据快照；不代表当前设备或本次会话的实时测量。"
             return snapshot
     return result
-
-
-def _empty_profile():
-    return {**{key: "" for key in _TEXT_FIELDS}, **{key: None for key in sorted(_NUMBER_FIELDS)}}
-
-
-def _normalize_profile(payload):
-    if not isinstance(payload, dict):
-        raise ValueError("设备声明必须是 JSON 对象。")
-    values = dict(payload)
-    # Keep one canonical output field while supporting the initial form name.
-    if "materials" in values:
-        if "document_reference" in values and values["materials"] != values["document_reference"]:
-            raise ValueError("设备资料出处字段不一致。")
-        values["document_reference"] = values.pop("materials")
-    unknown = values.keys() - (_TEXT_FIELDS.keys() | _NUMBER_FIELDS)
-    if unknown:
-        raise ValueError("设备声明含不支持的字段。")
-    profile = _empty_profile()
-    for key, limit in _TEXT_FIELDS.items():
-        value = values.get(key, "")
-        if not isinstance(value, str) or len(value) > limit:
-            raise ValueError(f"{_FIELD_LABELS.get(key, '备注')}必须是限定长度的文本。")
-        if any(ord(char) < 32 and char not in "\n\r\t" for char in value):
-            raise ValueError("设备声明不能包含控制字符。")
-        profile[key] = value.strip()
-    for key in _NUMBER_FIELDS:
-        value = values.get(key)
-        if value in (None, ""):
-            continue
-        numeric = _number(value)
-        if numeric is None or numeric <= 0:
-            raise ValueError(f"{_FIELD_LABELS[key]}必须是有限正数。")
-        if key == "srate" and not 1 <= numeric <= 10000:
-            raise ValueError("设备声明的采样率范围为 1–10000 Hz。")
-        if key == "scale_to_uv" and not 1e-12 <= numeric <= 1e12:
-            raise ValueError("单位换算倍率超出支持范围。")
-        profile[key] = numeric
-    unit = profile["source_unit"]
-    if unit not in ("", "ADC", *UNIT_FACTORS):
-        raise ValueError("请选择 nV、uV、mV、V 或 ADC 源单位。")
-    if unit in UNIT_FACTORS and profile["scale_to_uv"] is not None and profile["scale_to_uv"] != UNIT_FACTORS[unit]:
-        raise ValueError("所选电压单位与换算到 µV 的倍率冲突。")
-    if len(json.dumps(profile, ensure_ascii=False).encode("utf-8")) > MAX_PROFILE_BYTES:
-        raise ValueError("设备声明内容过大。")
-    return profile
 
 
 def _public_profile(profile, *, saved, updated_at=None, read_error=None):

@@ -16,6 +16,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command")
     gui = sub.add_parser("gui", help="启动独立桌面采集器（默认）")
     gui.add_argument("--data", type=Path)
+    gui.add_argument("--lsl-markers", action="store_true", help="显式开启可选 LSL 任务标记流，供 LabRecorder 另行录制")
     doctor = sub.add_parser("doctor", help="检查采集器和算法依赖")
     doctor.add_argument("--output", type=Path)
     demo = sub.add_parser("demo", help="生成明确标记的合成验收记录，不接真实设备")
@@ -48,7 +49,7 @@ def main(argv=None):
     ensure_engine()
     if args.command in (None, "gui"):
         from .gui import run
-        run(getattr(args, "data", None))
+        run(getattr(args, "data", None), lsl_markers=getattr(args, "lsl_markers", False))
         return 0
     try:
         if args.command == "doctor":

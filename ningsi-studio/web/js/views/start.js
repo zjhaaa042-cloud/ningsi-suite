@@ -2,6 +2,7 @@ import { api } from '../api.js';
 import { describeError } from '../store.js';
 import { button, el, field } from '../util.js';
 import { renderPreviewCard } from '../preview.js';
+import { createSessionPreflight } from './session-preflight.js';
 
 const option = (value, text) => el('option', { value, text });
 
@@ -12,7 +13,7 @@ export async function render(container, ctx) {
   const participant = el('select', { id: 'participant' }, [option('', '新参与者（自动分配编号）')]);
   const alias = el('input', { id: 'alias', type: 'text', placeholder: '可留空', maxLength: 80 });
   const aliasField = field('参与者别名', alias);
-  participant.onchange = () => { aliasField.hidden = Boolean(participant.value); };
+  participant.onchange = () => { aliasField.hidden = Boolean(participant.value); update(); };
   const device = el('select', { id: 'device' });
   const unit = el('select', { id: 'eeg-source-unit' }, [
     option('', '使用设备声明'), ...['uV','mV','V','nV','ADC'].map(u => option(u, u === 'ADC' ? 'ADC 计数' : u)),
@@ -44,6 +45,13 @@ export async function render(container, ctx) {
   const scanButton = button('重新扫描', scan, { small: true });
   const start = button('开始评估', () => launch(false), { primary: true });
   const demo = button('运行模拟演示', () => launch(true));
+  const preflight = createSessionPreflight(ctx, { onChange: () => update(false), onUseProfile: profile => {
+    if (!Array.from(unit.options).some(item => item.value === profile.source_unit)) return;
+    unit.value = profile.source_unit;
+    factor.value = profile.scale_to_uv ?? '';
+    calibration.open = true;
+    update();
+  } });
   const choices = [
     ['ten_min', '轻量体验', '十分钟测试与训练', '快速了解本次状态，体验反馈训练。', '约 10 分钟'],
     ['short', '标准评估', '专注力综合评估', '结合脑电、量表与行为任务建立评估。', '按协议计算'],
@@ -74,8 +82,13 @@ export async function render(container, ctx) {
       el('div', { class: 'device-setup__head' }, [el('strong', { text: '脑电设备' }), scanButton]),
       field('选择 EEG 数据流', device), deviceNote, calibration, preview,
     ]),
+    preflight.node,
   ]);
-  function update() {
+  function calibrationSelection() {
+    return unit.value ? { source_unit: unit.value,
+      ...(unit.value === 'ADC' ? { scale_to_uv: Number.isFinite(factor.valueAsNumber) ? factor.valueAsNumber : null } : {}) } : null;
+  }
+  function update(refreshCheck = true) {
     const full = purpose.value === 'full';
     const profile = profiles.find(row => row.key === purpose.value);
     modeField.hidden = !full;
@@ -96,13 +109,18 @@ export async function render(container, ctx) {
     unitField.hidden = !device.value;
     factorField.hidden = unitField.hidden || unit.value !== 'ADC';
     calibration.hidden = !device.value;
+    if (refreshCheck && !scanning && !submitting) preflight.refresh({
+      device: device.value, protocol: purpose.value, participant: participant.value,
+      eeg_calibration: calibrationSelection(),
+    });
     const calibrationReady = unit.value !== 'ADC' || (Number.isFinite(factor.valueAsNumber) && factor.valueAsNumber > 0);
     readiness.textContent = scanning ? '正在扫描设备' : !device.value ? '等待连接脑电设备'
       : !calibrationReady ? '请补充有效的 ADC 校准倍率' : !subjectsReady || !profile ? '正在加载评估设置'
-      : submitting ? '正在创建评估会话' : '设备已选择 · 可开始评估';
-    readiness.dataset.ready = String(Boolean(device.value && calibrationReady && subjectsReady && profile));
+      : submitting ? '正在创建评估会话' : preflight.pending ? '正在核对评分配置'
+      : !preflight.ready ? '请处理开始前的配置检查' : '配置已检查 · 开始后进行信号质检';
+    readiness.dataset.ready = String(Boolean(device.value && calibrationReady && subjectsReady && profile && preflight.ready));
     start.disabled = submitting || scanning || !subjectsReady || !device.value || !profile
-      || (unit.value === 'ADC' && !(Number.isFinite(factor.valueAsNumber) && factor.valueAsNumber > 0));
+      || !preflight.ready || (unit.value === 'ADC' && !(Number.isFinite(factor.valueAsNumber) && factor.valueAsNumber > 0));
     start.textContent = submitting ? '正在启动…' : (full ? '开始评估与训练' : '开始评估');
     demo.disabled = submitting || !profiles.some(row => row.key === 'short');
   }
@@ -113,15 +131,18 @@ export async function render(container, ctx) {
     deviceNote.textContent = '正在扫描脑电设备…';
     update();
     const previous = device.value;
+    const requested = previous || ctx.params.get('device') || '';
     try {
       const response = await api.devices(1.2);
       if (ctx.signal.aborted) return;
       const rows = response.data.sources.filter(row => (row.real || row.simulated) && row.is_eeg && row.usable !== false && row.key.startsWith('lsl:'));
       device.replaceChildren(...rows.map(row => option(row.key, (row.device || row.key) + (row.simulated ? '（模拟流）' : ''))));
-      if (rows.some(row => row.key === previous)) device.value = previous;
+      if (rows.some(row => row.key === requested)) device.value = requested;
+      else if (requested) device.value = '';
       else device.value = rows.find(row => !row.simulated)?.key || '';
       if (!device.value) device.prepend(option('', rows.length ? '请选择脑电流' : '未发现脑电设备'));
-      deviceNote.textContent = rows.length ? '' : '请在采集软件中开启 EEG 推流，然后重新扫描。';
+      deviceNote.textContent = rows.length ? (requested && !rows.some(row => row.key === requested) ? '指定设备未发现，请确认采集程序或选择当前数据源。' : '')
+        : '请在采集软件中开启 EEG 推流，然后重新扫描。';
     } catch (error) {
       device.replaceChildren(option('', '扫描失败'));
       deviceNote.textContent = describeError(error);
@@ -140,6 +161,7 @@ export async function render(container, ctx) {
 
   async function launch(isDemo) {
     if (submitting || (isDemo ? demo.disabled : start.disabled)) return;
+    const checkedCalibration = !isDemo ? preflight.data?.calibration || calibrationSelection() : null;
     submitting = true;
     message.textContent = '';
     update();
@@ -160,8 +182,7 @@ export async function render(container, ctx) {
         participant: id, create_subject: false, device: isDemo ? 'sim-bsense' : device.value,
         protocol: purpose.value, training_mode: isDemo ? 'quick' : mode.value,
         time_scale: isDemo ? 0.05 : 1,
-        eeg_calibration: !isDemo && unit.value ? { source_unit: unit.value,
-          ...(unit.value === 'ADC' ? { scale_to_uv: factor.valueAsNumber } : {}) } : null,
+        eeg_calibration: checkedCalibration,
       });
       if (ctx.signal.aborted) return;
       ctx.store.setState({ currentSession: data.session, phases: data.phases, sessionRuntime: data.runtime });

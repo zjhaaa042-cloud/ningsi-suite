@@ -150,6 +150,9 @@ export const api = {
   config: () => get('/api/config'),
   devices: (probe) => get('/api/devices', { probe }),
   deviceStatus: () => get('/api/devices/status'),
+  deviceProfile: (device) => get('/api/device-profile', { device }),
+  saveDeviceProfile: (body) => post('/api/device-profile', body),
+  sessionPreflight: (body) => post('/api/sessions/preflight', body),
   // 无会话的设备实时预览：状态 / 一窗波形 / 启动 / 停止
   devicePreview: () => get('/api/devices/preview'),
   devicePreviewWindow: () => get('/api/devices/preview', { window: 1 }),

@@ -1,5 +1,19 @@
 # 凝思 Studio 接口契约（/api）
 
+## 设备资料与开始前检查
+
+| 方法与路径 | 请求 / 返回 |
+|---|---|
+| `GET /api/device-profile` | 查询参数 `device=lsl:<流名称>` 或 `sim-bsense`；返回该来源独立的 `profile`、`saved`、`missing_fields`、`updated_at` 与 `status=pending_verification`。离线也可查看；无档案不会套用其他来源或历史展示档案 |
+| `POST /api/device-profile` | `{device,profile:{manufacturer,model,electrodes,reference,srate,source_unit,scale_to_uv,unit_basis,document_reference,notes?}}`；原子保存所选来源的操作员声明，不认证合规或标定。资料出处仅存文本，不读取路径 |
+| `POST /api/sessions/preflight` | `{device,protocol?,participant?,eeg_calibration?}`；只读扫描服务端 LSL 元数据并核对配置，返回 `ready`、`checks[]`、`device_profile`、`calibration`、`descriptor`、`scoring.relative_indices` 与 `scoring.attention_model`。不创建会话或参与者，不建立 EEG inlet，不采集或保存脑电 |
+
+`checks[].status` 为 `pass/warning/fail/pending`，并有 `key/label/message/action?`。`ready=true` 仅表示当前可见的真实 EEG 来源与单位配置可用于开始流程；实时信号质量、伪迹、新鲜度和个人基线仍为 `pending`，开始后才检查。模拟源、同名来源歧义、非 EEG、无设备、采样率不大于 90 Hz 或缺少单位确认时为 `false`。当前生产处理链使用 45 Hz 低通，检查只拒绝不支持的输入，不调整滤波参数。无有效 ADC 倍率或单位与设备声明冲突时返回 `checks.units=fail`。非法请求形状、来源键或协议为 422；显式传入的参与者不存在为 404。
+
+`scoring.attention_model.status` 为 `none/compatible/incompatible/unavailable/simulation`，有模型时附 `model_id`。适配检查复用实时推断器的设备名称、来源标识、通道、电极标签、采样率、单位、时标与实现版本判定；离线原生 REC 时钟模型不能作为普通实时 LSL 模型。配置匹配仍不承诺能出分或识别有效。十分钟方案不含 SART 独立监测，额外标明模型适用范围。模型不兼容或文件损坏只发出明确警告，保留原有相对指数评估；模型结果与相对指数分别呈现，预警和反馈目标仍为原指数。
+
+历史设备资料不会悄悄覆盖实时单位。`calibration` 只回传本次显式提交并核对后的确认值；设备未声明单位时应由操作者本次确认，或沿用已经通过严格同源匹配的启用模型配置。所有新增接口沿用现有 API 令牌、来源和请求体限制。
+
 ## 开发分析接口（历史展示模块）
 
 下列接口保留供开发分析使用；历史 `#/showcase` 页面已退出正式产品路由。信号分析不修改源数据或既有会话，普通请求仍限制为 1 MiB。返回的实现状态、历史验证摘要和现场验收状态各自保留，不计算虚假的总体达标率。

@@ -20,6 +20,7 @@ import numpy as np
 
 from . import __version__
 from .clock import Clock, Stamp
+from .markers import MarkerPublisher
 
 SCHEMA_VERSION = "ningsi-capture-v1"
 COHORTS = ("pilot", "development", "test", "unassigned")
@@ -48,7 +49,7 @@ def implementation_fingerprint(policy=None):
 
 class SessionStore:
     def __init__(self, root, *, participant, visit="01", cohort="unassigned", source,
-                 protocol, clock=None, notes=""):
+                 protocol, clock=None, notes="", lsl_markers=False):
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", participant):
             raise ValueError("参与者请使用 1–40 位匿名字母、数字、横线或下划线编号。")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,20}", visit) or cohort not in COHORTS:
@@ -118,10 +119,15 @@ class SessionStore:
             "model_id": self.predictions.model["model_id"] if self.predictions.model else None,
         }
         self.metadata["shadow_250"] = self.predictions.shadow_metadata()
+        self.markers = MarkerPublisher(enabled=lsl_markers, clock_domain=self.clock.domain,
+                                       origin=source.get("data_origin", "unknown"))
+        self.marker_adapter_failures = 0
         self._save_meta()
         self.event("recording_start", {"source_kind": source["kind"]})
 
     def _save_meta(self):
+        self.metadata["lsl_markers"] = {**self.markers.snapshot(),
+                                        "adapter_failures": self.marker_adapter_failures}
         encoded = json.dumps(self.metadata, ensure_ascii=False, allow_nan=False)
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO meta VALUES ('session', ?)", (encoded,))
@@ -146,6 +152,12 @@ class SessionStore:
                 cur = self.db.execute("INSERT INTO events(kind,time_lsl,time_perf,utc,payload) VALUES (?,?,?,?,?)",
                                       (kind, stamp.lsl, stamp.perf, stamp.utc, encoded))
             self.event_count += 1
+            # The SQLite commit and original Stamp above are authoritative.
+            # Marker delivery can fail/drop independently without failing capture.
+            try:
+                self.markers.publish(cur.lastrowid, kind, payload, stamp.lsl)
+            except Exception:
+                self.marker_adapter_failures += 1
             if kind == "protocol_start" and self.protocol_start_perf is None:
                 self.protocol_start_perf = stamp.perf
             elif kind == "phase_start" and formal and self.formal_start_perf is None:
@@ -204,7 +216,8 @@ class SessionStore:
         with self.lock:
             return {"samples": self.sample_count, "events": self.event_count,
                     "last_received_perf": self.last_received, "latest": list(self.latest),
-                    "closed": self.closed, "path": str(self.path)}
+                    "closed": self.closed, "path": str(self.path),
+                    "lsl_markers": self.markers.snapshot()}
 
     def close(self, state="completed", reason=""):
         if state not in ("completed", "aborted", "failed"):
@@ -217,6 +230,10 @@ class SessionStore:
                     self.event("recording_stop", {"state": state, "reason": str(reason)})
                 self.closing = True
             self.predictions.close()
+            try:
+                self.markers.close()
+            except Exception:
+                self.marker_adapter_failures += 1
             with self.lock:
                 if self.predictions.write_failures:
                     self.metadata["probe_prediction"]["write_failures"] = self.predictions.write_failures

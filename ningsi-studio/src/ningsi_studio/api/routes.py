@@ -28,9 +28,10 @@ from ningsi_studio.core.runtime import SART_TRIAL_WINDOW, SessionManager
 from ningsi_studio.db import repository as repo
 from ningsi_studio.db import sqlite_store as store
 from ningsi_studio.domain import export as export_domain, state_checkins, eeg_units
+from ningsi_studio.domain import device_profiles, preflight
 from ningsi_studio.domain import model_training, scales as scales_domain
 from ningsi_studio.domain import showcase, showcase_evidence
-from ningsi_studio.domain.human_models import HumanModelService
+from ningsi_studio.domain.human_models import HumanModelService, load_active
 from ningsi_studio.domain.results import training_indicator_overview
 from ningsi_studio.http import sse
 from ningsi_studio.http.router import (ApiError, Conflict, Forbidden, NotFound, Request, Response, Router,
@@ -372,6 +373,58 @@ def build_router(settings: Settings) -> Router:
             **live_source.detected_source_fields(sources),
             "has_real_source": any(row.get("real") and not row.get("simulated") for row in sources),
         })
+
+    @router.get(r"/api/device-profile")
+    def device_profile(request: Request) -> Response:
+        try:
+            result = device_profiles.load_device_profile(settings.data_dir, request.query.get("device"))
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return Response.json(result)
+
+    @router.post(r"/api/device-profile")
+    def save_device_profile(request: Request) -> Response:
+        payload = schemas.typed(request.json())
+        if payload.keys() - {"device", "profile"}:
+            raise ValidationError("设备资料请求含不支持的字段。")
+        try:
+            result = device_profiles.save_device_profile(settings.data_dir, payload.get("device"), payload.get("profile"))
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return Response.json(result)
+
+    @router.post(r"/api/sessions/preflight")
+    def session_preflight(request: Request) -> Response:
+        payload = schemas.typed(request.json())
+        if payload.keys() - {"device", "protocol", "participant", "eeg_calibration"}:
+            raise ValidationError("开始前检查含不支持的字段。")
+        raw_device = payload.get("device") or ""
+        try:
+            device = device_profiles.normalize_device(raw_device) if raw_device else ""
+            profile = device_profiles.load_device_profile(settings.data_dir, device) if device else None
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        descriptors, scan_error = [], None
+        if device.startswith("lsl:"):
+            try:
+                from ningsi_studio.acquisition.lsl import probe_streams
+                descriptors = probe_streams(timeout=0.4)
+            except (RuntimeError, OSError, ImportError, ValueError):
+                scan_error = "device_scan_unavailable"
+        active, model_error = None, None
+        try:
+            active = load_active(settings.data_dir)
+        except (OSError, ValueError, TypeError, KeyError):
+            model_error = "model_unavailable"
+        try:
+            result = preflight.evaluate_preflight({**payload, "device": device}, descriptors=descriptors,
+                device_profile=profile, active_model=active, model_error=model_error, scan_error=scan_error)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        if payload.get("participant"):
+            with store.read_only(db_path) as conn:
+                _subject_row(conn, payload["participant"])
+        return Response.json(result)
 
     # ------------------------------------------------- 无会话的设备实时预览
     @router.get(r"/api/devices/preview")

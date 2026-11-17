@@ -97,7 +97,7 @@ class ExportUnitDialog(simpledialog.Dialog):
 
 
 class CaptureApp:
-    def __init__(self, root, data_dir=None):
+    def __init__(self, root, data_dir=None, *, lsl_markers=False):
         self.root = root
         self.data_dir = Path(data_dir or default_data_dir()).resolve()
         self.clock = Clock()
@@ -115,6 +115,7 @@ class CaptureApp:
         self.quality_monitor = None
         self.callback_error = None
         self.task_close_pending = False
+        self.initial_lsl_markers = bool(lsl_markers)
         self._build()
         root.report_callback_exception = self.on_callback_error
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -187,6 +188,19 @@ class CaptureApp:
         self._field(source, "参考电极", self.reference, 5)
         self._field(source, "时间处理", self.timing_mode, 6, list(TIMING_CHOICES))
         ttk.Label(source, text="BioMulti 可直接按包估计采样时间。先点厂商 REC 可在导出时用设备时钟复核。", wraplength=330).grid(row=7, column=0, columnspan=2, sticky="w", pady=(7, 0))
+        sync = ttk.Frame(tabs, padding=12)
+        tabs.add(sync, text="外部同步")
+        self.lsl_markers = tk.BooleanVar(root, value=self.initial_lsl_markers)
+        self.marker_checkbox = ttk.Checkbutton(sync, text="向 LabRecorder 发布任务标记（可选）",
+                                               variable=self.lsl_markers)
+        self.marker_checkbox.grid(row=0, column=0, sticky="w")
+        self.controls.append(self.marker_checkbox)
+        self.marker_status = tk.StringVar(root, value="默认关闭；不含答案，需另用 LabRecorder 选择标记流并录制。")
+        ttk.Label(sync, textvariable=self.marker_status, wraplength=330).grid(
+            row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(sync, text="先开始连续采集，等 LabRecorder 发现 EEG 与任务标记流并开始录制，再打开受试者任务。\n\n"
+                  "标记采用软件事件时刻；物理显示与设备延迟仍需独立测量。",
+                  wraplength=330).grid(row=2, column=0, sticky="w", pady=(12, 0))
         path_frame = ttk.Frame(left)
         path_frame.grid(row=1, column=0, sticky="ew")
         self.path_label = ttk.Label(path_frame, text=f"保存到：{self.data_dir}", wraplength=370)
@@ -383,7 +397,8 @@ class CaptureApp:
             self.config = PROTOCOL_CHOICES[self.protocol_mode.get()]()
             self.store = SessionStore(self.data_dir, participant=self.participant.get().strip(),
                                       visit=self.visit.get().strip(), cohort=COHORT_LABELS[self.cohort.get()],
-                                      source=source, protocol=self.config.as_dict(), clock=self.clock)
+                                      source=source, protocol=self.config.as_dict(), clock=self.clock,
+                                      lsl_markers=self.lsl_markers.get())
             self.callback_error = None
             self.recorder = SimRecorder(self.store) if simulated else LslRecorder(self.store, info)
             self.runner = None
@@ -411,6 +426,12 @@ class CaptureApp:
                 control.configure(state="disabled")
             self.status.set(("模拟演示：" if simulated or source.get("data_origin") != "real" else "LSL 连续采集：") + "正在接收并写入原始样本。")
             self.note(f"{self.protocol_mode.get()}　保存到 {self.store.path}")
+            if self.lsl_markers.get():
+                marker = self.store.markers.snapshot()
+                if marker["enabled"]:
+                    self.note(f"可选任务标记流：{marker['stream_name']}。请另用 LabRecorder 选择 EEG 与此流；发布不代表已录入 XDF。")
+                else:
+                    self.note("任务标记未启用：当前不是 LSL 本地时钟。原始采集和任务事件继续保存。")
             if source.get("native_rec"):
                 self.note(f"已绑定 BioMulti 原生 REC #{source['native_rec']['record_id']}。")
             elif source.get("timestamp_policy") == BIOMULTI_LSL_TIMING:
@@ -810,6 +831,12 @@ class CaptureApp:
             pass
         if self.store and not self.store.closed:
             snapshot = self.store.snapshot()
+            markers = snapshot["lsl_markers"]
+            if markers["requested"]:
+                if markers["state"] in ("failed", "unavailable"):
+                    self.marker_status.set("任务标记未发布/已中断：" + markers["error_code"] + "；原始采集继续。")
+                else:
+                    self.marker_status.set(f"标记已发送 {markers['published']}，排队 {markers['pending']}，丢弃 {markers['dropped']}；不代表已保存 XDF。")
             elapsed = self.clock.now().perf - self.started_perf
             fresh = snapshot["last_received_perf"] is not None and self.clock.now().perf - snapshot["last_received_perf"] < 3
             self.counter.set(f"{snapshot['samples']:,} 个样本    {snapshot['events']:,} 个事件    {int(elapsed)//60:02d}:{int(elapsed)%60:02d}")
@@ -868,7 +895,7 @@ class CaptureApp:
             self.root.destroy()
 
 
-def run(data_dir=None):
+def run(data_dir=None, *, lsl_markers=False):
     root = tk.Tk()
-    CaptureApp(root, data_dir)
+    CaptureApp(root, data_dir, lsl_markers=lsl_markers)
     root.mainloop()

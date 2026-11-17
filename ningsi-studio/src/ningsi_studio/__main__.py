@@ -253,6 +253,41 @@ def _simulate_outlet(args) -> int:
                       duration=args.duration)
 
 
+def _preflight(args) -> int:
+    """Expose the same read-only configuration policy used by the product UI."""
+    from ningsi_studio.acquisition.lsl import probe_streams
+    from ningsi_studio.domain.device_profiles import load_device_profile
+    from ningsi_studio.domain.human_models import load_active
+    from ningsi_studio.domain.preflight import evaluate_preflight
+
+    settings = _settings(args)
+    descriptors, scan_error, active, model_error = [], None, None, None
+    try:
+        descriptors = probe_streams(args.timeout)
+    except Exception as error:
+        scan_error = str(error)
+    try:
+        active = load_active(settings.data_dir)
+    except (OSError, ValueError, TypeError, KeyError):
+        model_error = "model_unavailable"
+    calibration = None
+    if args.source_unit:
+        calibration = {"source_unit": args.source_unit}
+        if args.uv_per_count is not None:
+            calibration["scale_to_uv"] = args.uv_per_count
+    result = evaluate_preflight({"device": args.device, "protocol": args.protocol,
+                                "eeg_calibration": calibration}, descriptors=descriptors,
+                               device_profile=load_device_profile(settings.data_dir, args.device),
+                               active_model=active, model_error=model_error, scan_error=scan_error)
+    encoded = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with args.output.open("x", encoding="utf-8") as output:
+            output.write(encoded + "\n")
+    print(encoded)
+    return 0 if result["ready"] else 2
+
+
 def _ui_check(args) -> int:
     """真实浏览器端到端：起服务 + 起仿真 LSL 流，点按钮、看实时波形。"""
     import runpy
@@ -324,6 +359,16 @@ def build_parser() -> argparse.ArgumentParser:
     lslcheck.add_argument("--timeout", type=float, default=3.0, help="扫描超时（秒）")
     lslcheck.add_argument("--seconds", type=float, default=5.0, help="连接后接收时长（秒）")
     lslcheck.set_defaults(func=_lsl_check)
+
+    preflight = sub.add_parser("preflight", help="只读核对设备档案、单位与模型适配；不采集EEG或创建会话")
+    preflight.add_argument("--device", required=True, help="精确来源键，例如 lsl:实际流名")
+    preflight.add_argument("--protocol", choices=("ten_min", "short", "full"), default="ten_min")
+    preflight.add_argument("--source-unit", choices=("uV", "mV", "V", "nV", "ADC"))
+    preflight.add_argument("--uv-per-count", type=float, help="ADC时需有标定依据的µV/计数倍率")
+    preflight.add_argument("--timeout", type=float, default=2., help="LSL元数据扫描秒数")
+    preflight.add_argument("--data", help="读取已有Studio配置的目录；不创建数据库")
+    preflight.add_argument("--output", type=Path, help="新JSON报告文件；不覆盖已有文件")
+    preflight.set_defaults(func=_preflight)
 
     outlet = sub.add_parser("simulate-outlet",
                             help="发布一条仿真 EEG 的 LSL 流（无需硬件即可验证采集链路）")

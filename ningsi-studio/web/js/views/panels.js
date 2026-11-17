@@ -16,6 +16,7 @@ import { api } from '../api.js';
 import { describeError } from '../store.js';
 import { renderPreviewCard } from '../preview.js';
 import { renderHumanModels } from './human-models.js';
+import { createDeviceProfile } from './device-profile.js';
 import {
   DASH, button, card, el, empty, field, fmtInt, fmtNum, fmtPercent, fmtSeconds,
   list, pageFrame, pick, table,
@@ -227,7 +228,7 @@ function renderSources(sources, sourcesError, conditionNote) {
   }
   if (!rows.length) {
     return card('可用数据源', [
-      empty('没有探测到可用数据源。若需要真实设备，请先启动采集端（如 BioMultiLite / BSense-R）或运行 python -m ningsi_studio simulate-outlet。'),
+      empty('没有探测到可用数据源。请在厂商采集软件中开启 EEG 推流，核对设备连接后刷新；无设备体验请在开始评估页选择模拟演示。'),
     ]);
   }
   return card('可用数据源', [
@@ -296,6 +297,8 @@ export const devices = {
     const statusHost = el('p', { class: 'muted', text: '正在读取设备状态…' });
     const bodyHost = el('div');
     host.append(statusHost, bodyHost);
+    const deviceProfile = createDeviceProfile(ctx);
+    host.append(deviceProfile.node);
     // 实时预览放在最前：现场第一步就是"现在到底有没有信号、波形正不正常"，
     // 不需要先建会话（2026-10-07 需求）。
     const previewHost = el('div');
@@ -309,6 +312,7 @@ export const devices = {
         const data = response.data || {};
         const devices = list(pick(data, 'devices', []));
         const sources = list(pick(data, 'sources', []));
+        deviceProfile.setSources(sources);
         const conditionNote = pick(data, 'condition_note', null);
         const active = list(pick(data, 'active_sessions', []));
         statusHost.textContent = `运行中会话 ${active.length} 个｜可用数据源 ${sources.length} 个｜更新时间 ${new Date().toLocaleTimeString('zh-CN')}`;
