@@ -111,6 +111,14 @@
   `sart{practice_trials, trials, nogo_trials, nogo_digit, window{practice, main}}`、
   `pvt{duration_sec, isi_sec, lapse_sec}`、`scales{codes, items_per_scale}`。
   向导第 3 步据此算出"整场约 N 分钟、需要动手的是哪几步、各多少次"。
+- **`device_guides[]`**：只读的手册参考资料，目前包括 `id:"bsense-r"`、
+  `schema:"ningsi-device-guide-v1"`。每项返回 `title`、`overview`、
+  `source{filename,sha256,page_count,revision}`、`specs[{label,value,note,pages}]`、
+  `steps[{title,text,pages}]`、`quality_notes[{title,text,pages}]`、`unknowns[{label,text}]`，
+  所有 `pages` 均为含封面的 PDF 页码；不返回用户私有路径，不在请求时读取 PDF。
+  `declaration_seed` 仅包含 `model / document_reference / notes`，供用户明确选择后补入空白草稿，
+  仍需主动保存。手册规格不会自动填成实际导联、参考/地、采样率或 LSL 单位/倍率；
+  读取此资料不保存档案、不打开采集、不改变 preflight 的 `ready` 或质量/模型门槛。
 
 ### `GET /api/devices?probe=1.0`
 ```json

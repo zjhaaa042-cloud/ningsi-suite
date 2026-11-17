@@ -29,6 +29,8 @@ pyxdf 提供已有的 XDF 读取实现，应记录实际使用的读取参数与
 
 具体现场顺序与记录字段见 [现场验收清单](FIELD_ACCEPTANCE_CHECKLIST.txt)。
 
+用户补充的 BSense-R 手册已逐页核对，规格与实际配置的适用边界见 [设备接入说明](BSENSE_R_DEVICE_GUIDE.md)。特别注意厂商显示滤波不改变存储导出的原始数据、蓝牙笑脸不表示电极接触、CSV 的 µV/FP1/FP2 不等于 LSL 单位/通道索引。手册还提示 LSL 开启后不会自动本地保存，应确认实际录制器已生成文件。
+
 ## 时间同步：复用工具，但保留物理边界
 
 本项目 BioMulti 流有分包发布语义。XDF／LSL 的时钟同步处理针对已经发布的时间戳与时钟偏移；它不能凭空还原厂商未提供的设备采样时刻。LSL 官方也区分在线最新偏移校正、规则流去抖和离线段内拟合，说明没有额外桥接时不能普遍同步非 LSL 时钟。[LSL 时间同步说明](https://labstreaminglayer.readthedocs.io/info/time_synchronization.html)。
@@ -38,7 +40,7 @@ pyxdf 提供已有的 XDF 读取实现，应记录实际使用的读取参数与
 1. 原始源时间戳、接收时刻、所选分析时标与调整量分别保留。
 2. LabRecorder 与本产品同时记录时，按明确流名／source_id 选择 EEG 和事件；模拟流保留模拟标记。
 3. `proc_dejitter`、离线规则化或 MNE-LSL 的处理选项不得直接开启到现有冻结模型路径。先复算同一记录，检查间断、重置与事件对齐，再形成新的处理版本。
-4. BioMulti 原生 REC 双录用于核对设备样点与分包；原生设备时钟和普通在线 LSL 的适用范围继续分开。
+4. BioMulti 原生 REC 双录仅在当前厂商版本支持并确已生成对应文件时用于核对设备样点与分包；原生设备时钟和普通在线 LSL 的适用范围继续分开，不默认推流已同时留存 REC。
 5. 事件发布时刻只作为软件时标。要报告物理刺激到显示、按键到回传的端到端延迟，应另用同步触发或光电等测量方案。未测量时保留“物理延迟未验证”。
 
 MNE-LSL 有 `StreamLSL`、`EpochsStream` 和 `PlayerLSL`，可作为现成缓冲、事件取窗与回放对照。回放能验证代码行为，不能复现真实蓝牙／USB／设备时钟的全部延迟。[MNE-LSL 官方介绍与回放教程](https://mne.tools/mne-lsl/stable/generated/tutorials/00_introduction.html)。

@@ -30,9 +30,9 @@ def main():
         raise FileExistsError("Choose a new verification output")
     checks = []
 
-    def request(path, body=None, *, binary=False, expected=200):
+    def request(path, body=None, *, binary=False, expected=200, extra_headers=None):
         req = Request(args.url.rstrip("/") + path, data=json.dumps(body).encode() if body is not None else None,
-                      headers={"Content-Type": "application/json"})
+                      headers={"Content-Type": "application/json", **(extra_headers or {})})
         try:
             response = urlopen(req, timeout=30)
         except HTTPError as error:
@@ -55,6 +55,12 @@ def main():
     cli_version = subprocess.run([str(args.exe), "--version"], capture_output=True, text=True, check=True).stdout.strip()
     passed("packaged Studio version", cli_version == "ningsi-studio " + studio_version)
     passed("packaged service healthy", health["status"] == "ok" and health["service"] == "ningsi-studio")
+    subject_count = request("/api/subjects")["total"]
+    for _ in range(4):
+        request("/api/subjects", {"auto_id": True}, expected=403,
+                extra_headers={"Origin": "http://untrusted.invalid"})
+    passed("forbidden request bodies receive complete rejection without writes",
+           request("/api/subjects")["total"] == subject_count)
     capture_doctor = json.loads(args.capture_doctor.read_text(encoding="utf-8-sig"))
     passed("packaged Capture version and LSL dependency", capture_doctor["version"] == capture_version and capture_doctor["liblsl_version"] > 0)
     index = request("/", binary=True).decode("utf-8")
@@ -77,6 +83,18 @@ def main():
     passed("profile persists as an unverified declaration", saved["saved"] and saved["status"] == "pending_verification")
     passed("profile round trip", request("/api/device-profile?" + urlencode({"device": device}))["profile"] == saved["profile"])
     passed("different device profiles are isolated", not request("/api/device-profile?" + urlencode({"device": device + "-OTHER"}))["saved"])
+    guides = request("/api/config")["device_guides"]
+    manual = next(guide for guide in guides if guide["id"] == "bsense-r")
+    passed("BSense-R guide retains reviewed manual provenance", manual["schema"] == "ningsi-device-guide-v1"
+           and manual["source"]["sha256"] == "f83664699b5986b012ea4f2b79eed6837f577dab793373cec54cf3b9ef3e7635"
+           and manual["source"]["page_count"] == 25 and manual["source"]["revision"] == "未标明")
+    seed = manual["declaration_seed"]
+    manual_saved = request("/api/device-profile", {"device": device + "-MANUAL", "profile": seed})
+    passed("manual draft cannot invent live units electrodes or certification", set(seed) == {"model", "document_reference", "notes"}
+           and manual_saved["status"] == "pending_verification"
+           and manual_saved["compliance_status"] == "not_verified"
+           and manual_saved["profile"]["source_unit"] == "" and manual_saved["profile"]["scale_to_uv"] is None
+           and {"source_unit", "reference", "electrodes", "srate"} <= {row["key"] for row in manual_saved["missing_fields"]})
     request("/api/device-profile", {"device": device, "profile": {"source_unit": "mV", "scale_to_uv": 1}}, expected=422)
     checks.append("contradictory calibration rejected")
     simulated = request("/api/sessions/preflight", {"device": "sim-bsense", "protocol": "ten_min"})

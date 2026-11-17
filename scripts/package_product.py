@@ -200,6 +200,8 @@ Studio {versions['studio']} / Capture {versions['capture']}
 2. 主页面选择评估方案、参与者与 EEG 数据源。首次接入先在厂商软件开启 EEG 推流。
 3. 展开“设置与管理 → 设备连接”，核对来源并填写厂家、型号、电极、参考与单位依据。
    档案保存为操作员声明，始终待现场核验；同名流的档案不能证明当前设备已经合规。
+   使用 BSense-R 时可查看手册参考，明确点选后仅补充空白资料草稿，核对后另行保存。
+   接入步骤与资料边界见 BSENSE_R_DEVICE_GUIDE.md，原厂 PDF 不随包分发。
 4. 开始前查看“本次评分与模型适配”。基础指数与真人模型分别解释；质量和基线需采集后检查。
    设备未声明单位时按本次配置明确确认；采用档案单位前仍需核对当前硬件与软件设置。
 5. 跟随阶段引导完成任务与训练。缺失或不合格信号不填成低专注，调整后按提示继续或重采。
@@ -225,6 +227,10 @@ Studio {versions['studio']} / Capture {versions['capture']}
 Capture 可按需显式开启 LSL 任务 Marker（默认关闭），配合独立 LabRecorder 留证。
 Marker 只含白名单任务事件，不含探针答案；另行检查 XDF 的流与完整性。
 普通实时 LSL 不具备原生 REC 离线核对的全部时钟证据，不强行启用要求原生 REC 的模型。
+BSense-R 手册提示 LSL 开启后不自动本地保存，需确认实际录制器已开始并正常保存文件；
+不默认 BioMultiLite 同时生成 REC。标题栏蓝牙笑脸与 EEG 接触颜色分别核对。
+厂商 Filters 仅改善显示、存储导出保留原始；CSV 的 µV/FP1/FP2 不自动证明 LSL 单位、
+通道索引或佩戴。参考/地与 LSL 配置缺失时保持待确认，不调整评分门槛来代替核验。
 
 三、数据保存与升级
 本软件包不含真人原始 EEG、会话数据库、参与者资料或个人训练模型。
@@ -282,6 +288,7 @@ def validate_inputs(args):
     required_docs = {
         "FIELD_ACCEPTANCE_CHECKLIST.txt": ROOT / "docs/FIELD_ACCEPTANCE_CHECKLIST.txt",
         "HUMAN_MODEL_TRAINING.md": ROOT / "ningsi-studio/docs/HUMAN_MODEL_TRAINING.md",
+        "BSENSE_R_DEVICE_GUIDE.md": ROOT / "docs/BSENSE_R_DEVICE_GUIDE.md",
         "LICENSE.txt": ROOT / "LICENSE",
     }
     for path in required_docs.values():

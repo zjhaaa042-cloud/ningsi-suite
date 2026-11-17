@@ -35,6 +35,7 @@ NO_CACHE = "no-store, no-cache, must-revalidate"
 MAX_BODY_BYTES = 1024 * 1024
 MAX_MODEL_IMPORT_BYTES = 16 * 1024 * 1024
 BODY_TIMEOUT_SEC = 10.0
+REJECT_DRAIN_TIMEOUT_SEC = 0.25
 
 
 @dataclass
@@ -112,6 +113,10 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         try:
             self._check_request_origin()
+        except ApiError as exc:
+            self._reject_origin(exc)
+            return
+        try:
             self._read_body()
         except ApiError as exc:
             self.close_connection = True
@@ -167,13 +172,62 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self.connection.settimeout(previous_timeout)
         return bytes(body)
 
+    def _reject_origin(self, error: ApiError) -> None:
+        """Deliver the refusal before bounded transport cleanup (RFC 9112 9.6)."""
+        self.close_connection = True
+        self._send(Response.json(error.as_body(), status=error.status,
+                                 headers={"Connection": "close"}))
+        self.wfile.flush()
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+        except OSError as exc:
+            LOGGER.debug("已拒绝连接在半关闭前断开：%s", exc)
+            return
+        self._discard_rejected_body()
+
+    def _discard_rejected_body(self) -> None:
+        # Never parse, dispatch or guess framing for an untrusted request. Only
+        # consume a single bounded, known body, without accumulating it. Leaving
+        # that body unread when immediately closing can reset a TCP connection
+        # before Windows clients have received the already-written refusal.
+        if self.headers.get("Transfer-Encoding") is not None:
+            return
+        lengths = self.headers.get_all("Content-Length", [])
+        if len(lengths) != 1:
+            return
+        raw = lengths[0].strip()
+        if not raw.isascii() or not raw.isdecimal():
+            return
+        try:
+            remaining_bytes = int(raw)
+        except ValueError:
+            return
+        # Rejection cleanup never inherits the larger model-import allowance.
+        if not 0 < remaining_bytes <= MAX_BODY_BYTES:
+            return
+        previous_timeout = self.connection.gettimeout()
+        deadline = time.monotonic() + min(BODY_TIMEOUT_SEC, REJECT_DRAIN_TIMEOUT_SEC)
+        try:
+            while remaining_bytes:
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    break
+                self.connection.settimeout(remaining_time)
+                chunk = self.rfile.read1(min(65536, remaining_bytes))
+                if not chunk:
+                    break
+                remaining_bytes -= len(chunk)
+        except (TimeoutError, ConnectionError) as exc:
+            LOGGER.debug("已拒绝连接的有界清理结束：%s", exc)
+        finally:
+            self.connection.settimeout(previous_timeout)
+
     def _handle(self, method: str) -> None:
         # 在读取请求体或调用路由之前拒绝跨域请求，阻止简单表单 POST 的副作用。
         try:
             self._check_request_origin()
         except ApiError as exc:
-            self.close_connection = True
-            self._send(Response.json(exc.as_body(), status=exc.status))
+            self._reject_origin(exc)
             return
         parsed = urlparse(self.path)
         path = unquote(parsed.path)

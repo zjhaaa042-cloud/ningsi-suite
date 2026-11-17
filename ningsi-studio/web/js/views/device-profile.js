@@ -14,6 +14,9 @@ export function createDeviceProfile(ctx) {
   const missing = el('p', { class: 'device-profile-missing' });
   const messages = el('p', { class: 'device-profile-error', role: 'alert' });
   const summary = el('div', { class: 'device-profile-summary' });
+  const guideHost = el('div', { class: 'device-guides' });
+  const guideFeedback = el('p', { class: 'device-guide-feedback', role: 'status' });
+  let guideButtons = [];
   const fields = {};
   const grid = el('div', { class: 'device-profile-fields' });
   for (const [key, label, placeholder] of [
@@ -49,19 +52,82 @@ export function createDeviceProfile(ctx) {
     el('details', { class: 'device-profile-manual' }, [el('summary', { text: '配置暂未连接的设备' }),
       el('div', { class: 'row' }, [field('来源标识', manual), loadManual]),
       el('p', { class: 'muted', text: '使用采集程序发布的完整来源标识；保存离线档案不表示设备已连接。' }),
-    ]), status, messages, summary, missing, editor,
+    ]), guideHost, guideFeedback, status, messages, summary, missing, editor,
   ], { class: 'device-profile-card' });
   let selected = '', sources = [], ticket = 0, saving = false, loading = false, disposed = false;
   const requested = ctx.params.get('device') || '';
   const alive = () => !disposed && !ctx.signal.aborted;
   ctx.onCleanup(() => { disposed = true; ticket++; });
 
-  function setBusy() { save.disabled = saving || loading || !selected; form.disabled = saving || loading; source.disabled = saving; loadManual.disabled = saving; reload.disabled = saving || loading || !selected; }
+  function isSimulated() { return selected === 'sim-bsense' || sources.some(row => row.key === selected && row.simulated === true); }
+  function canApplyGuide() { return alive() && selected.startsWith('lsl:') && !isSimulated() && !saving && !loading && !editor.hidden; }
+  function setBusy() {
+    save.disabled = saving || loading || !selected; form.disabled = saving || loading;
+    source.disabled = saving; loadManual.disabled = saving; reload.disabled = saving || loading || !selected;
+    for (const control of guideButtons) control.disabled = !canApplyGuide();
+  }
+  function guidePages(pages) {
+    const numbers = list(pages).filter(value => Number.isInteger(value) && value > 0);
+    return numbers.length ? `PDF 第 ${numbers.join('、')} 页` : '';
+  }
+  function guideRows(rows, specs = false, ordered = false) {
+    return el(ordered ? 'ol' : 'ul', { class: 'device-guide-list' }, list(rows).map(row => el('li', {}, [
+      el('strong', { text: specs ? row.label : row.title || row.label }),
+      el('p', { text: specs ? row.value : row.text }),
+      specs && row.note ? el('p', { class: 'muted', text: row.note }) : null,
+      guidePages(row.pages) ? el('small', { class: 'muted', text: guidePages(row.pages) }) : null,
+    ])));
+  }
+  function renderGuides() {
+    if (!alive()) return;
+    const guides = list(ctx.store?.state?.config?.device_guides).filter(guide =>
+      guide?.schema === 'ningsi-device-guide-v1' && typeof guide.id === 'string' && typeof guide.title === 'string');
+    guideHost.replaceChildren(); guideHost.hidden = !guides.length; guideButtons = [];
+    for (const guide of guides) {
+      const sourceInfo = guide.source || {}, specs = list(guide.specs);
+      const apply = button('按此手册补充草稿', () => applyGuide(guide), { small: true });
+      apply.classList.add('device-guide-apply'); guideButtons.push(apply);
+      guideHost.append(el('section', { class: 'device-guide', 'aria-label': guide.title }, [
+        el('h4', { text: guide.title }), el('p', { class: 'device-guide-overview', text: guide.overview }),
+        guideRows(specs.slice(0, 2), true),
+        el('div', { class: 'device-guide-action' }, [apply,
+          el('p', { class: 'muted', text: '实际型号一致时使用。仅补空白型号、资料出处和备注，保留已有填写；核对后自行保存。请先选择非模拟来源并读取档案。' })]),
+        el('details', { class: 'device-guide-details' }, [
+          el('summary', { text: '查看连接步骤、质量提示与待核对项' }),
+          specs.length > 2 ? el('h5', { text: '其他手册规格' }) : null,
+          specs.length > 2 ? guideRows(specs.slice(2), true) : null,
+          el('h5', { text: '连接与录制' }), guideRows(guide.steps, false, true),
+          el('h5', { text: '信号质量与数据格式' }), guideRows(guide.quality_notes),
+          el('h5', { text: '手册未说明，须按实际核对' }), guideRows(guide.unknowns),
+          sourceInfo.sha256 ? el('p', { class: 'device-guide-hash muted', text: `资料 SHA-256：${sourceInfo.sha256}` }) : null,
+        ]),
+        el('p', { class: 'device-guide-source muted', text: `资料：${sourceInfo.filename || guide.title} · ${sourceInfo.page_count || '—'} 页 · 修订号${sourceInfo.revision || '未标明'}；上文均为 PDF 页码（含封面）。` }),
+      ]));
+    }
+    setBusy();
+  }
+  function applyGuide(guide) {
+    if (!canApplyGuide()) return;
+    const added = [];
+    // A manual is not evidence for the current source's physical montage or units.
+    // These three optional text fields are the only allowed declaration seeds.
+    for (const [key, label] of [['model', '型号'], ['document_reference', '资料出处'], ['notes', '备注']]) {
+      const value = guide.declaration_seed?.[key];
+      if (!String(fields[key].value).trim() && typeof value === 'string' && value.trim() && value.length <= FIELD_LIMITS[key]) {
+        fields[key].value = value; added.push(label);
+      }
+    }
+    editor.open = true;
+    guideFeedback.textContent = added.length
+      ? `已补充${added.join('、')}草稿，尚未保存；其余填写保持。摘要和待补资料仍以已保存档案为准，请核对实际配置后保存。`
+      : '已有填写已保留，未新增资料。手册不确认当前硬件或佩戴；如有修改请核对后自行保存。';
+  }
   function fill(profile) {
     for (const [key, input] of Object.entries(fields)) input.value = profile[key] ?? '';
     fields.scale_to_uv.readOnly = fields.source_unit.value !== 'ADC';
   }
   function present(data) {
+    guideFeedback.textContent = '';
     fill(data.profile || {});
     summary.textContent = '';
     const profile = data.profile || {};
@@ -85,6 +151,7 @@ export function createDeviceProfile(ctx) {
     if (saving || !alive()) return;
     selected = value; manual.value = value; rebuildSources();
     const currentTicket = ++ticket;
+    guideFeedback.textContent = '';
     messages.textContent = ''; summary.textContent = ''; missing.textContent = ''; fill({});
     editor.hidden = true;
     if (!selected) { status.textContent = '选择设备来源后查看或补充档案。'; loading = false; setBusy(); return; }
@@ -120,9 +187,12 @@ export function createDeviceProfile(ctx) {
     } catch (err) { if (alive() && currentTicket === ticket) messages.textContent = describeError(err); }
     finally { if (alive()) { saving = false; setBusy(); } }
   }
+  renderGuides();
+  const unsubscribeGuides = ctx.store?.subscribe?.('config', renderGuides);
+  if (typeof unsubscribeGuides === 'function') ctx.onCleanup(unsubscribeGuides);
   setBusy();
   return { node, setSources(rows) {
-    sources = list(rows); rebuildSources();
+    sources = list(rows); rebuildSources(); setBusy();
     if (!selected && !loading) {
       const initial = requested || sources.find(row => row.real === true && row.is_eeg !== false)?.key || '';
       if (initial) selectSource(initial);

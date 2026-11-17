@@ -28,7 +28,7 @@ from ningsi_studio.core.runtime import SART_TRIAL_WINDOW, SessionManager
 from ningsi_studio.db import repository as repo
 from ningsi_studio.db import sqlite_store as store
 from ningsi_studio.domain import export as export_domain, state_checkins, eeg_units
-from ningsi_studio.domain import device_profiles, preflight, heatmap as heatmap_domain
+from ningsi_studio.domain import device_guides, device_profiles, preflight, heatmap as heatmap_domain
 from ningsi_studio.domain import model_training, scales as scales_domain
 from ningsi_studio.domain import showcase, showcase_evidence
 from ningsi_studio.domain.human_models import HumanModelService, load_active
@@ -346,6 +346,7 @@ def build_router(settings: Settings) -> Router:
             "phases": phase_module.as_list(),
             # 协议档：向导据此展示"完整 / 短协议"与各自负担（阶段数、时长、行为任务试次数）
             "profiles": phase_module.profiles_as_list(),
+            "device_guides": device_guides.device_guides(),
             # 行为任务的协议参数：界面（向导的"本次检测要你做多少次"）不该自己写死试次数量，
             # 口径统一从引擎常量取，改协议时两边不会漂移。
             "behavior": {

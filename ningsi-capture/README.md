@@ -4,6 +4,8 @@
 
 这是连接现有脑电硬件的 Windows 桌面程序，用于真人专注指标验证实验。它独立启动、独立保存数据，不需要启动 Studio 服务，也不读取或改写 Studio 的会话数据库。Windows EXE 已包含算法引擎、NumPy、Tk 和 LSL 运行库。
 
+使用 BSense-R／BioMultiLite 时，先看[设备接入说明](../docs/BSENSE_R_DEVICE_GUIDE.md)。手册的显示滤波不改变存储导出的原始数据，蓝牙笑脸与 EEG 接触颜色分别判断；CSV 的 µV 和 FP1／FP2 列名不能自动确认当前 LSL 单位或顺序。手册提示 LSL 开启后不会自动本地保存，应确认 Capture 或 LabRecorder 已实际录制并保存，不默认厂商 REC 同时存在。
+
 ## 启动与采集
 
 使用试采套件时，在解压目录双击 `NingsiCapture.exe`。从源码运行可使用采集器目录的 `run.bat`，依赖 Python 3.11+、NumPy、pylsl 1.18.2、Tk 和同级的 `../ningsi/src` 算法引擎。
