@@ -30,9 +30,9 @@ def main():
         raise FileExistsError("Choose a new verification output")
     checks = []
 
-    def request(path, body=None, *, binary=False, expected=200, extra_headers=None):
+    def request(path, body=None, *, binary=False, expected=200, extra_headers=None, method=None):
         req = Request(args.url.rstrip("/") + path, data=json.dumps(body).encode() if body is not None else None,
-                      headers={"Content-Type": "application/json", **(extra_headers or {})})
+                      headers={"Content-Type": "application/json", **(extra_headers or {})}, method=method)
         try:
             response = urlopen(req, timeout=30)
         except HTTPError as error:
@@ -71,6 +71,17 @@ def main():
     request("/api/devices/blink-calibration", {"action": "start"}, expected=422)
     passed("blink calibration requires an explicit participant without creating records",
            request("/api/subjects")["total"] == subject_count)
+    request("/api/devices/preview", {"source": "lsl:"}, expected=422)
+    passed("preview rejects an empty LSL name before opening a source",
+           request("/api/devices/preview")["active"] is False)
+    request("/api/devices/preview", {"source": "sim-bsense"})
+    frame = request("/api/devices/preview?window=1")
+    passed("packaged explicit simulation preview returns a labelled waveform",
+           frame["active"] and frame["simulated"] and frame["source"] == "sim-bsense"
+           and bool(frame["samples"]) and frame["srate"] == 250)
+    stopped = request("/api/devices/preview", method="DELETE")
+    passed("preview stop is reflected in the subsequent status",
+           stopped["stopped"] and request("/api/devices/preview")["active"] is False)
     before = request("/api/sessions")["total"]
     device = "lsl:QA-SOFTWARE-FIXTURE-UNCONNECTED-" + uuid_module.uuid4().hex[:8]
     payload = {"device": device, "protocol": "ten_min"}
@@ -181,6 +192,24 @@ def main():
            and "有效时间内达标" in effective_html and "有效覆盖" in effective_html and "实际时长" in effective_html)
     with zipfile.ZipFile(io.BytesIO(request(f"/api/sessions/{effective_uuid}/export.zip", binary=True))) as archive:
         passed("effective session export has valid CRC", archive.testzip() is None)
+    created = request("/api/sessions", {"participant": subject["public_id"], "create_subject": False,
+        "device": "sim-bsense", "protocol": "ten_min", "time_scale": .1}, expected=201)
+    cancelled_uuid = created["session"]["uuid"]
+    request(f"/api/sessions/{cancelled_uuid}", method="DELETE")
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        cancelled = request(f"/api/sessions/{cancelled_uuid}")
+        if cancelled["status"] not in ("running", "queued"):
+            break
+        time.sleep(.2)
+    partial = request(f"/api/sessions/{cancelled_uuid}/report")
+    passed("cancelled session returns saved partial results with a terminal HTTP response",
+           cancelled["status"] == "cancelled" and partial["status"] == "cancelled" and partial["partial"])
+    history = request("/api/sessions?participant=" + subject["public_id"])["items"]
+    rows = {row["uuid"]: row for row in history}
+    passed("history exposes available complete reports and training",
+           all(rows[key]["has_report"] and rows[key]["has_training"] and rows[key]["has_artifacts"]
+               for key in (uuid, effective_uuid)) and rows[cancelled_uuid]["has_report"] is False)
     with args.exe.open("rb") as stream:
         exe_hash = hashlib.file_digest(stream, "sha256").hexdigest()
     with args.capture_exe.open("rb") as stream:
