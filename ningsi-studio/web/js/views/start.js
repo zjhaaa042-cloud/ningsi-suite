@@ -8,7 +8,8 @@ const option = (value, text) => el('option', { value, text });
 
 export async function render(container, ctx) {
   const purpose = el('select', { id: 'purpose' }, [
-    option('ten_min', '十分钟测试＋训练'), option('short', '评估专注力'), option('full', '评估并进行反馈训练'),
+    option('ten_min', '十分钟测试＋训练'), option('effective_time', '有效时长训练'),
+    option('short', '评估专注力'), option('full', '评估并进行反馈训练'),
   ]);
   const participant = el('select', { id: 'participant' }, [option('', '新参与者（自动分配编号）')]);
   const alias = el('input', { id: 'alias', type: 'text', placeholder: '可留空', maxLength: 80 });
@@ -54,6 +55,7 @@ export async function render(container, ctx) {
   } });
   const choices = [
     ['ten_min', '轻量体验', '十分钟测试与训练', '快速了解本次状态，体验反馈训练。', '约 10 分钟'],
+    ['effective_time', '质量中断时补足', '有效时长训练', '4 轮各累计 50 秒有效反馈；坏窗暂停累计，达到上限后如实报告数据不足。', '约 10 分钟起 · 补采上限约 17 分 20 秒'],
     ['short', '标准评估', '专注力综合评估', '结合脑电、量表与行为任务建立评估。', '按协议计算'],
     ['full', '完整流程', '评估与反馈训练', '完成综合评估后，继续进行专注训练。', '按协议计算'],
   ];
@@ -96,13 +98,14 @@ export async function render(container, ctx) {
     plan.textContent = profile ? '约 ' + minutes + ' 分钟。记录睁眼和闭眼时的脑电，填写量表，完成数字判断和反应速度任务。'
       + (full ? '随后根据实时专注度反馈练习。' : '') : '';
     if (purpose.value === 'ten_min') plan.textContent = '10分钟采集：质检30秒、睁眼60秒、练习30秒、PVT3分钟、训练4分钟、训练后60秒。报告生成另计；质量不足时自动切换为质量反馈或固定引导，不追加基线时间。';
+    if (purpose.value === 'effective_time') plan.textContent = '前后基线各累计60秒合格区间、每次补采上限3分钟；训练4轮各累计50秒有效反馈、每轮补采上限100秒，轮间休息10秒。质检30秒、PVT练习30秒和正式3分钟保持固定。采集约10分钟起、补采上限约17分20秒；设备连接与报告另计，设备读取等待按实际记录。信号不合格时暂停有效时间，达到上限仍不足会如实标记数据不足，可随时取消。';
     for (const item of planCards) {
       item.input.checked = item.value === purpose.value;
       const itemProfile = profiles.find(row => row.key === item.value);
       const seconds = itemProfile?.total_sec_by_training_mode?.[mode.value] ?? itemProfile?.total_sec;
-      if (Number.isFinite(seconds)) item.time.textContent = `约 ${Math.round(seconds / 60)} 分钟`;
+      if (Number.isFinite(seconds) && item.value !== 'effective_time') item.time.textContent = `约 ${Math.round(seconds / 60)} 分钟`;
     }
-    if (full) protocolDetails.open = true;
+    if (full || purpose.value === 'effective_time') protocolDetails.open = true;
     form.disabled = submitting;
     scanButton.disabled = scanning || submitting;
     preview.hidden = !device.value;
@@ -121,7 +124,7 @@ export async function render(container, ctx) {
     readiness.dataset.ready = String(Boolean(device.value && calibrationReady && subjectsReady && profile && preflight.ready));
     start.disabled = submitting || scanning || !subjectsReady || !device.value || !profile
       || !preflight.ready || (unit.value === 'ADC' && !(Number.isFinite(factor.valueAsNumber) && factor.valueAsNumber > 0));
-    start.textContent = submitting ? '正在启动…' : (full ? '开始评估与训练' : '开始评估');
+    start.textContent = submitting ? '正在启动…' : purpose.value === 'effective_time' ? '开始有效时长训练' : (full ? '开始评估与训练' : '开始评估');
     demo.disabled = submitting || !profiles.some(row => row.key === 'short');
   }
   purpose.onchange = mode.onchange = update;

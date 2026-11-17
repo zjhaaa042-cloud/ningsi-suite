@@ -31,10 +31,10 @@ class ProtocolProfileUnitTests(StudioTestCase):
 
     port_base = 18931
 
-    def test_config_exposes_two_profiles(self) -> None:
+    def test_config_exposes_independent_profiles(self) -> None:
         payload = self.json_body(self.get("/api/config"), 200, "/api/config 应返回 200")
         profiles = {row["key"]: row for row in payload.get("profiles", [])}
-        self.assertEqual(set(profiles), {"full", "short", "ten_min"}, "应暴露三个独立协议档")
+        self.assertEqual(set(profiles), {"full", "short", "ten_min", "effective_time"}, "应暴露四个独立协议档")
         self.assertEqual(profiles["full"]["phase_count"], 11, "完整协议 11 步")
         self.assertEqual(profiles["short"]["phase_count"], 9, "短协议 9 步")
         self.assertEqual(profiles["short"]["dropped_phases"], list(DROPPED_PHASES),

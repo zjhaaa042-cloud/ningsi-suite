@@ -258,9 +258,19 @@ export async function render(container, ctx) {
         el('p', { class: 'muted', text: `参与者 ${pick(data, 'participant', DASH)} · ${pick(data, 'extras.protocol_label', '检测协议未记录')}` }),
         el('p', { text: Object.entries(INDICATOR_LABELS).map(([key, label]) =>
           label + ' ' + fmtNum(pick(data, 'indicators.summary.' + key + '.mean'), 2)).join('　') }),
-        el('p', { class: 'summary-note', text: data.extras?.protocol === 'ten_min' ? '本协议未采集独立任务态评分；请查看PVT、分级信号与训练记录。' : simulated ? '以上为模拟脑电的平均指标（0–1）。' : '指标为本次有效脑电窗口的均值（0–1）。' }),
+        el('p', { class: 'summary-note', text: ['ten_min', 'effective_time'].includes(data.extras?.protocol) ? '本协议未采集独立任务态评分；请查看PVT、分级信号与训练记录。' : simulated ? '以上为模拟脑电的平均指标（0–1）。' : '指标为本次有效脑电窗口的均值（0–1）。' }),
       ]);
       host.append(card(null, summary));
+      if (data.extras?.effective_time) {
+        const timing = data.extras.effective_time;
+        host.append(card('有效时长采集结果', el('div', {}, [
+          el('p', { class: 'training-coverage-note', role: 'status', text: timing.acquisition_complete
+            ? '各阶段有效时间与基线门槛已完成；请结合训练覆盖率阅读表现。'
+            : '采集不足：流程已结束，但部分阶段未达到有效时间或基线质量要求，不能据此判断训练效果。' }),
+          el('p', { class: 'muted', text: '本方案只对基线与训练补足有效时间，PVT练习和正式时序保持固定；缺失未计零分。' }),
+          button('查看训练有效时间与覆盖率', () => ctx.navigate(`#/training?session=${uuid}`)),
+        ])));
+      }
       const boundary = pick(data, 'assessment.boundary', null) || pick(config, 'privacy.boundary', null);
       const advice = list(pick(data, 'assessment.advice', [])).filter(item => item !== boundary);
       if (!simulated && advice.length) {

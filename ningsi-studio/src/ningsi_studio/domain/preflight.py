@@ -48,7 +48,7 @@ def _model_check(active_model, descriptor, calibration, protocol, *, simulated, 
     keys = ("name", "source_id", "channels", "channel_labels", "srate", "source_unit", "scale_to_uv", "timestamp_policy", "reference")
     return {"status": "compatible", "model_id": model_id, "reason": "",
             "requirements": {key: matched.get(key) for key in keys},
-            "scope_status": "sart_probe" if protocol != "ten_min" else "outside_validated_task",
+            "scope_status": "outside_validated_task" if protocol in ("ten_min", "effective_time") else "sart_probe",
             "message": "设备配置与已启用真人模型匹配；仍需有效基线、近期合格脑电与足够历史才能出分。"}, matched
 
 
@@ -140,8 +140,8 @@ def evaluate_preflight(payload, *, descriptors=(), device_profile=None, active_m
         else "所选来源的设备资料已保存为操作员声明，仍需现场核对。", "#/devices")
     add("attention_model", "pass" if model["status"] in ("compatible", "none") else "warning",
         "真人专注模型", model["message"], "#/models")
-    if active_model and protocol == "ten_min":
-        add("model_scope", "warning", "模型适用任务", "十分钟方案不含 SART 独立监测；真人模型输出超出原探针验证范围，仅作探索性观察。")
+    if active_model and protocol in ("ten_min", "effective_time"):
+        add("model_scope", "warning", "模型适用任务", "当前训练方案不含 SART 独立监测；真人模型输出超出原探针验证范围，仅作探索性观察。")
     add("quality", "pending", "实时质量与个人基线", "开始后检查实际信号、新鲜度、伪迹和个人基线；不合格时暂停评分。")
     ready = not any(row["status"] == "fail" for row in checks) and descriptor is not None and not simulated
     return {"schema": "ningsi-session-preflight-v1", "device": device, "protocol": protocol,

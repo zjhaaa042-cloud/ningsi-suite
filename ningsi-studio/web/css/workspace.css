@@ -80,6 +80,14 @@ table.data tbody tr:hover { background: #f7fafb; }
 .feedback-score, .training-stats .kpi__value { color: var(--accent); }
 .training-stats > div { border-color: var(--line); }
 .training-stats .training-hold { background: #edf7f4; }
+.training-stats .training-primary { background: #edf7f4; border-color: #cce4dd; }
+.training-coverage-note { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-2); line-height: 1.8; }
+.effective-time__metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.effective-time__metrics > div { display: grid; gap: 6px; }
+.effective-time progress { display: block; width: 100%; height: 12px; margin-top: 16px; accent-color: var(--accent); }
+.effective-time__status { margin-bottom: 6px; line-height: 1.8; }
+.effective-time[data-state="insufficient"] .effective-time__status { font-weight: 650; }
+.flow-feedback .training-coverage-note { margin: 8px 0; }
 .pick--on, .choice--on { background: #edf7f4; border-color: #8fbbb4; box-shadow: inset 3px 0 var(--accent); }
 .pick, .choice { border-radius: 8px; }
 .wizard__foot { border-color: var(--line); background: white; border-radius: 9px; }
@@ -95,7 +103,7 @@ table.data tbody tr:hover { background: #f7fafb; }
 .setup-step-heading { display: flex; align-items: center; gap: 9px; margin: 0; }
 .setup-step-heading > span { font: 11px var(--mono); padding: 5px 6px; border-radius: 5px; color: var(--accent); background: #edf7f4; }
 .setup-step-heading h2 { margin: 0; font-size: 15px; font-weight: 650; }
-.plan-choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.plan-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .plan-choice { display: flex; flex-direction: column; align-items: stretch; padding: 14px 13px 12px; border: 1px solid #dce6eb; border-radius: 9px; background: white; cursor: pointer; transition: border-color .15s, background .15s; }
 .plan-choice:hover { border-color: #8fbab6; }
 .plan-choice:has(input:checked) { border-color: #479b94; background: #f0f9f6; box-shadow: 0 0 0 1px #479b9410; }

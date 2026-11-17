@@ -25,6 +25,7 @@ from ningsi.assessment.diagnostics import summarize_windows
 from ningsi.monitoring import history as history_module
 
 from ningsi_studio.core import paired_ledger, phases as phase_module
+from ningsi_studio.core.control import SessionCancelled
 from ningsi_studio.core.live_source import build_source
 from ningsi_studio.db import repository as repo
 from ningsi_studio.db import sqlite_store as store
@@ -57,10 +58,6 @@ TRIAL_GRACE_SEC = 0.6
 MIN_TRIAL_WINDOW = 0.35
 #: 连续这么多个试次都没收到作答 ⇒ 判定前端已掉线/关页，让该阶段明确失败（而不是空转 15 分钟）
 BEHAVIOR_MISS_LIMIT = 5
-
-
-class SessionCancelled(RuntimeError):
-    """会话被外部取消。"""
 
 
 def schemas_bool(value, default: bool = False) -> bool:
@@ -119,6 +116,8 @@ class SessionRuntime:
         self.scale_results: dict[str, dict] = {}
         self.baselines: dict = {}
         self.device_error: str | None = None
+        self.latest_feedback: dict | None = None
+        self.effective_time: dict | None = None
         # 行为任务连续"没拿到有效作答"的计数（见 _wait_trial）
         self._behavior_misses = 0
 
@@ -580,6 +579,9 @@ class SessionRuntime:
 
         if self.protocol == "ten_min":
             return self._run_ten_min(auto)
+        if self.protocol == "effective_time":
+            from .effective_time import run
+            return run(self, auto)
 
         # 1) 设备质检
         with self._phase("qc") as context:
@@ -813,7 +815,7 @@ class SessionRuntime:
         started = time.monotonic()
         def matches(answer):
             return (answer.get("index") == expected_index
-                    and (not (name == "sart" or (name == "pvt" and self.protocol == "ten_min"))
+                    and (not (name == "sart" or (name == "pvt" and self.protocol in ("ten_min", "effective_time")))
                          or answer.get("phase") == payload.get("phase")))
 
         answer = self.wait_for_input(name, timeout=float(window) + TRIAL_GRACE_SEC,
@@ -905,7 +907,7 @@ class SessionRuntime:
             # 留 0.3s 余量避免与下一次 trial 事件抢跑；最后一个试次用固定窗口。
             gap = (onsets[position + 1] - onset) if position + 1 < len(onsets) else PVT_TRIAL_WINDOW
             window = max(MIN_TRIAL_WINDOW, max(0.8, min(PVT_TRIAL_WINDOW, gap - 0.3)) * self.scale)
-            if self.protocol == "ten_min" and not auto:
+            if self.protocol in ("ten_min", "effective_time") and not auto:
                 budget = 30 if practice else self.profile["pvt_duration_sec"]
                 window = min(window, max(0.001, started_at + budget*self.scale-time.monotonic()))
             responded = rng.random() < 0.99
@@ -978,7 +980,9 @@ class SessionRuntime:
                 sample_time = ((time.monotonic() - segment_started) / self.scale
                                if self.source.kind == "lsl" else step.t_end - segment_t - config.STEP_SEC)
                 trainer.feed(score, sample_time, usable=step.usable)
-                self.bus.publish("feedback", {
+                live_duration = ((time.monotonic()-segment_started)/self.scale
+                                 if self.source.kind == "lsl" else max(0, sample_time))
+                feedback = {
                     "affect_model": self.current_affect(),
                     "heatmap_cell": heatmap_cell,
                     "segment": index + 1,
@@ -987,8 +991,11 @@ class SessionRuntime:
                     "on_target": bool(score is not None and score >= trainer.target),
                     "usable": step.usable,
                     "t": round(step.t_end, 3),
+                    "segment_stats": trainer.segment_stats(live_duration),
                     **trainer.feedback_status(),
-                })
+                }
+                self.latest_feedback = feedback
+                self.bus.publish("feedback", feedback)
                 self._sleep_real(interval)
             segment = trainer.close_segment()
             self._persist_training_segment(segment)
@@ -1051,6 +1058,7 @@ class SessionRuntime:
                                     "scope": "探针相关的任务专注/内部走神研究模型；其他阶段尚未独立验证"},
                 "signal_diagnostics": summarize_windows(self.diagnostic_windows),
                 "ten_min": getattr(self, "ten_min_result", None),
+                "effective_time": getattr(self, "effective_time_result", None),
                 "device": self.source.device,
                 "source_kind": self.source.kind,
                 "source_note": self.source.note,

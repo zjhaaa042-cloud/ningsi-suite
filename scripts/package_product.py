@@ -36,6 +36,7 @@ REQUIRED_ASSETS = (
     "_internal/web/index.html", "_internal/web/js/main.js", "_internal/web/js/views/start.js",
     "_internal/web/js/views/device-profile.js", "_internal/web/js/views/session-preflight.js",
     "_internal/web/js/views/state-heatmap.js",
+    "_internal/web/js/training-metrics.js",
     "_internal/web/css/workspace.css", "_internal/ningsi_studio/db/schema.sql",
 )
 SHA_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
@@ -206,6 +207,15 @@ Studio {versions['studio']} / Capture {versions['capture']}
 7. 无设备时仅使用“运行模拟演示”；模拟数据始终单独标记，不代表真人准确率。
 实时监测中的热力图区分信号合格、等待基线与可评分窗口；无评分时先显示原因摘要。
 可展开逐窗记录、翻页或仅看可评分片段，筛选不会改变全会话覆盖率，窗口时间不是连续有效时长。
+
+需要减少眨眼、肌电或动作造成的训练时间损失时，开始页选择“有效时长训练”。
+前后基线各累计 60 秒合格区间，单次最多调度 180 秒；训练共 4 轮，每轮累计 50 秒
+实际可用反馈，单轮最多调度 100 秒，轮后休息 10 秒。练习 30 秒和 PVT 180 秒保持固定。
+全部采集阶段调度上限共 17 分 20 秒，不含连接、生成报告及输入等待可能造成的超时。
+不合格时保留累计进度并暂停计分，恢复后补采；连续保持重新开始，不沿用旧分数。
+基线不合格时改为每轮 50 秒固定引导，报告明确标记数据不足；达到上限也不伪造完成。
+主要表现看“有效时间内达标率”，同时查看有效覆盖、有效秒数与用时；覆盖不足不能据此
+判断整体训练表现。原十分钟方案仍可选择。加速模拟明确区分协议时间与实际墙钟用时。
 
 二、连续采集、模型与外部留证
 双击 02-Start-Capture.bat 打开独立采集器。按预定研究协议记录匿名编号和开发/封存测试分组，

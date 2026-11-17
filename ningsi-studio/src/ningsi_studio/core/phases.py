@@ -263,6 +263,21 @@ PROFILES[PROFILE_TEN] = {
     "caveat": "600秒采集预算，报告生成另计；设备等待可导致超时并记录实际时长。不含量表、SART或模型训练；不能与完整协议直接比较，不能证明短时训练疗效。",
 }
 
+# Separate protocol: fixed behavioral tasks, bounded replacement of lost EEG time.
+PROFILE_EFFECTIVE = "effective_time"
+EFFECTIVE_POLICY = {
+    "spec": "effective-time-v1", "baseline_target_seconds": 60,
+    "baseline_max_seconds": 180, "segment_target_seconds": 50,
+    "segment_max_seconds": 100, "segments": 4, "rest_seconds": 10,
+    "max_acquisition_seconds": 1040,
+}
+PROFILES[PROFILE_EFFECTIVE] = {
+    **PROFILES[PROFILE_TEN], "key": PROFILE_EFFECTIVE, "label": "有效时长训练",
+    "summary": "按合格基线和实际可用反馈补足时长；PVT保持原节奏",
+    "effective_time": dict(EFFECTIVE_POLICY), "max_total_sec": 1040,
+    "caveat": "基线前后各目标60秒合格区间、各最多180秒；4轮训练各目标50秒有效反馈、各最多100秒，轮间休息10秒。质检30秒、PVT练习30秒和正式180秒固定。阶段上限17分20秒，连接及报告另计；超时记采集不足，不放宽质量或基线门槛。",
+}
+
 
 def normalize_profile(name: object) -> str:
     """把外部传入的协议名归一；未知值一律回落到完整协议（默认档，绝不静默变成短协议）。"""
@@ -301,7 +316,7 @@ def progress_for(key: str, within: float = 0.0, profile: object = PROFILE_FULL) 
 
 
 def training_plan(profile=PROFILE_FULL, mode="quick") -> dict:
-    ten = normalize_profile(profile) == PROFILE_TEN
+    ten = normalize_profile(profile) in (PROFILE_TEN, PROFILE_EFFECTIVE)
     plan = dict(config.TRAINING["ten_min" if ten else (mode if mode in ("quick", "full") else "quick")])
     plan.update(rest_sec=plan.get("rest_sec", 0),
                 baseline_after_sec=0 if ten else config.TRAINING["baseline_after_sec"],
@@ -339,7 +354,7 @@ def as_list(profile: object = PROFILE_FULL, training_mode="quick") -> list[dict]
             row["training_plan"] = plan
             row["duration_sec"] = plan["segments"] * (plan["segment_sec"] + plan["rest_sec"]) + plan["baseline_after_sec"]
             row["description"] = f"{plan['segments']}段，每段{plan['segment_sec']:g}秒"
-        if item["key"] == PROFILE_TEN:
+        if item["key"] in (PROFILE_TEN, PROFILE_EFFECTIVE):
             row["duration_sec"] = TEN_DURATIONS[phase.key]
             if phase.key == "baseline_open":
                 row.update(headline="保持睁眼，安静坐一分钟", description="睁眼静息60秒，建立个人稳健基线", details=["固定60秒，不因基线不足追加时间"], next_hint="接下来练习PVT")
@@ -350,6 +365,19 @@ def as_list(profile: object = PROFILE_FULL, training_mode="quick") -> list[dict]
             if phase.key == "pvt":
                 row["next_hint"] = "随后开始四轮训练"
             row["why"] = item["caveat"]
+            if item["key"] == PROFILE_EFFECTIVE:
+                if phase.key in ("baseline_open", "baseline_after"):
+                    row.update(headline="保持睁眼，安静坐好，正在补足合格基线",
+                               description="目标60秒合格区间，最多180秒；仍需原基线质量门槛",
+                               details=["4秒重叠窗按时间区间并集合计，不重复累计", "不合格窗保留在质量分母；超时仍不足会明确标记"],
+                               max_duration_sec=180)
+                elif phase.key == "training":
+                    row.update(description="4轮，每轮50秒有效反馈、最多100秒墙钟，休息10秒",
+                               details=["质量不合格时暂停有效进度；累计进度保留，连续保持中断", "最多补到每轮100秒；不足如实记录，PVT不延长"],
+                               max_duration_sec=440)
+                elif phase.key == "qc":
+                    row["next_hint"] = "随后按有效时长采集睁眼基线"
+                row["effective_time"] = dict(EFFECTIVE_POLICY)
         rows.append(row)
     return rows
 

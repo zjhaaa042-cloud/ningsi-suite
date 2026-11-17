@@ -22,6 +22,7 @@ import {
   fmtTime, list, phaseStateText, phaseText, pick, statusText, table,
 } from '../util.js';
 import { drawAlertTimeline, drawWaveform } from '../charts.js';
+import { effectiveTimeContent, effectiveTimeOutcome, effectiveTimeState, formatWallRatio, trainingCoverageNote, trainingMetrics } from '../training-metrics.js';
 
 /** 阶段清单兜底：started 事件没带 phases 时使用（字段与后端 phases.as_list() 对齐）。 */
 const PHASE_FALLBACK = [
@@ -389,7 +390,7 @@ export function render(container, ctx) {
       const slot = child.dataset.slot;
       const phases = { quality: ['qc'], baseline: ['baseline_open', 'baseline_closed', 'baseline_after'],
         monitor: ['monitor'], waveform: ['monitor'], training: ['training'],
-        'training-feedback': ['training'], segments: ['training'], assessment: ['assessment'],
+        'training-feedback': ['training'], 'effective-progress': ['baseline_open', 'training', 'baseline_after'], segments: ['training'], assessment: ['assessment'],
         model: ['model'], artifacts: ['report'], 'result-sart': ['sart'], 'result-pvt': ['pvt'] };
       child.classList.toggle('flow-phase-hidden', !local.finished && !!phases[slot]
         && !phases[slot].includes(currentPhaseKey()));
@@ -1617,6 +1618,16 @@ export function render(container, ctx) {
         refresh();
         break;
       }
+      case 'effective_progress': {
+        if (!payload.effective_time) break;
+        const slot = ensureTaskSlot('effective-progress');
+        slot.host.textContent = '';
+        const training = payload.key === 'training';
+        slot.host.append(card(training ? '有效时长训练进度' : '有效基线采集进度',
+          effectiveTimeContent(payload.effective_time, { training })));
+        markTaskCards();
+        break;
+      }
       case 'quality': {
         const host = el('div', {}, [
           el('p', { text: `质检：${payload.passed ? '通过' : '未达门槛'}｜可用 ${fmtInt(payload.usable)}/${fmtInt(payload.windows)} 窗（${fmtPercent(payload.valid_ratio)}）` }),
@@ -1804,6 +1815,7 @@ export function render(container, ctx) {
         break;
       }
       case 'feedback': {
+        local.feedbackSeen = true;
         const slot = ensureTaskSlot('training-feedback');
         if (!slot.value) {
           slot.value = el('strong', { class: 'feedback-score mono' });
@@ -1811,9 +1823,11 @@ export function render(container, ctx) {
           slot.hold = el('progress', { max: 1, value: 0, 'aria-label': '连续保持训练目标的进度' });
           slot.status = el('p');
           slot.hint = el('p', { class: 'muted', text: '自然呼吸，保持坐姿，尝试把专注度稳定在目标线以上。' });
+          slot.metrics = el('p', { class: 'training-feedback-metrics' });
+          slot.coverage = el('p', { class: 'training-coverage-note', role: 'status' });
           slot.host.append(card('当前训练反馈', el('div', { class: 'flow-feedback' }, [
             el('div', { class: 'row row--between' }, [slot.value, slot.target]),
-            slot.hold, slot.status, slot.hint,
+            slot.metrics, slot.hold, slot.status, slot.hint, slot.coverage,
           ])));
           interactionHost.prepend(slot.host);
         }
@@ -1823,24 +1837,44 @@ export function render(container, ctx) {
         slot.value.textContent = usable ? fmtNum(payload.score, 3) : '信号待恢复';
         slot.target.textContent = `第 ${fmtInt(payload.segment)} 段 · 目标 ${fmtNum(payload.target, 3)}`;
         slot.hold.value = usable && required > 0 ? Math.min(1, hold / required) : 0;
+        const metrics = payload.segment_stats ? trainingMetrics(payload.segment_stats) : null;
+        const accelerated = (payload.effective_time?.time_scale ?? ctx.store.state.currentSession?.time_scale ?? 1) !== 1;
+        slot.metrics.textContent = `有效时间内达标率 ${fmtPercent(metrics?.validRatio)} · 有效覆盖 ${fmtPercent(metrics?.coverage)} · 有效反馈 ${fmtDuration(metrics?.validSeconds)} / ${accelerated ? '协议时长' : '实际'} ${fmtDuration(metrics?.duration)}`;
+        slot.coverage.textContent = metrics ? trainingCoverageNote(metrics) : '等待有效时间统计；当前缺失不填零。';
         if (payload.feedback_mode) slot.hint.textContent = payload.mode_label;
         slot.status.textContent = payload.feedback_mode && payload.feedback_mode !== 'eeg' ? payload.mode_label : !usable ? '当前信号质量不足，此窗不计入有效训练。'
           : payload.achieved ? '本段已达到连续保持要求，继续稳定保持。'
           : `连续保持 ${fmtDuration(hold)} / ${fmtDuration(required)} · ${payload.on_target ? '已到目标线，继续保持' : '尚未到目标线，平稳调整'}`;
+        if (payload.effective_time) handleEvent('effective_progress', null, { key: 'training', effective_time: payload.effective_time });
         break;
       }
       case 'segment': {
         const slot = ensureTaskSlot('segments');
         const body = slot.body || (slot.body = el('div'));
-        const stats = payload.stats || {};
+        if (!slot.segments) slot.segments = new Map();
+        slot.segments.set(payload.seq ?? payload.index, payload);
+        body.textContent = '';
+        const rows = Array.from(slot.segments.values()).sort((a, b) => Number(a.seq ?? a.index) - Number(b.seq ?? b.index))
+          .map(row => ({ ...row, __metrics: trainingMetrics(row.stats || {}, row.duration_sec) }));
         body.append(table([
-          { title: '段', render: () => fmtInt(Number(pick(payload, 'seq', 0)) + 1) },
-          { title: '目标（前→后）', render: () => `${fmtNum(payload.target, 3)} → ${fmtNum(payload.target_after, 3)}` },
-          { title: '均值', align: 'right', render: () => fmtNum(pick(stats, 'mean'), 3) },
-          { title: '达标占比', align: 'right', render: () => fmtPercent(pick(stats, 'on_target_ratio')) },
-          { title: '波动', align: 'right', render: () => fmtNum(pick(stats, 'volatility'), 3) },
-          { title: '有效点', align: 'right', render: () => fmtInt(pick(stats, 'n')) },
-        ], [payload]));
+          { title: '段', render: row => fmtInt(Number(pick(row, 'seq', 0)) + 1) },
+          { title: '有效时间内达标率', align: 'right', render: row => fmtPercent(row.__metrics.validRatio) },
+          { title: '有效覆盖', align: 'right', render: row => fmtPercent(row.__metrics.coverage) },
+          { title: (ctx.store.state.currentSession?.time_scale ?? 1) !== 1 ? '有效秒数 / 协议时长' : '有效秒数 / 实际时长', render: row => `${fmtDuration(row.__metrics.validSeconds)} / ${fmtDuration(row.__metrics.duration)}` },
+          { title: '覆盖说明', render: row => !row.__metrics.modern ? '旧版口径，缺有效时间统计' : row.__metrics.sufficient ? '覆盖充足' : '样本不足' },
+          { title: '有效时长结果', render: row => effectiveTimeOutcome(row.effective_time) },
+        ], rows));
+        body.append(el('p', { class: 'muted', text: '缺失不计分、不填零；有效时间内达标率与覆盖率并列阅读，样本不足时保持目标。' }));
+        body.append(el('details', { class: 'result-details' }, [
+          el('summary', { text: '查看实际时间占比与目标调整' }),
+          table([
+            { title: '段', render: row => fmtInt(Number(pick(row, 'seq', 0)) + 1) },
+            { title: '实际时间达标占比 / 旧版样本占比', render: row => formatWallRatio(row.__metrics) },
+            { title: '目标（前→后）', render: row => `${fmtNum(row.target, 3)} → ${fmtNum(row.target_after, 3)}` },
+            { title: '均值', render: row => fmtNum(pick(row, 'stats.mean'), 3) },
+            { title: '有效点', render: row => fmtInt(pick(row, 'stats.n')) },
+          ], rows),
+        ]));
         if (!slot.host.contains(body)) slot.host.append(card('训练分段', body));
         break;
       }
@@ -2000,6 +2034,13 @@ export function render(container, ctx) {
     // 中途打开/刷新页面：SSE 不重放历史事件，收不到已经过去的 scale_request，
     // 只能按后端"正在等谁作答"（runtime.awaiting_input）补建交互区，否则页面上没有作答界面。
     local.running = data.status === 'running';
+    if (!local.feedbackSeen && runtime.latest_feedback && data.phase === 'training') {
+      handleEvent('feedback', null, runtime.latest_feedback);
+    }
+    const effective = effectiveTimeState(runtime.effective_time, data.phase);
+    if (effective && ['baseline_open', 'training', 'baseline_after'].includes(data.phase)) {
+      handleEvent('effective_progress', null, { key: data.phase, effective_time: effective });
+    }
     local.awaitingInput = list(pick(runtime, 'awaiting_input', []));
     if (!local.autoKnown) {
       // started 快照可能还没到达；先按后端同一口径（time_scale < 0.2 → 自动作答）推一版，

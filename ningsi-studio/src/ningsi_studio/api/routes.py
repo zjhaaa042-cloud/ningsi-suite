@@ -770,7 +770,7 @@ def build_router(settings: Settings) -> Router:
             payload["runs"] = runs
             payload["artifacts"] = jsonable(schemas.rows_to_dicts(repo.list_artifacts(conn, row["id"])))
             payload["indicator_summary"] = jsonable(repo.latest_metric_summary(conn, row["id"]))
-            if payload.get("protocol") == "ten_min":
+            if payload.get("protocol") in ("ten_min", "effective_time"):
                 payload["result_overview"] = jsonable(_training_overview(conn, row, runs))
             # 本次会话的阶段表**按它自己的协议档**给出：短协议是 9 步。
             # 不返回它的话，直接打开 `#/flow?session=…` 的页面只能退回前端写死的 11 步兜底表，
@@ -783,6 +783,8 @@ def build_router(settings: Settings) -> Router:
             # 保证同一响应里 source 与 runtime.source_kind 同源（不会一个 lsl 一个 sim）。
             payload["source"] = actual_source
         payload["runtime"] = {
+            "latest_feedback": getattr(runtime, "latest_feedback", None),
+            "effective_time": getattr(runtime, "effective_time", None),
             "alive": bool(runtime and runtime.alive),
             "source_note": runtime.source.note if runtime and runtime.source else None,
             "awaiting_input": runtime.awaiting() if runtime else [],
@@ -1190,7 +1192,10 @@ def build_router(settings: Settings) -> Router:
             if item["phase"] == "training" and item["status"] == "done":
                 summary = json.loads(item["payload"] or "{}").get("training", {})
                 break
-        if not segments and not summary:
+        runtime = manager.get(uuid)
+        feedback = getattr(runtime, "latest_feedback", None)
+        effective = getattr(runtime, "effective_time", None)
+        if not segments and not summary and not feedback:
             raise NotFound("该会话没有训练记录")
         if summary:
             # SQLite JSON merge-patch removes null-valued object members.
@@ -1207,7 +1212,8 @@ def build_router(settings: Settings) -> Router:
                 segment.update(stored)
             else:
                 segment["samples"] = stored or []
-        return Response.json({"segments": jsonable(segments), "summary": jsonable(summary)})
+        return Response.json({"segments": jsonable(segments), "summary": jsonable(summary),
+                              "current_feedback": jsonable(feedback), "effective_time": jsonable(effective)})
 
     @router.get(r"/api/sessions/{uuid}/report")
     def session_report(request: Request) -> Response:

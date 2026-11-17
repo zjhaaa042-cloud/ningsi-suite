@@ -37,6 +37,13 @@ report={participant:'p01',extras:{},indicators:{summary:{}}};
 const legacy=new StubNode('main');
 await render(legacy,ctx);
 assert.ok(all(legacy).some(n=>n.tagName==='H2'&&text(n)==='一、状态评分'),'old JSON-only reports retain a readable fallback');
+report={participant:'p01',extras:{protocol:'effective_time',effective_time:{acquisition_complete:false,
+  collection_status:'insufficient'}},indicators:{summary:{}}};
+const insufficient=new StubNode('main');await render(insufficient,ctx);
+assert.ok(text(insufficient).includes('本协议未采集独立任务态评分'));
+assert.ok(text(insufficient).includes('采集不足：流程已结束'));
+assert.ok(text(insufficient).includes('不能据此判断训练效果'));
+assert.ok(!text(insufficient).includes('指标为本次有效脑电窗口的均值'));
 '''
         program = program.replace('API_URI', json.dumps((ROOT/'web/js/api.js').as_uri()))
         program = program.replace('VIEW_URI', json.dumps((ROOT/'web/js/views/report.js').as_uri()))

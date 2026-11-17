@@ -151,3 +151,33 @@ await click(byText(root,'运行模拟演示'));
 assert.equal(sessions[0].device,'sim-bsense');assert.equal(sessions[0].eeg_calibration,null);
 ctx.cleanups.forEach(fn=>fn());
 ''')
+
+    def test_effective_time_is_an_explicit_plan_and_fixed_ten_minutes_remain_selectable(self):
+        self.node(r'''
+import assert from 'node:assert/strict';
+const {render}=await import(START_URI);const ctx=makeCtx();const checks=[],sessions=[];
+api.devices=async()=>({data:{sources:[{key:'lsl:headset',device:'Headset',real:true,is_eeg:true}]}});
+api.listSubjects=async()=>({data:{items:[{public_id:'p01'}],total:1}});
+api.config=async()=>({data:{profiles:[{key:'ten_min',total_sec:600},
+  {key:'effective_time',total_sec:600,max_acquisition_seconds:1040},{key:'short',total_sec:960},{key:'full',total_sec:1500}]}});
+api.sessionPreflight=async body=>{checks.push(body);return {data:{ready:true,checks:[],calibration:{source_unit:'uV'}}};};
+api.createSubject=async()=>({data:{public_id:'p02'}});
+api.createSession=async body=>{sessions.push(body);return {data:{session:{uuid:'session'+sessions.length},phases:[],runtime:{}}};};
+const root=new StubNode('main');await render(root,ctx);await flush();
+const choice=value=>all(root).find(node=>node.tagName==='INPUT'&&node.value===value);
+assert.equal(choice('ten_min').checked,true,'fixed ten minutes remains the default');
+assert.ok(text(root).includes('不追加基线时间'));
+choice('effective_time').onchange();await flush();
+assert.equal(checks.at(-1).protocol,'effective_time');
+assert.ok(text(root).includes('4 轮各累计 50 秒有效反馈'));
+assert.ok(text(root).includes('补采上限约17分20秒'));
+assert.ok(text(root).includes('设备读取等待按实际记录'));
+assert.equal(byText(root,'开始有效时长训练').disabled,false);
+await click(byText(root,'开始有效时长训练'));
+assert.equal(sessions[0].protocol,'effective_time');assert.equal(sessions[0].time_scale,1);
+choice('ten_min').onchange();await flush();
+assert.ok(text(root).includes('不追加基线时间'));
+await click(byText(root,'开始评估'));
+assert.equal(sessions[1].protocol,'ten_min');
+ctx.cleanups.forEach(fn=>fn());
+''')

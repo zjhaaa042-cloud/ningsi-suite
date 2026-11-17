@@ -124,14 +124,17 @@ def run(runtime, auto):
                 sample_time = (time.monotonic() - round_start) / r.scale
                 trainer.feed(smooth, sample_time, usable=smooth is not None)
                 display_start = time.monotonic()
-                r.bus.publish("feedback", {"segment": index+1, "feedback_mode": mode,
+                feedback = {"segment": index+1, "feedback_mode": mode,
                     "heatmap_cell": heatmap_cell,
                     "affect_model": r.current_affect(),
                     "attention_model": step.attention_model,
                     "mode_label": LABELS[mode], "grade": step.graded["grade"],
                     "score": smooth, "target": trainer.target if mode == "eeg" else None,
                     "usable": smooth is not None, "on_target": smooth is not None and smooth >= trainer.target,
-                    **trainer.feedback_status()})
+                    "segment_stats": trainer.segment_stats(sample_time),
+                    **trainer.feedback_status()}
+                r.latest_feedback = feedback
+                r.bus.publish("feedback", feedback)
                 r._sleep_real(max(0, round_start+(tick+1)*config.STEP_SEC*r.scale-time.monotonic()))
                 counts[mode] += max(0, min(time.monotonic(), round_start+segment_sec*r.scale)-display_start)/r.scale
             segment = trainer.close_segment()
@@ -143,7 +146,8 @@ def run(runtime, auto):
             segments.append(segment)
             r._persist_training_segment(segment)
             r.bus.publish("segment", segment)
-            r.bus.publish("feedback", {"segment": index+1, "feedback_mode": "rest", "mode_label": LABELS["rest"], "score": None, "usable": False})
+            r.latest_feedback = {"segment": index+1, "feedback_mode": "rest", "mode_label": LABELS["rest"], "score": None, "usable": False}
+            r.bus.publish("feedback", r.latest_feedback)
             r._sleep_real(max(0, round_start+round_sec*r.scale-time.monotonic()))
             r._progress("training", (index+1)/rounds)
         timings["training"] = round((time.monotonic()-begin)/r.scale, 3)

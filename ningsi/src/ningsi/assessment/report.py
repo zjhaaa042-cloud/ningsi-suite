@@ -7,10 +7,83 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 
 from ningsi import config
 from ningsi.assessment.joint import JointAssessment
+
+
+def _finite_number(value):
+    return (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) else None)
+
+
+def _percentage(value):
+    number = _finite_number(value)
+    return f"{number:.1%}" if number is not None and 0 <= number <= 1 else "—"
+
+
+def _seconds(value):
+    number = _finite_number(value)
+    return f"{number:g}秒" if number is not None and number >= 0 else "—"
+
+
+def _completion_label(value):
+    return {"target_reached": "有效时间目标完成", "valid_target_reached": "有效时间目标完成",
+            "wall_time_limit": "达到补采上限", "max_time_reached": "达到补采上限", "max_duration": "达到补采上限",
+            "baseline_invalid": "基线未合格，保持固定引导", "baseline_unavailable": "基线不可用，保持固定引导",
+            "insufficient_data": "有效数据不足", "cancelled": "已取消", "timing_issue": "计时不一致，未记为完成",
+            "guided_complete": "固定引导结束，有效反馈目标未完成"}.get(value, "详见阶段采集记录")
+
+
+def _effective_scale(effective, timing=None):
+    for candidate in ((timing or {}).get("time_scale"), effective.get("time_scale")):
+        value = _finite_number(candidate)
+        if value is not None and value > 0:
+            return value
+    return 1.0
+
+
+def _effective_actual_elapsed(timing, effective, protocol_seconds=None):
+    actual = _finite_number(timing.get("actual_elapsed_seconds"))
+    if actual is not None and actual >= 0:
+        return actual
+    elapsed = _finite_number(timing.get("elapsed_seconds") if protocol_seconds is None else protocol_seconds)
+    return elapsed * _effective_scale(effective, timing) if elapsed is not None and elapsed >= 0 else None
+
+
+def _effective_summary_lines(effective):
+    actual = _finite_number(effective.get("actual_elapsed_seconds"))
+    if actual is None:
+        actual = _finite_number(effective.get("elapsed_sec"))
+    protocol = _finite_number(effective.get("protocol_elapsed_seconds"))
+    scale = _effective_scale(effective)
+    if protocol is None and actual is not None:
+        protocol = actual / scale
+    return [
+        f"计时单位：有效时间、训练时长和调度上限均为协议秒；时间倍率{scale:g}，实际墙钟用时另列。",
+        f"实际采集用时 {_seconds(actual)}；协议采集用时 {_seconds(protocol)}／阶段采集调度上限 {_seconds(effective.get('max_acquisition_seconds'))}（协议秒），连接等待和报告生成另计。",
+    ]
+
+
+def _effective_phase_lines(effective):
+    rows = effective.get("phase_results") or {}
+    if not isinstance(rows, dict):
+        return []
+    lines = []
+    for key, label in (("baseline_open", "睁眼基线"), ("training", "反馈训练合计"), ("baseline_after", "训练后基线")):
+        row = rows.get(key)
+        if not isinstance(row, dict):
+            continue
+        text = (f"{label}：有效时间{_seconds(row.get('valid_seconds'))}／目标{_seconds(row.get('target_seconds'))}（协议秒）；"
+                f"协议用时{_seconds(row.get('elapsed_seconds'))}／调度上限{_seconds(row.get('max_seconds'))}；"
+                f"实际用时{_seconds(_effective_actual_elapsed(row, effective))}；"
+                f"{_completion_label(row.get('completion_reason'))}。")
+        if row.get("baseline_valid") is False:
+            text += "基线质量条件未通过，不能据此输出个体状态分数。"
+        lines.append(text)
+    return lines
 
 
 def _overlapping_windows(extras) -> bool:
@@ -101,20 +174,40 @@ class SessionReport:
         lines += [
             "## 一、状态评分",
         ]
+        effective = (self.extras or {}).get("effective_time")
         ten = (self.extras or {}).get("ten_min")
-        if ten:
-            lines.extend(["", "## 十分钟分级反馈", ten["note"], ten["comparison_note"],
-                          "- 质量等级窗数：" + json.dumps(self.extras["signal_diagnostics"].get("grades"), ensure_ascii=False),
-                          "- 同通道中位数变化：" + json.dumps(ten["changes"], ensure_ascii=False),
-                          "- 分轮反馈时长：" + json.dumps([x["mode_seconds"] for x in ten["segments"]], ensure_ascii=False)])
-            for segment in ten["segments"]:
+        feedback_protocol = effective or ten
+        if feedback_protocol:
+            lines.extend(["", "## 有效时长反馈训练" if effective else "## 十分钟分级反馈",
+                          feedback_protocol.get("note", "描述性训练记录，不代表已验证的训练效果。"),
+                          feedback_protocol.get("comparison_note", ""),
+                          "- 质量等级窗数：" + json.dumps((self.extras.get("signal_diagnostics") or {}).get("grades"), ensure_ascii=False),
+                          "- 同通道中位数变化：" + json.dumps(feedback_protocol.get("changes", {}), ensure_ascii=False),
+                          "- 分轮反馈时长：" + json.dumps([x.get("mode_seconds", {}) for x in feedback_protocol.get("segments", [])], ensure_ascii=False)])
+            if effective:
+                lines.extend([
+                    "- 有效时间内达标率描述已有合格反馈内的表现；有效覆盖与实际用时单独保留。缺失不填零，未观察区间不累计奖励。",
+                    "- 有效采集目标：" + ("已全部完成" if effective.get("acquisition_complete") is True else "尚未全部完成；请结合未完成原因与覆盖解释"),
+                    "- PVT刺激、反应时与练习／正式任务时序独立于脑电质量；补采仅用于静息基线和反馈训练。",
+                ])
+                lines.extend("- " + item for item in _effective_summary_lines(effective))
+                lines.extend("- " + item for item in _effective_phase_lines(effective))
+            for segment in feedback_protocol.get("segments", []):
                 stats = segment.get("stats") or {}
                 if stats.get("timing_spec"):
-                    lines.append(f"- 第{segment['index']}轮训练时间统计：有效覆盖{stats['valid_time_ratio']:.1%}；"
-                                 f"整段达标{stats['on_target_ratio']:.1%}；有效时间内达标{stats['on_target_valid_ratio']:.1%}。"
-                                 + segment.get("adaptation_reason", "") if stats.get("valid_seconds", 0) > 0 else
+                    lines.append(f"- 第{segment['index']}轮训练时间统计：有效时间内达标{_percentage(stats.get('on_target_valid_ratio'))}；"
+                                 f"有效覆盖{_percentage(stats.get('valid_time_ratio'))}；整段达标{_percentage(stats.get('on_target_ratio'))}；"
+                                 f"有效反馈{_seconds(stats.get('valid_seconds'))}／训练时长{_seconds(segment.get('duration_sec'))}（协议秒）。"
+                                 + (f"实际时长{_seconds(_effective_actual_elapsed(segment.get('effective_time') or {}, effective, segment.get('duration_sec')))}。" if effective else "")
+                                 + segment.get("adaptation_reason", "") if (_finite_number(stats.get("valid_seconds")) or 0) > 0 else
                                  f"- 第{segment['index']}轮无有效脑电反馈；有效覆盖0%，不计算达标率、不调整目标。")
-            overview = ten.get("indicator_overview") or {}
+                timing = segment.get("effective_time") or {}
+                if effective and timing:
+                    lines.append(f"- 第{segment['index']}轮有效时间进度：{_seconds(timing.get('valid_seconds'))}／"
+                                 f"目标{_seconds(timing.get('target_seconds'))}（协议秒）；协议用时{_seconds(timing.get('elapsed_seconds'))}／"
+                                 f"上限{_seconds(timing.get('max_seconds'))}；实际用时{_seconds(_effective_actual_elapsed(timing, effective))}；"
+                                 f"结束原因 {_completion_label(timing.get('completion_reason'))}。")
+            overview = feedback_protocol.get("indicator_overview") or {}
             if overview:
                 lines.extend(["", "### 训练阶段脑电指数（描述性）", overview.get("note", "")])
                 for key, label in (("focus", "专注相关指数"), ("relax", "放松度"), ("load", "认知负荷")):
@@ -133,7 +226,7 @@ class SessionReport:
                 if stat:
                     lines.append(f"- {label}：{stat['mean']:.2f}（波动 {stat['std']:.2f}，n={stat['n']}）")
         else:
-            lines.append("- 本协议未采集独立监测阶段指数；训练指数与PVT结果单独展示。" if ten
+            lines.append("- 本协议未采集独立监测阶段指数；训练指数与PVT结果单独展示。" if feedback_protocol
                          else "- 无可用指标（见采集质量）")
         if isinstance(self.indicators, dict) and self.indicators.get("band_z"):
             band_text = "、".join(f"{k} {v:+.2f}" for k, v in sorted(self.indicators["band_z"].items()))
@@ -149,7 +242,7 @@ class SessionReport:
                              f"前后半段对数比值均值差 {quality.get('half_mean_difference')}；"
                              f"质检原因 {baseline.get('reasons') or '无'}。稳定性尚未验证。")
         q = self.quality or {}
-        if (self.extras or {}).get("protocol") == "ten_min" and not q.get("windows_total"):
+        if (self.extras or {}).get("protocol") in ("ten_min", "effective_time") and not q.get("windows_total"):
             lines.append("- 本协议未采集独立监测窗口；启动质检、基线与训练质量见分级窗口统计。")
         else:
             lines.append(

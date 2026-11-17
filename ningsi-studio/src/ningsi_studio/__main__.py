@@ -362,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     preflight = sub.add_parser("preflight", help="只读核对设备档案、单位与模型适配；不采集EEG或创建会话")
     preflight.add_argument("--device", required=True, help="精确来源键，例如 lsl:实际流名")
-    preflight.add_argument("--protocol", choices=("ten_min", "short", "full"), default="ten_min")
+    preflight.add_argument("--protocol", choices=("ten_min", "effective_time", "short", "full"), default="ten_min")
     preflight.add_argument("--source-unit", choices=("uV", "mV", "V", "nV", "ADC"))
     preflight.add_argument("--uv-per-count", type=float, help="ADC时需有标定依据的µV/计数倍率")
     preflight.add_argument("--timeout", type=float, default=2., help="LSL元数据扫描秒数")

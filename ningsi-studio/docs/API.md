@@ -360,6 +360,7 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 | `feedback` | `segment, target, score, on_target, usable, t, heatmap_cell?`；实际训练窗附同口径时间线单元，休息提示不生成假窗口 |
 | `segment` | `seq, index, target, target_after, hold_sec, hold_after, duration_sec, excluded_windows, stats{mean,on_target_ratio,volatility,n,achieved}, mean_score, on_target_ratio, volatility, n, achieved, samples[[t,score]]` |
 | `training_start` | `mode, segments, segment_sec, target, rationale, initial_from, target_step, hold_sec` |
+| `effective_progress` | `phase, key, segment?, effective_time`；有效协议进度，字段与运行快照一致，见有效时长协议说明 |
 | `assessment` | 同 `GET .../assessment` |
 | `scales` | `results[]`（SAS/SDS 计分结果汇总，量表阶段结束时下发一次） |
 | `model` | `spec, features[], subject_split, train, validation, test, model_path` |
@@ -617,6 +618,35 @@ Studio还要求任务完成。这些是待验证的工程完整性门槛，由 `
 ### v0.1.2 十分钟协议扩展
 
 `POST /api/sessions` 的 `protocol` 新增 `ten_min`；`GET /api/config` 返回三个协议档。新阶段为 `practice`、`baseline_after`。十分钟PVT作答须携带 `phase: "practice" | "main"`，旧协议不要求。`feedback` 增加 `feedback_mode`、`mode_label`、`grade`；非eeg模式 `score=null`、`usable=false`。报告 `extras.ten_min` 包含阶段时长、前后同通道描述性统计及分轮反馈时长；`signal_diagnostics.grades` 返回A/B/C窗数。旧字段和旧协议语义保持兼容。
+
+### 有效时长训练（effective-time-v1）
+
+`POST /api/sessions` 新增独立 `protocol: "effective_time"`，`GET /api/config` 现返回四个协议；默认与原 `full`、`short`、`ten_min` 的阶段及时长不变。新方案沿用十分钟阶段序列，不含 SART、量表、独立监测和模型训练，不提供探针模型效度证据。
+
+| 阶段 | 目标 | 墙钟上限 |
+| --- | --- | --- |
+| 质检 | 固定30秒 | 30秒 |
+| 前、后睁眼基线 | 各60秒合格4秒窗的时间区间并集 | 各180秒 |
+| PVT练习 / 正式 | 固定30 / 180秒 | 原任务时序不因EEG质量延长 |
+| 4轮训练 | 每轮50秒服务端可用反馈区间 | 每轮100秒，随后休息10秒 |
+
+阶段调度上限合计1040秒（17分20秒）；设备连接和报告生成另计。数据源读取或系统调度阻塞可能越过截止时间，仍保留真实墙钟分母，明确记录超时。基线原5窗、30秒最低有效区间、60%合格窗比例及单位/完整窗口门槛仍适用；60秒为新协议的补采目标，不能替代最低门槛。全部候选窗（包括不合格窗）参与比例分母，重叠窗只计算并集。达到60秒但原基线无效时继续到上限，仍不能评分。
+
+训练按已有 `neurofeedback-v3` 区间语义计算：每次分值最多支持后续一个2秒更新区间；空档不插值，坏窗分值为null、连续保持立即中断，累计有效进度保留；升级仍需连续3窗。最后一个分值发出时不预记将来的2秒。此为服务端反馈可用时间，不是已测量的客户端物理显示时长或端到端延迟。`segment.duration_sec` 为实际训练墙钟，覆盖率保留无效时长分母。`on_target_valid_ratio`（有效数据内达标率）、`valid_time_ratio`（覆盖率）和原 `on_target_ratio`（总时长达标率）分别保留。
+
+SSE新增 `effective_progress`，数据为 `{phase,key,segment?,effective_time}`。`feedback`、`baseline`、`segment` 和训练总览均可带 `effective_time`：
+
+有效协议分段还保留 `support_gap_count` 与 `support_gap_interruptions`（本段协议秒坐标），表示上一反馈支持期到期后产生的无依据空隙。它们打断连续保持，不增加 EEG 的 `excluded_windows`。
+
+```json
+{"spec":"effective-time-v1","target_seconds":50,"valid_seconds":24,"elapsed_seconds":40,"max_seconds":100,"extension_seconds":0,"quality_paused":false,"completion_reason":null,"target_reached":false,"completed":false}
+```
+
+`completion_reason` 为 `null | "target_reached" | "max_duration" | "baseline_invalid" | "cancelled" | "timing_issue"`；`target_reached` 仅表示有效秒数目标达到，`completed` 还要求本阶段原有门槛有效且正常达标结束。前基线最终无效时，训练每轮只做原50秒固定引导并记 `baseline_invalid`，不会为了必然无法恢复的评分空等100秒；运行中的 `baseline_valid=false` 说明这一限制。段末 `timing_consistent` 独立核对实时计时器与既有训练引擎的区间统计，异常时记 `timing_issue` 且不判完成。段间休息用 `feedback_mode="rest"`，不计有效反馈时长。训练总览 `effective_time` 是4轮聚合（目标200秒，上限440秒，elapsed包含休息）；单轮对象目标50秒、上限100秒、不含休息。`extension_seconds` 对基线/单轮是超过目标秒数的墙钟协议秒数，对训练聚合是超过原240秒预算的部分。
+
+有效进度的秒数明确标记 `time_basis="protocol_seconds"`，并携带 `time_scale` 和 `actual_elapsed_seconds`。模拟加速时，协议秒数与实际墙钟不同；真实LSL来源倍率固定为1。结果对象的兼容字段 `elapsed_sec` 和新增 `actual_elapsed_seconds` 是实际墙钟秒，`protocol_elapsed_seconds` 是对应协议秒数，`elapsed_sec_basis="actual_wall_seconds"` 消除歧义。
+
+报告 `extras.effective_time` 独立保存 `phase_results`、`segments`、`timings`、前后描述性统计、`max_acquisition_seconds`、`acquisition_complete` 和 `collection_status: "complete" | "insufficient"`；运行/取消中状态另有 `in_progress` / `cancelled`。会话 `status="done"` 代表流程及报告完成，不能据此推断有效采集达标。`GET /api/sessions/{uuid}` 的 `runtime.latest_feedback` 和 `runtime.effective_time` 提供当前快照；`GET .../training` 返回 `current_feedback` / `effective_time`，首段尚未结束但已经发布训练反馈时也可读取。`feedback.segment_stats` 提供当前实际墙钟内统计，原固定训练模式也增加此字段。取消时保留已完成及当前部分段/基线的进度与原因，不出虚假完整报告。
 
 十分钟完成页通过 `GET /api/sessions/{uuid}` 的 `result_overview` 读取训练指数：
 `source_phase="training"`、`source_label`、`summary.{focus,relax,load}.{mean,std,n}`、

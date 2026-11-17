@@ -50,21 +50,31 @@ class StudioTraining:
             return
         self.samples.append((float(t_sec), float(score)))
 
-    def feedback_status(self) -> dict:
-        stats = Segment(self.segment_index + 1, self.plan["segment_sec"],
+    def segment_stats(self, duration_sec: float | None = None) -> dict:
+        duration = self.plan["segment_sec"] if duration_sec is None else max(0.0, duration_sec)
+        stats = Segment(self.segment_index + 1, duration,
                         self.target, self.inner.hold_sec, self.samples,
                         interruptions=self.interruptions).stats()
+        # The invalid event at the *current* clock boundary has zero duration,
+        # yet immediately breaks the live hold; do not wait for the next tick.
+        latest_sample = max((t for t, _ in self.samples), default=-1)
+        if any(latest_sample <= t <= duration for t in self.interruptions):
+            stats["current_hold_sec"] = 0.0
+        return {**stats, "duration_sec": duration}
+
+    def feedback_status(self, duration_sec: float | None = None) -> dict:
+        stats = self.segment_stats(duration_sec)
         return {"hold_sec": self.inner.hold_sec,
                 "current_hold_sec": stats["current_hold_sec"],
                 "max_hold_sec": stats["max_hold_sec"],
                 "achieved": stats["achieved"]}
 
     # ---------------------------------------------------------------- 分段
-    def close_segment(self) -> dict:
+    def close_segment(self, duration_sec: float | None = None) -> dict:
         target_before = round(float(self.inner.target), 4)
         hold_before = round(float(self.inner.hold_sec), 4)
         segment = self.inner.add_segment(
-            list(self.samples), self.plan["segment_sec"], excluded_windows=self.excluded,
+            list(self.samples), self.plan["segment_sec"] if duration_sec is None else duration_sec, excluded_windows=self.excluded,
             interruptions=self.interruptions,
         )
         stats = segment.stats()

@@ -60,7 +60,7 @@ def main():
     index = request("/", binary=True).decode("utf-8")
     navigation = request("/js/main.js", binary=True).decode("utf-8")
     passed("product navigation has no competition route", "#/showcase" not in navigation and "A09" not in index)
-    for asset in ("/js/views/device-profile.js", "/js/views/session-preflight.js", "/js/views/state-heatmap.js", "/css/workspace.css"):
+    for asset in ("/js/views/device-profile.js", "/js/views/session-preflight.js", "/js/views/state-heatmap.js", "/js/training-metrics.js", "/css/workspace.css"):
         passed("packaged asset " + asset, len(request(asset, binary=True)) > 100)
     before = request("/api/sessions")["total"]
     device = "lsl:QA-SOFTWARE-FIXTURE-UNCONNECTED-" + uuid_module.uuid4().hex[:8]
@@ -112,6 +112,54 @@ def main():
     passed("standalone HTML report", b"<html" in request(f"/api/sessions/{uuid}/artifacts/report_html", binary=True).lower())
     with zipfile.ZipFile(io.BytesIO(request(f"/api/sessions/{uuid}/export.zip", binary=True))) as archive:
         passed("session export has valid CRC", archive.testzip() is None)
+    profiles = {item["key"]: item for item in request("/api/config")["profiles"]}
+    policy = profiles["effective_time"]["effective_time"]
+    passed("fixed and effective time protocols remain distinct", profiles["ten_min"]["total_sec"] == 600
+           and policy["baseline_target_seconds"] == 60 and policy["baseline_max_seconds"] == 180
+           and policy["segment_target_seconds"] == 50 and policy["segment_max_seconds"] == 100
+           and policy["max_acquisition_seconds"] == 1040)
+    created = request("/api/sessions", {"participant": subject["public_id"], "create_subject": False,
+        "device": "sim-bsense", "protocol": "effective_time", "training_mode": "quick", "time_scale": .02}, expected=201)
+    effective_uuid = created["session"]["uuid"]
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        effective_session = request(f"/api/sessions/{effective_uuid}")
+        if effective_session["status"] in ("done", "failed", "cancelled"):
+            break
+        time.sleep(.5)
+    passed("complete effective time simulation", effective_session["status"] == "done"
+           and effective_session["protocol"] == "effective_time")
+    effective_report = request(f"/api/sessions/{effective_uuid}/report")
+    timing = effective_report["extras"]["effective_time"]
+    passed("effective acquisition outcome is explicit", timing["acquisition_complete"] is True
+           and timing["collection_status"] == "complete" and effective_report["extras"]["source_kind"] == "sim")
+    phases = {row["key"]: row for row in effective_session["phases"]}
+    passed("effective mode keeps fixed PVT and practice budgets", phases["practice"]["duration_sec"] == 30
+           and phases["pvt"]["duration_sec"] == 180)
+    passed("effective baseline has real union coverage and valid quality", all(
+        timing["phase_results"][key]["completed"] and timing["phase_results"][key]["baseline_valid"]
+        and timing["phase_results"][key]["valid_seconds"] >= 60
+        for key in ("baseline_open", "baseline_after")))
+    effective_training = request(f"/api/sessions/{effective_uuid}/training")
+    segments = effective_training["segments"]
+    passed("effective feedback uses observed intervals and actual segment denominator", len(segments) == 4 and all(
+        segment["effective_time"]["completed"] and segment["effective_time"]["timing_consistent"]
+        and abs(segment["effective_time"]["valid_seconds"] - segment["stats"]["valid_seconds"]) < .0002
+        and segment["effective_time"]["time_basis"] == "protocol_seconds"
+        and abs(segment["effective_time"]["actual_elapsed_seconds"] - segment["duration_sec"] * .02) < .002
+        and segment["stats"]["valid_seconds"] >= 50
+        and segment["stats"]["valid_seconds"] <= segment["duration_sec"]
+        and segment["stats"]["on_target_ratio"] <= segment["stats"]["valid_time_ratio"] + .0001
+        and segment["stats"]["on_target_valid_ratio"] is not None for segment in segments))
+    passed("effective training summary retains separate coverage and performance",
+           effective_training["summary"]["mode"] == "effective_time"
+           and effective_training["summary"]["valid_seconds"] >= 200
+           and effective_training["summary"]["on_target_valid_ratio"] is not None)
+    effective_html = request(f"/api/sessions/{effective_uuid}/artifacts/report_html", binary=True).decode("utf-8")
+    passed("effective standalone report explains performance and missing time", "有效时长反馈训练" in effective_html
+           and "有效时间内达标" in effective_html and "有效覆盖" in effective_html and "实际时长" in effective_html)
+    with zipfile.ZipFile(io.BytesIO(request(f"/api/sessions/{effective_uuid}/export.zip", binary=True))) as archive:
+        passed("effective session export has valid CRC", archive.testzip() is None)
     with args.exe.open("rb") as stream:
         exe_hash = hashlib.file_digest(stream, "sha256").hexdigest()
     with args.capture_exe.open("rb") as stream:
@@ -121,6 +169,7 @@ def main():
               "exe_sha256": {"studio": exe_hash, "capture": capture_hash},
               "versions": {"studio": studio_version, "capture": capture_version},
               "check_count": len(checks), "checks": checks, "url": args.url,
+              "fixture_sessions": {"fixed": uuid, "effective": effective_uuid},
               "hardware_or_human_validity_tested": False,
               "scope": "packaged EXE and explicit synthetic fixtures; no real participant answers or efficacy claims"}
     args.output.parent.mkdir(parents=True, exist_ok=True)

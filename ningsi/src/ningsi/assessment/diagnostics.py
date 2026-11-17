@@ -55,6 +55,8 @@ def summarize_windows(rows):
 
 def render_html(report):
     """离线可打开、无需外部资源的可解释报告。所有输入文本转义。"""
+    from ningsi.assessment.report import (_percentage, _seconds, _completion_label,
+        _effective_phase_lines, _effective_summary_lines, _effective_actual_elapsed)
     d = report.get('extras', {}).get('signal_diagnostics') or {}
     q = report.get('quality') or {}
     total, accepted = d.get('total', q.get('windows_total', 0)), d.get('accepted', q.get('windows_usable', 0))
@@ -74,9 +76,16 @@ def render_html(report):
     if observations:
         parts.append('</section><section><h2>当下压力与情绪</h2>')
         parts.extend('<p>' + esc(line) + '</p>' for line in observations['summary_lines'])
-    ten = report.get('extras', {}).get('ten_min')
+    effective = report.get('extras', {}).get('effective_time')
+    ten = effective or report.get('extras', {}).get('ten_min')
     if ten:
-        parts.append('<section><h2>十分钟测试＋训练</h2><p>' + esc(ten.get('note')) + '</p>')
+        parts.append('<section><h2>' + ('有效时长反馈训练' if effective else '十分钟测试＋训练') + '</h2><p>' + esc(ten.get('note') or '描述性训练记录，不代表已验证的训练效果。') + '</p>')
+        if effective:
+            parts.append('<p>有效时间内达标率描述已有合格反馈内的表现；覆盖率与实际用时单独保留。缺失不填零，未观察区间不累计奖励。</p>')
+            parts.append('<p>有效采集目标：' + ('已全部完成' if effective.get('acquisition_complete') is True else '尚未全部完成；请结合未完成原因与覆盖解释') + '</p>')
+            parts.extend('<p>' + esc(line) + '</p>' for line in _effective_summary_lines(effective))
+            parts.append('<p>PVT刺激、反应时与练习／正式任务时序独立于脑电质量；补采仅用于静息基线和反馈训练。</p>')
+            parts.extend('<p>' + esc(line) + '</p>' for line in _effective_phase_lines(effective))
         overview = ten.get('indicator_overview') or {}
         if overview:
             parts.append('<h3>训练阶段脑电指数（描述性）</h3><p>' + esc(overview.get('note', '')) + '</p>')
@@ -96,14 +105,23 @@ def render_html(report):
             parts.append('<p>没有同通道可比较片段；行为报告仍可使用。</p>')
         for key, label in [('baseline_before', '训练前'), ('baseline_after', '训练后')]:
             for ch, ref in ten.get(key, {}).items():
-                parts.append('<p>' + esc(label) + '通道' + esc(ch) + '：去重覆盖 ' + esc(ref.get('usable_seconds', '未知')) + ' 秒；MAD ' + esc(ref.get('mad')) + '</p>')
+                if isinstance(ref, dict):
+                    parts.append('<p>' + esc(label) + '通道' + esc(ch) + '：去重覆盖 ' + esc(ref.get('usable_seconds', '未知')) + ' 秒；MAD ' + esc(ref.get('mad')) + '</p>')
         for segment in ten.get('segments', []):
             stats = segment.get('stats') or {}
             if stats.get('timing_spec'):
-                parts.append('<p>训练时间统计：有效覆盖 ' + esc(stats.get('valid_time_ratio'))
-                             + '；整段达标 ' + esc(stats.get('on_target_ratio'))
-                             + '；有效时间内达标 ' + esc(stats.get('on_target_valid_ratio')) + '</p>')
-            parts.append('<p>训练轮 ' + esc(segment['index']) + '（秒）：' + esc(segment.get('mode_seconds', {})) + '；未反馈秒数 ' + esc(segment.get('unobserved_seconds', '未知')) + '</p>')
+                parts.append('<p>训练时间统计：有效时间内达标 ' + esc(_percentage(stats.get('on_target_valid_ratio')))
+                             + '；有效覆盖 ' + esc(_percentage(stats.get('valid_time_ratio')))
+                             + '；整段达标 ' + esc(_percentage(stats.get('on_target_ratio')))
+                             + '；有效反馈 ' + esc(_seconds(stats.get('valid_seconds'))) + '／训练时长 ' + esc(_seconds(segment.get('duration_sec'))) + '（协议秒）'
+                             + ('；实际时长 ' + esc(_seconds(_effective_actual_elapsed(segment.get('effective_time') or {}, effective, segment.get('duration_sec')))) if effective else '') + '</p>')
+            timing = segment.get('effective_time') or {}
+            if effective and timing:
+                parts.append('<p>有效时间进度：' + esc(_seconds(timing.get('valid_seconds'))) + '／目标 ' + esc(_seconds(timing.get('target_seconds'))) + '（协议秒）'
+                    + '；协议用时 ' + esc(_seconds(timing.get('elapsed_seconds'))) + '／上限 ' + esc(_seconds(timing.get('max_seconds')))
+                    + '；实际用时 ' + esc(_seconds(_effective_actual_elapsed(timing, effective)))
+                    + '；结束原因 ' + esc(_completion_label(timing.get('completion_reason'))) + '</p>')
+            parts.append('<p>训练轮 ' + esc(segment['index']) + '（协议秒）：' + esc(segment.get('mode_seconds', {})) + '；未反馈协议秒数 ' + esc(segment.get('unobserved_seconds', '未知')) + '</p>')
         parts.append('<p>实际采集耗时 ' + esc(ten.get('elapsed_sec')) + ' 秒；倍率 ' + esc(ten.get('time_scale')) + '</p></section>')
     for key,label in [('baseline_eyes_open' ,'睁眼'),('baseline_eyes_closed','闭眼')]:
         base = report.get('extras',{}).get(key) or {}
