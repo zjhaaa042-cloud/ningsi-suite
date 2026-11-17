@@ -60,7 +60,7 @@ def main():
     index = request("/", binary=True).decode("utf-8")
     navigation = request("/js/main.js", binary=True).decode("utf-8")
     passed("product navigation has no competition route", "#/showcase" not in navigation and "A09" not in index)
-    for asset in ("/js/views/device-profile.js", "/js/views/session-preflight.js", "/css/workspace.css"):
+    for asset in ("/js/views/device-profile.js", "/js/views/session-preflight.js", "/js/views/state-heatmap.js", "/css/workspace.css"):
         passed("packaged asset " + asset, len(request(asset, binary=True)) > 100)
     before = request("/api/sessions")["total"]
     device = "lsl:QA-SOFTWARE-FIXTURE-UNCONNECTED-" + uuid_module.uuid4().hex[:8]
@@ -92,6 +92,21 @@ def main():
             break
         time.sleep(.5)
     passed("complete explicit simulation", session["status"] == "done" and session["device"] == "sim-bsense")
+    heatmap = request(f"/api/sessions/{uuid}/heatmap")
+    cells, coverage = heatmap["cells"], heatmap["summary"]
+    passed("heatmap coverage uses all recorded windows", bool(cells)
+           and coverage["total"] == len(cells)
+           and coverage["scored"] == sum(cell["status"] == "scored" for cell in cells)
+           and coverage["signal_usable"] == sum(cell["signal_usable"] is True for cell in cells)
+           and all(cell["score"] is None for cell in cells if cell["status"] != "scored"))
+    prepared = [cell for cell in cells if cell["status"] == "baseline_pending"]
+    passed("valid preparation windows retain quality without invented scores", bool(prepared)
+           and all(cell["signal_usable"] is True and cell["score"] is None for cell in prepared))
+    passed("heatmap retains quality baseline and training phases", {"qc", "baseline_open", "training"}
+           <= {cell["phase"] for cell in cells} and heatmap["evidence_source"] == "heatmap_metrics")
+    heatmap_svg = request(f"/api/sessions/{uuid}/artifacts/heatmap_svg", binary=True).decode("utf-8")
+    passed("exported heatmap distinguishes availability from score", "信号可用" in heatmap_svg
+           and "低质量缺失" not in heatmap_svg)
     report = request(f"/api/sessions/{uuid}/report")
     passed("report retains simulation source", report["extras"]["source_kind"] == "sim")
     passed("standalone HTML report", b"<html" in request(f"/api/sessions/{uuid}/artifacts/report_html", binary=True).lower())

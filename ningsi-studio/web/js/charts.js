@@ -7,7 +7,7 @@
  * - 所有数值先经 util 的格式化函数，`null` 一律显示 "—" 或直接跳过该点（缺失窗不能连成折线）。
  */
 
-import { DASH, el, fmtNum, fmtSeconds, list } from './util.js';
+import { DASH, el, fmtNum, fmtSeconds, list, phaseText } from './util.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -335,8 +335,7 @@ export function drawGauge(container, value, options = {}) {
 /**
  * 热力图网格。
  *
- * 缺失窗（index === -1）必须画成独立灰块：它表示"该窗不参与指标与预警计时"，
- * 而不是某个状态档位，因此不取 legend 里的颜色，只用 missing_color + 虚线边框。
+ * 未评分窗单独标注可用性与原因，不伪装成专注档位；历史无原因时保留未知。
  *
  * @param {Array<{index:number,label:string,color:string,score:number|null,t:number}>} cells
  * @param {{legend?:Array<{label:string,color:string,range?:string}>, missingColor?:string, title?:string}} options
@@ -344,35 +343,52 @@ export function drawGauge(container, value, options = {}) {
 export function drawHeatmap(container, cells = [], options = {}) {
   container.textContent = '';
   const wrap = el('div', { class: 'heatmap' });
-  const grid = el('div', { class: 'heatmap__grid', attrs: { role: 'list' } });
+  const grid = el('div', { class: 'heatmap__grid', attrs: { role: 'list', 'aria-label': options.label || '逐窗状态与采集情况' } });
   const rows = list(cells);
   if (!rows.length) {
     wrap.append(el('p', { class: 'empty', text: '暂无热力图数据' }));
     container.append(wrap);
     return wrap;
   }
+  const presentStatuses = new Set();
   for (const cell of rows) {
-    const missing = cell && (cell.index === -1 || cell.index === undefined);
-    const color = missing ? (options.missingColor || cell.color || '') : cell.color;
+    const missing = !cell || cell.index < 0 || cell.index === undefined || typeof cell.score !== 'number' || !Number.isFinite(cell.score)
+      || cell.score < 0 || cell.score > 1 || cell.signal_usable === false
+      || (cell.status && cell.status !== 'scored');
+    const status = missing ? (cell?.status && cell.status !== 'scored' ? cell.status : 'unscored') : 'scored';
+    const label = cell?.label && cell.label !== '低质量缺失' ? cell.label : (missing ? '未评分（原因未记录）' : '状态');
+    const color = cell?.color || (missing ? options.missingColor || '' : '');
+    if (missing) presentStatuses.add(status);
+    const reasons = list(cell?.reason_labels).join('、');
+    const detail = `${label}｜${missing ? '不输出状态分数' : `分值 ${fmtNum(cell.score)}`}｜t=${fmtSeconds(cell?.t)}`
+      + (cell?.phase ? `｜阶段 ${phaseText(cell.phase)}` : '') + (reasons ? `｜${reasons}` : '');
     const node = el('span', {
       class: 'heatmap__cell' + (missing ? ' heatmap__cell--missing' : ''),
-      title: `${cell.label || (missing ? '低质量缺失' : '')}｜分值 ${fmtNum(cell.score)}｜t=${fmtSeconds(cell.t)}`,
-      attrs: { role: 'listitem', 'aria-label': `${missing ? '低质量缺失' : cell.label || '状态'}，t=${fmtSeconds(cell.t)}` },
+      title: detail,
+      attrs: { role: 'listitem', 'aria-label': detail, 'data-availability': status },
     });
     if (color) node.style.background = color;
     grid.append(node);
   }
   wrap.append(grid);
 
-  const legendItems = list(options.legend).map((item) => el('span', { class: 'legend__item' }, [
+  const legendItems = list(options.legend).filter(item => item.label !== '低质量缺失' && item.index !== -1 && item.range !== '—')
+    .map((item) => el('span', { class: 'legend__item' }, [
     el('span', { class: 'legend__swatch', style: item.color ? `background:${item.color}` : null }),
     el('span', { text: item.label + (item.range ? `（${item.range}）` : '') }),
   ]));
-  // 图例末尾补一个缺失色说明，来源仍是接口给的 missing_color
-  if (options.missingColor) {
+  const availabilityItems = list(options.availabilityLegend).filter(item => presentStatuses.has(item.status || item.key));
+  for (const item of availabilityItems) {
     legendItems.push(el('span', { class: 'legend__item' }, [
-      el('span', { class: 'legend__swatch', style: `background:${options.missingColor}; border-style: dashed` }),
-      el('span', { text: '低质量缺失（不参与指标与预警计时）' }),
+      el('span', { class: 'legend__swatch', style: item.color ? `background:${item.color}; border-style:dashed` : null }),
+      el('span', { text: `${item.label}（不输出状态分数）` }),
+    ]));
+  }
+  // Old APIs provide no availability labels. Do not call every null score low quality.
+  if (!availabilityItems.length && presentStatuses.size) {
+    legendItems.push(el('span', { class: 'legend__item' }, [
+      el('span', { class: 'legend__swatch', style: options.missingColor ? `background:${options.missingColor}; border-style: dashed` : null }),
+      el('span', { text: '未评分（不参与状态指标与预警计时）' }),
     ]));
   }
   if (legendItems.length) wrap.append(el('div', { class: 'legend' }, legendItems));

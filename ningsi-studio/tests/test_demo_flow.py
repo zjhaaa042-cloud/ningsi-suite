@@ -200,12 +200,13 @@ class DemoFlowTests(StudioTestCase):
         cells = heatmap["cells"]
         self.assertTrue(cells, "热力图应给出单元格")
         for cell in cells:
-            self.assertEqual(set(cell), {"index", "label", "color", "score", "low", "high", "t"},
-                             "热力图单元格结构应统一")
+            self.assertTrue({"index", "label", "color", "score", "low", "high", "t"}.issubset(cell),
+                            "热力图保留旧字段并允许增加逐窗可用性依据")
             if cell["index"] < 0:
                 self.assertIsNone(cell["score"], "缺失窗的 score 应为 null")
                 self.assertIsNone(cell["low"], "缺失窗不应有档位下限")
-                self.assertEqual(cell["color"], MISSING_COLOR, "缺失窗应使用缺失色")
+                expected = {item["status"]: item["color"] for item in heatmap["availability_legend"]}
+                self.assertEqual(cell["color"], expected[cell["status"]], "未评分窗按可用性原因显示")
             else:
                 self.assertGreaterEqual(cell["score"], 0.0, "评分不应为负")
                 self.assertLessEqual(cell["score"], 1.0, "评分不应大于 1")

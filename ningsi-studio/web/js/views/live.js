@@ -16,12 +16,13 @@ import { describeError, toast } from '../store.js';
 import { connectSessionEvents, connectSignalStream } from '../sse.js';
 import { renderPreviewCard } from '../preview.js';
 import { attentionPredictionCard } from './attention-prediction.js';
+import { createStateHeatmap, mergeHeatmapCells } from './state-heatmap.js';
 import {
   DASH, button, card, el, empty, fmtInt, fmtNum, fmtPercent, fmtSeconds, fmtTime,
   list, pageFrame, phaseText, pick, statusText, table,
 } from '../util.js';
 import {
-  drawAlertTimeline, drawBandBars, drawHeatmap, drawMultiChannelEeg, drawSpectrum,
+  drawAlertTimeline, drawBandBars, drawMultiChannelEeg, drawSpectrum,
   metricBar,
 } from '../charts.js';
 
@@ -112,6 +113,7 @@ export function render(container, ctx) {
     signal: null,
     cells: [],
     legend: [],
+    availabilityLegend: [],
     missingColor: MISSING_FALLBACK,
     windowIndex: 0,
     offline: false,
@@ -142,6 +144,10 @@ export function render(container, ctx) {
   const modelHost = el('div');
   const signalHost = el('div');
   const heatHost = el('div');
+  const heatmapPanel = createStateHeatmap();
+  heatHost.append(card('状态热力图', heatmapPanel.node, {
+    sub: '分别查看采集可用性和相对个人基线的状态分档。',
+  }));
   const alertHost = el('div');
   const extraHost = el('div');
   const qualityHost = el('div');
@@ -245,6 +251,8 @@ export function render(container, ctx) {
 
   const renderState = () => {
     if (local.missing) return;
+    // Historical snapshots contain recorded windows even when there is no live SSE index.
+    local.windowIndex = Math.max(Number(local.windowIndex) || 0, local.cells.length);
     stateHost.textContent = '';
     const session = ctx.store.state.currentSession || {};
     stateHost.append(card('会话状态', el('div', { class: 'stack' }, [
@@ -459,13 +467,8 @@ export function render(container, ctx) {
 
   const renderHeatmap = () => {
     if (local.missing) return;
-    heatHost.textContent = '';
-    const body = el('div');
-    heatHost.append(card('状态热力图', body, {
-      sub: '图例标明各档范围及缺失数据。',
-    }));
-    // 图例由 drawHeatmap 内部按 options.legend 渲染；这里不要再补一次（会重复一整套图例）
-    drawHeatmap(body, local.cells, { legend: local.legend, missingColor: local.missingColor });
+    heatmapPanel.update({ cells: local.cells, legend: local.legend,
+      availability_legend: local.availabilityLegend, missing_color: local.missingColor });
   };
 
   const renderAlerts = () => {
@@ -511,10 +514,13 @@ export function render(container, ctx) {
       const response = await api.sessionHeatmap(uuid);
       if (ctx.signal.aborted) return;
       const data = response.data || {};
-      local.cells = list(data.cells);
+      // Include SSE windows that arrived while the snapshot request was in flight.
+      local.cells = mergeHeatmapCells(local.cells, list(data.cells));
       local.legend = list(data.legend);
+      local.availabilityLegend = list(data.availability_legend);
       local.missingColor = data.missing_color || local.missingColor;
       renderHeatmap();
+      renderState();
     } catch (error) {
       if (ctx.signal.aborted) return;
       if (isNotFound(error)) {
@@ -541,6 +547,7 @@ export function render(container, ctx) {
       session.status = data.status;
       session.phase = data.phase;
       session.progress = data.progress;
+      session.error = data.error || session.error || null;
       ctx.store.setState({ currentSession: session, alerts: list(data.alerts) });
       const summary = data.indicator_summary || {};
       for (const item of INDICATORS) {
@@ -553,7 +560,7 @@ export function render(container, ctx) {
       // 终态降级：后端 /live 明确给出 runtime_alive（routes.py:599）；字段缺失时退回"状态是否终态"
       if (data.runtime_alive === false || TERMINAL_STATUSES.has(String(data.status))) {
         const status = TERMINAL_STATUSES.has(String(data.status)) ? String(data.status) : 'done';
-        const text = terminalText(status, pick(data, 'error', null));
+        const text = terminalText(status, pick(data, 'error', null) || pick(session, 'error', null));
         applyTerminal(status, text.note, text.label);
       }
     } catch (error) {
@@ -581,6 +588,12 @@ export function render(container, ctx) {
     for (const item of INDICATORS) {
       const mean = pick(summary, `${item.key}.mean`);
       if (typeof mean === 'number') local.scores[item.key] = mean;
+    }
+    // Detail and live requests may finish in either order; the persisted error is authoritative
+    // when an ended runtime no longer has its original error in /live.
+    if (TERMINAL_STATUSES.has(String(session.status))) {
+      const terminal = terminalText(String(session.status), session.error || data.error || null);
+      applyTerminal(String(session.status), terminal.note, terminal.label);
     }
     renderState();
     renderMetrics();
@@ -646,13 +659,19 @@ export function render(container, ctx) {
         if (payload.signal && list(payload.signal.samples).length) {
           local.signal = { samples: payload.signal.samples, srate: payload.signal.srate, channels: payload.signal.channels, tEnd: payload.t_end };
         }
-        // 增量热力图：与后端同口径（不可用窗 → 缺失档）
+        // New servers share one cell contract between replay, polling and events.
+        // Older servers retain unknown reasons, rather than relabelling every null as low quality.
         const band = payload.usable === false
-          ? { index: -1, label: '低质量缺失', color: local.missingColor, score: null }
+          ? { index: -1, label: '信号受限', color: local.missingColor, score: null }
           : bandOf(typeof scores.focus === 'number' ? scores.focus : null, heatmapBands());
-        if (band.index === -1) band.color = local.missingColor;
-        local.cells.push({ ...band, t: payload.t_end });
-        if (local.cells.length > 600) local.cells = local.cells.slice(-600);
+        const fallbackCell = { ...band, t: payload.t_end, signal_usable: payload.usable ?? null,
+          status: band.index >= 0 ? 'scored' : payload.usable === false ? 'signal_limited'
+            : String(payload.indicator_reason || '').startsWith('baseline_') && payload.usable === true ? 'baseline_pending' : 'unscored',
+          reason_codes: list(payload.reasons), reason_labels: list(payload.reasons).map(reason => reasonLabels[reason] || reason),
+        };
+        if (fallbackCell.status === 'baseline_pending') fallbackCell.label = '信号合格 · 待基线';
+        else if (fallbackCell.status === 'unscored') fallbackCell.label = '未评分（原因未记录）';
+        local.cells = mergeHeatmapCells(local.cells, [payload.heatmap_cell || fallbackCell]);
         if (list(payload.alerts).length) {
           ctx.store.setState({ alerts: list(ctx.store.state.alerts).concat(list(payload.alerts)) });
         }
@@ -682,6 +701,11 @@ export function render(container, ctx) {
         break;
       }
       case 'feedback': {
+        if (payload.heatmap_cell) {
+          local.cells = mergeHeatmapCells(local.cells, [payload.heatmap_cell]);
+          renderHeatmap();
+          renderState();
+        }
         checkinPanel.update({ model: payload.affect_model || null });
         if (payload.attention_model) {
           local.attentionModel = payload.attention_model;

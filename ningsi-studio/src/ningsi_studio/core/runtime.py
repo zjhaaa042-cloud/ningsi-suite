@@ -23,7 +23,6 @@ from pathlib import Path
 from ningsi import config
 from ningsi.assessment.diagnostics import summarize_windows
 from ningsi.monitoring import history as history_module
-from ningsi.monitoring.heatmap import render_svg as heatmap_svg
 
 from ningsi_studio.core import paired_ledger, phases as phase_module
 from ningsi_studio.core.live_source import build_source
@@ -33,6 +32,7 @@ from ningsi_studio.domain import assessment as assessment_domain
 from ningsi_studio.domain import behavior as behavior_domain
 from ningsi_studio.domain import export as export_domain
 from ningsi_studio.domain import indicators as indicators_domain
+from ningsi_studio.domain import heatmap as heatmap_domain
 from ningsi_studio.domain import model_training, scales as scales_domain, state_checkins, eeg_units
 from ningsi_studio.domain import training as training_domain
 from ningsi_studio.http.sse import EventBus
@@ -489,6 +489,7 @@ class SessionRuntime:
         payload["affect_model"] = self.current_affect()
         payload["phase"] = phase
         payload["source_kind"] = self.source.kind
+        payload["heatmap_cell"] = self._record_heatmap(step, phase)
         if self.source.kind == "lsl":
             payload["state"] = "unknown"  # 采集指令不是被试真实状态标签
         self.bus.publish("window", payload)
@@ -496,20 +497,41 @@ class SessionRuntime:
             with store.connect(self.db_path) as conn:
                 if not step.scores:
                     # 该窗有信号但没有可用指标（例如基线无效或该窗被判为伪迹）：
-                    # 补一条空值占位，热力图才能如实画出"缺失"而不是整段空洞。
+                    # 保留空值及原因，避免把基线准备误写成低质量或状态零分。
                     repo.add_metric(conn, self.session["id"], "indicator", "focus",
                                     t_sec=step.t_end, value=None,
-                                    valid_ratio=1.0 if step.usable else 0.0)
+                                    valid_ratio=1.0 if step.usable else 0.0,
+                                    quality=heatmap_domain.provenance({**payload, "elapsed_sec": self.elapsed_now()}))
                 for name, score in (step.scores or {}).items():
                     repo.add_metric(conn, self.session["id"], "indicator", name,
                                     t_sec=step.t_end, value=score,
-                                    valid_ratio=1.0 if step.usable else 0.0)
+                                    valid_ratio=1.0 if step.usable else 0.0,
+                                    quality=heatmap_domain.provenance({**payload, "elapsed_sec": self.elapsed_now()}))
                 for event in step.alerts:
                     repo.add_alert(conn, self.session["id"], event["kind"], event["state"],
                                    t_sec=event["t"], value=event["value"],
                                    sustained_sec=event["sustained_sec"], message=event["message"])
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("写窗级指标失败：%s", exc)
+
+    def _record_heatmap(self, step, phase: str) -> dict:
+        """Retain every observed phase in a separate availability timeline.
+
+        Training windows stay outside indicator metrics and historical trends.
+        The same cell is replayed by REST and attached to window/feedback SSE.
+        """
+        payload = {**step.payload(include_signal=False), "phase": phase,
+                   "elapsed_sec": self.elapsed_now(), "window_id": f"{phase}:{step.index}"}
+        cell = heatmap_domain.cell_from_payload(payload)
+        self.heatmap_series.append((step.t_end, cell["score"]))
+        try:
+            with store.connect(self.db_path) as conn:
+                repo.add_metric(conn, self.session["id"], "heatmap", "focus",
+                    t_sec=step.t_end, value=cell["score"], valid_ratio=1.0 if step.usable else 0.0,
+                    quality=heatmap_domain.provenance(payload))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("写热力图窗口失败：%s", exc)
+        return cell
 
     # ------------------------------------------------------------------ 主流程
     def _run(self) -> None:
@@ -564,7 +586,7 @@ class SessionRuntime:
             qc = self.engine.device_qc(
                 artifact=self.source.kind != "lsl",
                 wait_between=self._sleep if self.source.kind == "lsl" else None,
-                on_step=lambda step: self._record_diagnostic(step, "qc"))
+                on_step=lambda step: self._publish_window(step, phase="qc", include_signal=False))
             self._merge_run_payload(context["run_id"], qc)
             self.bus.publish("quality", qc)
             if not qc.get("passed"):
@@ -922,11 +944,8 @@ class SessionRuntime:
                 self._sleep(config.STEP_SEC)
         quality = self.engine.summarize(steps)
         summary = indicators_domain.WindowEngine.summarize(steps).get("indicators", {})
-        # 热力图只画"有评分"的窗；不可用窗或无基线时不填分，前端会画成缺失色块
-        self.heatmap_series = [
-            (step.t_end, step.focus if (step.usable and step.scores) else None)
-            for step in steps
-        ]
+        # Heatmap windows are already recorded per step; do not overwrite earlier
+        # QC/baseline evidence with a monitor-only series at the phase boundary.
         self._persist_summary_metrics(quality, phase="monitor")
         return {"quality": quality, "summary": summary, "steps": steps}
 
@@ -953,6 +972,7 @@ class SessionRuntime:
             while time.time() < deadline and step_index < max_windows:
                 step = self.engine.step(states[index % len(states)])
                 self._record_diagnostic(step, "training")
+                heatmap_cell = self._record_heatmap(step, "training")
                 step_index += 1
                 score = step.focus
                 sample_time = ((time.monotonic() - segment_started) / self.scale
@@ -960,6 +980,7 @@ class SessionRuntime:
                 trainer.feed(score, sample_time, usable=step.usable)
                 self.bus.publish("feedback", {
                     "affect_model": self.current_affect(),
+                    "heatmap_cell": heatmap_cell,
                     "segment": index + 1,
                     "target": trainer.target,
                     "score": None if score is None else round(score, 4),
@@ -1071,8 +1092,11 @@ class SessionRuntime:
             self.artifacts["attention_predictions"] = predictions_path
 
         heatmap_path = reports / f"{stem}_heatmap.svg"
+        with store.read_only(self.db_path) as conn:
+            heatmap_cells = heatmap_domain.cells_from_metrics(
+                repo.list_metrics(conn, self.session["id"], kind="heatmap", name="focus"))
         heatmap_path.write_text(
-            heatmap_svg(self.heatmap_series, title=f"状态热力图 sub-{self.subject['public_id']}"),
+            heatmap_domain.render_svg(heatmap_cells, title=f"状态与信号可用性 sub-{self.subject['public_id']}"),
             encoding="utf-8")
         self.artifacts["heatmap_svg"] = heatmap_path
 

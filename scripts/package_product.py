@@ -35,6 +35,7 @@ PUBLIC_JSON = {
 REQUIRED_ASSETS = (
     "_internal/web/index.html", "_internal/web/js/main.js", "_internal/web/js/views/start.js",
     "_internal/web/js/views/device-profile.js", "_internal/web/js/views/session-preflight.js",
+    "_internal/web/js/views/state-heatmap.js",
     "_internal/web/css/workspace.css", "_internal/ningsi_studio/db/schema.sql",
 )
 SHA_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
@@ -203,6 +204,8 @@ Studio {versions['studio']} / Capture {versions['capture']}
 5. 跟随阶段引导完成任务与训练。缺失或不合格信号不填成低专注，调整后按提示继续或重采。
 6. 完成后查看评估报告、下载本次产物，在“历史与趋势”回顾可比较的同人记录。
 7. 无设备时仅使用“运行模拟演示”；模拟数据始终单独标记，不代表真人准确率。
+实时监测中的热力图区分信号合格、等待基线与可评分窗口；无评分时先显示原因摘要。
+可展开逐窗记录、翻页或仅看可评分片段，筛选不会改变全会话覆盖率，窗口时间不是连续有效时长。
 
 二、连续采集、模型与外部留证
 双击 02-Start-Capture.bat 打开独立采集器。按预定研究协议记录匿名编号和开发/封存测试分组，

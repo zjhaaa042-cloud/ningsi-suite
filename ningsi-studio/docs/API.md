@@ -350,14 +350,14 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 | `progress` | `key, progress, windows_done?, windows_total?, trials_done?, trials_total?, segments_done?, segments_total?` |
 | `quality` | `windows, usable, valid_ratio, reasons{}, passed` |
 | `baseline` | `key(baseline_open/baseline_closed), label, baseline{...}` |
-| `window` | `index, t_end, state, usable, quality, scores{focus,relax,load}, index_z, band_z, reasons[], alerts[], signal{srate,channels,samples[],relative,time_domain}` |
+| `window` | `index, t_end, state, usable, quality, scores{focus,relax,load}, index_z, band_z, reasons[], alerts[], heatmap_cell, signal{srate,channels,samples[],relative,time_domain}` |
 | `scale_request` | `code, label, size, instruction` |
 | `scale_scored` | `code, raw_score, standard_score, level` |
 | `behavior_request` | `task, digits[], nogo_trials, practice[], sequence_set_id, seed, instruction`（PVT 为 `trials, onsets[], duration_sec, lapse_sec, instruction`） |
 | `trial` | SART：`phase(practice/main/done), index, digit, total, response_window`；PVT：`index, onset, total, response_window` |
 | `behavior` | `task, result{...}` |
 | `monitor` | `summary, quality` |
-| `feedback` | `segment, target, score, on_target, usable, t` |
+| `feedback` | `segment, target, score, on_target, usable, t, heatmap_cell?`；实际训练窗附同口径时间线单元，休息提示不生成假窗口 |
 | `segment` | `seq, index, target, target_after, hold_sec, hold_after, duration_sec, excluded_windows, stats{mean,on_target_ratio,volatility,n,achieved}, mean_score, on_target_ratio, volatility, n, achieved, samples[[t,score]]` |
 | `training_start` | `mode, segments, segment_sec, target, rationale, initial_from, target_step, hold_sec` |
 | `assessment` | 同 `GET .../assessment` |
@@ -430,17 +430,32 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 
 ### `GET /api/sessions/{uuid}/heatmap`
 ```json
-{ "uuid": "...", "columns": 30,
+{ "uuid": "...", "spec": "heatmap-availability-v1", "columns": 30,
   "cells": [ { "index": 2, "label": "灰绿", "color": "#6E9E8A", "score": 0.51,
-               "low": 0.4, "high": 0.6, "t": 12.0 },
-             { "index": -1, "label": "低质量缺失", "color": "#6b6b6b", "score": null,
-               "low": null, "high": null, "t": 14.0 } ],
+               "low": 0.4, "high": 0.6, "t": 12.0, "window_id": "training:6",
+               "status": "scored", "signal_usable": true, "phase": "training",
+               "reason_codes": [], "reason_labels": [], "indicator_reason": "", "elapsed_sec": 340.2 },
+             { "index": -1, "label": "信号可用 · 基线待确认", "color": "#79aaa2", "score": null,
+               "low": null, "high": null, "t": 14.0, "window_id": "baseline_open:7",
+               "status": "baseline_pending", "signal_usable": true, "phase": "baseline_open",
+               "reason_codes": ["baseline_invalid"], "reason_labels": ["个人基线尚未合格"],
+               "indicator_reason": "baseline_invalid", "elapsed_sec": 342.2 } ],
   "legend": [ { "label": "深蓝", "color": "#1B3B6F", "range": "0.00–0.20" } ],
+  "availability_legend": [ { "status": "baseline_pending", "label": "信号可用 · 基线待确认", "color": "#79aaa2" } ],
   "missing_color": "#6b6b6b",
-  "scored": 34, "missing": 1,
-  "note": "低质量窗不参与指标与预警计时，单独用缺失色块表示。" }
+  "scored": 1, "missing": 1,
+  "summary": { "total": 2, "signal_usable": 2, "scored": 1, "missing": 1,
+               "signal_coverage": 1.0, "score_coverage": 0.5, "unknown_quality": 0, "coverage_unit": "windows" },
+  "evidence_source": "heatmap_metrics",
+  "note": "状态颜色仅用于已有合格分数；采集可用性分开呈现。重叠窗不是独立样本或连续有效时长。" }
 ```
-`index = -1` 即缺失窗，其 `score` 为 `null`（前端必须画成灰色块，不得当作 0 或状态变化）。
+示例省略了完整图例和统计。`index = -1` 表示**未评分**，其 `score/low/high` 为 `null`，不得补零、插值或解释为低专注。`status` 分别为：`scored`（已有合格分数）、`baseline_pending`（信号明确合格但基线尚未可用）、`signal_limited`（信号未通过质量检查）、`no_data`（缺样本或不足完整窗口）、`timing_issue`（时标问题）及 `unscored`（尚无指数或历史依据不足）。各非评分状态的颜色取 `availability_legend`；原五档颜色和旧字段保留兼容。
+
+`signal_usable` 为 `true/false/null`，`null` 表示旧记录无法判断，不能当作合格或不合格。`summary` 另含 `counts{status:窗数}`、`reason_counts[{code,label,count}]`（同窗原因可重叠）和 `phase_counts[{phase,total,signal_usable,scored}]`。两种 coverage 均为对应窗数除以全部已记录窗数，无窗口时为 `null`；不以重叠窗数乘窗口长度报告有效秒数。
+
+新会话将质检、基线、监测和实际训练窗写入独立 `metrics.kind="heatmap"` 序列，不使训练窗进入评估指标或趋势汇总。`window` 与实际训练 `feedback` 的 `heatmap_cell` 和 REST 使用同一结构及稳定 `window_id`，前端据此去重。`t` 保留原窗口步进时标，`elapsed_sec` 为有记录时的真实会话经过时间；未采集的行为任务间隔不补窗。监测阶段结束不会覆盖此前窗口。下载的 `heatmap_svg` 使用同源的状态／信号可用性双轨。
+
+旧会话优先从已有运行器或报告 `signal_diagnostics.windows` 只读恢复阶段、质量和原分数，不修改原报告或重新评分；没有逐窗诊断时仅采用已存指标和 `valid_ratio`，不猜缺失原因。`evidence_source` 对应 `heatmap_metrics/runtime_diagnostics/report_diagnostics/legacy_metrics`。
 
 ### `GET /api/sessions/{uuid}/trend?field=focus&period=week`
 `field ∈ {focus, relax, load, stress}`，`period ∈ {week, month}`；

@@ -113,6 +113,7 @@ def run(runtime, auto):
                     break
                 step = r.engine.step("focused")
                 r._record_diagnostic(step, "training")
+                heatmap_cell = r._record_heatmap(step, "training")
                 mode = gate.update(step.graded["grade"], base.valid)
                 score = step.focus if mode == "eeg" else None
                 if score is None:
@@ -124,6 +125,7 @@ def run(runtime, auto):
                 trainer.feed(smooth, sample_time, usable=smooth is not None)
                 display_start = time.monotonic()
                 r.bus.publish("feedback", {"segment": index+1, "feedback_mode": mode,
+                    "heatmap_cell": heatmap_cell,
                     "affect_model": r.current_affect(),
                     "attention_model": step.attention_model,
                     "mode_label": LABELS[mode], "grade": step.graded["grade"],

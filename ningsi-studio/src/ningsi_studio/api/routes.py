@@ -28,7 +28,7 @@ from ningsi_studio.core.runtime import SART_TRIAL_WINDOW, SessionManager
 from ningsi_studio.db import repository as repo
 from ningsi_studio.db import sqlite_store as store
 from ningsi_studio.domain import export as export_domain, state_checkins, eeg_units
-from ningsi_studio.domain import device_profiles, preflight
+from ningsi_studio.domain import device_profiles, preflight, heatmap as heatmap_domain
 from ningsi_studio.domain import model_training, scales as scales_domain
 from ningsi_studio.domain import showcase, showcase_evidence
 from ningsi_studio.domain.human_models import HumanModelService, load_active
@@ -996,37 +996,35 @@ def build_router(settings: Settings) -> Router:
     def session_heatmap(request: Request) -> Response:
         uuid = schemas.ensure_uuid(request.params["uuid"])
         runtime = manager.get(uuid)
-        series = list(runtime.heatmap_series) if runtime and runtime.heatmap_series else []
-        if not series:
-            with store.read_only(db_path) as conn:
-                row = _session_row(conn, uuid)
-                metrics = repo.list_metrics(conn, row["id"], kind="indicator", name="focus")
-                series = [(item["t_sec"], item["value"]) for item in metrics
-                          if item["t_sec"] is not None]
-        from ningsi.monitoring.heatmap import MISSING_COLOR, band_of, legend
-
-        cells = []
-        for t_end, score in series:
-            band = band_of(score)
-            cells.append({
-                "index": band["index"],
-                "label": band["label"],
-                "color": band["color"],
-                "score": band["score"],          # 缺失窗为 null，前端据此画灰色块
-                "low": band["low"],
-                "high": band["high"],
-                "t": round(float(t_end or 0.0), 3),
-            })
-        return Response.json({
-            "uuid": uuid,
-            "columns": 30,
-            "cells": jsonable(cells),
-            "legend": jsonable(legend()),
-            "missing_color": MISSING_COLOR,
-            "scored": sum(1 for cell in cells if cell["index"] >= 0),
-            "missing": sum(1 for cell in cells if cell["index"] < 0),
-            "note": "低质量窗不参与指标与预警计时，单独用缺失色块表示。",
-        })
+        with store.read_only(db_path) as conn:
+            row = _session_row(conn, uuid)
+            metrics = repo.list_metrics(conn, row["id"], kind="heatmap", name="focus")
+            artifact = repo.artifact_for(conn, row["id"], "report_json") if not metrics else None
+            legacy = repo.list_metrics(conn, row["id"], kind="indicator", name="focus") if not metrics else []
+        cells = heatmap_domain.cells_from_metrics(metrics)
+        source = "heatmap_metrics"
+        # Older releases already retained trustworthy full-window diagnostics.
+        # Recover these read-only, including training windows omitted by the old
+        # monitor-only in-memory heatmap. Never fabricate reasons for old nulls.
+        if not metrics:
+            windows = list(getattr(runtime, "diagnostic_windows", []) or []) if runtime else []
+            source = "runtime_diagnostics"
+            if not windows and artifact and artifact["path"]:
+                try:
+                    path = Path(artifact["path"]).resolve()
+                    if path.is_relative_to(Path(settings.data_dir).resolve()) and path.stat().st_size <= 32 * 1024 * 1024:
+                        report = json.loads(path.read_text(encoding="utf-8"))
+                        windows = report.get("extras", {}).get("signal_diagnostics", {}).get("windows", [])
+                        source = "report_diagnostics"
+                except (OSError, ValueError, AttributeError, TypeError):
+                    LOGGER.warning("Unable to recover heatmap diagnostics for %s", uuid)
+            if isinstance(windows, list):
+                cells = [heatmap_domain.cell_from_payload(window) for window in windows
+                         if isinstance(window, dict) and window.get("t_end") is not None]
+            if not cells:
+                cells = heatmap_domain.cells_from_metrics(legacy)
+                source = "legacy_metrics"
+        return Response.json(jsonable({**heatmap_domain.response(uuid, cells), "evidence_source": source}))
 
     @router.get(r"/api/sessions/{uuid}/trend")
     def session_trend(request: Request) -> Response:
