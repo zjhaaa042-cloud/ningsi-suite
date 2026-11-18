@@ -11,11 +11,16 @@ STRICT_TIMING = "source-timestamps-v1"
 PACKET_TIMING = "bounded-nominal-50ms-v1"
 BIOMULTI_REC_TIMING = "biomulti-rec-device-clock-v1"
 BIOMULTI_LSL_TIMING = "biomulti-lsl-packet-clock-v1"
+BIOMULTI_LSL_RECOVERY_TIMING = "biomulti-lsl-packet-clock-v2"
+BIOMULTI_PACKET_POLICIES = (BIOMULTI_LSL_TIMING, BIOMULTI_LSL_RECOVERY_TIMING)
 # The verified publisher emits 10 float32 samples per chunk with one release
 # timestamp. This bound is on transport jitter, not an allowable EEG gap.
 BIOMULTI_MAX_DELAY = .250
 BIOMULTI_CONFIRM_SAMPLES = 250
 BIOMULTI_WARM_SAMPLES = 1000
+_BIOMULTI_PACKET_SAMPLES = 10
+_BIOMULTI_RATE = 250
+_BIOMULTI_PACKET_SECONDS = _BIOMULTI_PACKET_SAMPLES / _BIOMULTI_RATE
 
 
 def biomulti_packet_clock(timestamps, *, first_index=0):
@@ -83,15 +88,98 @@ def biomulti_packet_clock(timestamps, *, first_index=0):
     return result
 
 
+def _packet_epoch(raw, start):
+    """Identify packet boundaries without editing the original timestamps."""
+    epoch = raw[start : start + _BIOMULTI_RATE]
+    if not np.isfinite(epoch).all():
+        return None
+    edges = np.flatnonzero(np.abs(np.diff(epoch) - .004) > .0002)
+    phases = np.unique(edges % _BIOMULTI_PACKET_SAMPLES)
+    if phases.size > 1:
+        return None
+    return int(phases[0]) if phases.size else _BIOMULTI_PACKET_SAMPLES - 1
+
+
+def biomulti_recovery_clock(timestamps, *, first_index=0):
+    """Estimate bounded sample time from BioMulti's observed packet releases.
+
+    Use the earlier lower-envelope anchor of neighboring one-second epochs, so
+    transient transport latency does not force an entire nearby epoch to shift.
+    An unresolved gap is kept as a missing packet. Each epoch requires the next
+    one second to confirm any catch-up; no sample is fabricated or resampled.
+    Truncating the input after this confirmation point preserves the estimate.
+    """
+    raw = np.asarray(timestamps, dtype=float)
+    result = np.full(raw.shape, np.nan)
+    rate = _BIOMULTI_RATE
+    packet_size = _BIOMULTI_PACKET_SAMPLES
+    starts = range((-first_index) % rate, len(raw) - rate + 1, rate)
+    grid = np.arange(len(raw)) / rate
+    offsets = raw - grid
+    phases = [_packet_epoch(raw, start) for start in starts]
+    anchors = [None if phase is None else float(np.quantile(offsets[start + phase : start + rate : packet_size], .10))
+               for start, phase in zip(starts, phases)]
+
+    last_time = -np.inf
+    for i, start in enumerate(starts[:-1]):
+        phase, center = phases[i], anchors[i]
+        if phase is None:
+            continue
+        same_before = i > 0 and phases[i - 1] == phase
+        same_after = phases[i + 1] == phase
+        if not same_after:
+            continue  # Confirmation samples are missing or their packet layout changed.
+        left = min(center, anchors[i - 1]) if same_before else center
+        right = min(center, anchors[i + 1])
+        if abs(right - left) > _BIOMULTI_PACKET_SECONDS:
+            continue
+        segment = slice(start, start + rate)
+        estimate = grid[segment] + left + (grid[segment] - grid[start]) * (right - left)
+        # An epoch can end partway into a packet, so include the release of
+        # that partial packet when checking which samples to reject.
+        end_limit = start + rate + packet_size - 1
+        ends = np.arange(start + phase, end_limit, packet_size)
+        previous = ends - packet_size
+        previous_ok = (previous >= 0) & (same_before | (previous >= start))
+        available_previous = np.maximum(previous, 0)
+        intervals = np.where(previous_ok, raw[ends] - raw[available_previous], _BIOMULTI_PACKET_SECONDS)
+        suspect = (intervals <= 0) | (intervals > BIOMULTI_MAX_DELAY)
+        for j in np.flatnonzero((intervals > .1) & ~suspect):
+            packet = ends[j]
+            # Same-phase, causally available releases should catch up within
+            # one second before the silence can be explained by batching.
+            stop = min(packet + BIOMULTI_CONFIRM_SAMPLES + 1, start + rate + BIOMULTI_CONFIRM_SAMPLES)
+            later = np.arange(packet, stop, packet_size)
+            releases = raw[later]
+            steps = np.diff(releases)
+            invalid = np.flatnonzero(~np.isfinite(steps) | (steps <= 0) | (steps > BIOMULTI_MAX_DELAY))
+            count = invalid[0] + 1 if invalid.size else len(later)
+            if np.min(offsets[later[:count]]) - offsets[previous[j]] > _BIOMULTI_PACKET_SECONDS:
+                suspect[j] = True
+        for end in ends[suspect]:
+            lo = max(0, end - start - packet_size + 1)
+            estimate[lo : end - start + 1] = np.nan
+        # A mismatch between an estimated and observed release excludes only
+        # the affected samples. Walk away from overlap rather than imposing
+        # monotonicity by changing a release or resetting the sample counter.
+        estimate[(np.abs(estimate - raw[segment]) > BIOMULTI_MAX_DELAY) | (estimate <= last_time)] = np.nan
+        valid = estimate[np.isfinite(estimate)]
+        if valid.size:
+            result[segment] = estimate
+            last_time = valid[-1]
+    return result
+
+
 def analysis_timestamps(timestamps, rate, policy=None, *, first_index=0):
     stamps = np.asarray(timestamps, dtype=float)
     audit = {"policy": policy or STRICT_TIMING, "applied": False, "max_shift_sec": 0.}
     if policy in (None, STRICT_TIMING):
         return stamps, audit
-    if policy == BIOMULTI_LSL_TIMING:
+    if policy in BIOMULTI_PACKET_POLICIES:
         if rate != 250:
             raise ValueError("BioMulti 分包时钟仅适用于 250 Hz EEG。")
-        estimated = biomulti_packet_clock(stamps, first_index=first_index)
+        estimate_clock = biomulti_recovery_clock if policy == BIOMULTI_LSL_RECOVERY_TIMING else biomulti_packet_clock
+        estimated = estimate_clock(stamps, first_index=first_index)
         valid = np.isfinite(estimated)
         audit.update(applied=bool(valid.all() and valid.size),
                      max_shift_sec=float(np.max(np.abs(estimated[valid] - stamps[valid]))) if valid.any() else 0.)

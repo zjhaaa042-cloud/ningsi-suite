@@ -119,6 +119,7 @@ class SessionStore:
             "model_id": self.predictions.model["model_id"] if self.predictions.model else None,
         }
         self.metadata["shadow_250"] = self.predictions.shadow_metadata()
+        self.metadata["tcn_250"] = self.predictions.tcn_metadata()
         self.markers = MarkerPublisher(enabled=lsl_markers, clock_domain=self.clock.domain,
                                        origin=source.get("data_origin", "unknown"))
         self.marker_adapter_failures = 0

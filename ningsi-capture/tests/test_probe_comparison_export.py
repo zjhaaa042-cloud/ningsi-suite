@@ -48,9 +48,11 @@ class ProbeComparisonExport(unittest.TestCase):
                   "strict_window_rejections": {"input_eog": 5}, "live_input_window_status": "passed",
                   "live_input_window_end_lsl": 5000.8, "physical_qc_reasons": []}
         unavailable = {"status": "unavailable", "reason": "timestamp_gap_over_100ms"}
+        tcn = {"status": "scored", "mw_score": .63, "model_id": "tcn-hash", "frame_mask": "101110",
+               "frame_end_sample_indices": [1999, 2499, 2999, 3499, 3999, 4499]}
         records = {1: {"threshold": .2, "mw_score": .95, "window_start_lsl": 4989,
-                       "sample_count_at_onset": 123, "shadow_250": scored},
-                   3: {"shadow_250": unavailable}}
+                       "sample_count_at_onset": 123, "shadow_250": scored, "tcn_250": tcn},
+                   3: {"shadow_250": unavailable, "tcn_250": {"status": "unavailable", "reason": "model_unavailable"}}}
         summary, (a, b) = self.export(events, records)
         self.assertEqual((summary["scored"], summary["comparable"], summary["time_comparable"]), (1, 1, 2))
         self.assertEqual((a["logistic_mw_score"], a["rbf_mw_score"], a["model_bundle_id"],
@@ -67,6 +69,14 @@ class ProbeComparisonExport(unittest.TestCase):
         self.assertEqual((b["label"], b["time_comparable"], b["comparable"], b["reason"],
                           b["logistic_mw_score"], b["rbf_mw_score"]), ("0", "True", "False",
                           "timestamp_gap_over_100ms", "", ""))
+        self.assertEqual(summary["tcn"], {"scored": 1, "unavailable": 1, "not_recorded": 0,
+                                          "comparable": 1, "paired_comparable": 1})
+        self.assertEqual((a["tcn_mw_score"], a["tcn_model_id"], a["tcn_comparable"], a["tcn_paired_comparable"]),
+                         ("0.63", "tcn-hash", "True", "True"))
+        self.assertEqual(a["tcn_frame_mask"], "101110")
+        self.assertEqual(a["tcn_frame_end_sample_indices"], "[1999,2499,2999,3499,3999,4499]")
+        self.assertEqual((b["tcn_status"], b["tcn_reason"], b["tcn_mw_score"], b["tcn_comparable"]),
+                         ("unavailable", "model_unavailable", "", "False"))
 
     def test_missing_historical_model_timeout_cancellation_and_incomplete_onsets(self):
         events = [onset(1, "one", None, practice=True), event(2, "probe_response", "one", choice=2),
@@ -80,6 +90,7 @@ class ProbeComparisonExport(unittest.TestCase):
         self.assertEqual([r["label"] for r in rows], ["", "", "", "", "1"])
         self.assertEqual([r["comparable"] for r in rows], ["False"] * 5)
         self.assertTrue(all(r["logistic_mw_score"] == r["rbf_mw_score"] == "" for r in rows))
+        self.assertTrue(all(r["tcn_status"] == "not_recorded" and r["tcn_mw_score"] == "" for r in rows))
         self.assertEqual((rows[0]["practice"], rows[0]["choice_text"], rows[0]["probe_ordinal"]),
                          ("True", PROBE_CHOICES[1], ""))
         self.assertEqual(summary["not_recorded"], 5)

@@ -28,6 +28,7 @@ from ningsi.models.capture_protocols import FULL_PROTOCOL, RESEARCH_PROTOCOLS, S
 from .clock import Clock
 from .export import build_dataset, export_session, recent_window_quality
 from .live_quality import QualityMonitor, describe_reasons
+from .probe_prediction import RECOVERY_INPUT_POLICY
 from .protocol import PROBE_CHOICES, ProtocolConfig, TaskRunner
 from .readiness import cohort_use, montage_hint
 from .storage import SessionStore, open_readonly, read_metadata
@@ -97,7 +98,7 @@ class ExportUnitDialog(simpledialog.Dialog):
 
 
 class CaptureApp:
-    def __init__(self, root, data_dir=None, *, lsl_markers=False):
+    def __init__(self, root, data_dir=None, *, lsl_markers=False, tcn_recovery=False):
         self.root = root
         self.data_dir = Path(data_dir or default_data_dir()).resolve()
         self.clock = Clock()
@@ -118,6 +119,7 @@ class CaptureApp:
         self.closed = False
         self.poll_job = None
         self.initial_lsl_markers = bool(lsl_markers)
+        self.tcn_recovery = tcn_recovery
         self._build()
         root.report_callback_exception = self.on_callback_error
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -408,6 +410,8 @@ class CaptureApp:
                         source["live_timestamp_policy"] = BIOMULTI_LSL_TIMING
                 if source["timestamp_policy"] == BIOMULTI_LSL_TIMING and not biomulti.supported(source):
                     raise ValueError("BioMulti 分包时钟仅适用于双通道 250 Hz 的 BioMulti Lite EEG。")
+                if self.tcn_recovery and source["timestamp_policy"] == BIOMULTI_LSL_TIMING:
+                    source["research_input_policy"] = RECOVERY_INPUT_POLICY
             if not simulated and self.protocol_mode.get() == "快速模拟联调":
                 raise ValueError("快速联调仅限模拟演示，真人采集请选择短版或完整研究协议。")
             self.config = PROTOCOL_CHOICES[self.protocol_mode.get()]()
@@ -452,6 +456,8 @@ class CaptureApp:
                 self.note(f"已绑定 BioMulti 原生 REC #{source['native_rec']['record_id']}。")
             elif source.get("timestamp_policy") == BIOMULTI_LSL_TIMING:
                 self.note("使用 BioMulti 分包时钟估计。原始时标和样本按接收顺序保存。")
+            if source.get("research_input_policy") == RECOVERY_INPUT_POLICY:
+                self.note("探针评分启用 BioMulti 输入恢复。开始任务前检查最近六个研究窗口。")
             if source.get("unit_basis") == "biomulti_software_inference":
                 self.note("EEG 单位按本机 BioMulti 软件推定为 µV，倍率 1。依据随记录保存。")
         except Exception as exc:
@@ -481,6 +487,18 @@ class CaptureApp:
             check = {"reasons": list(reasons), "cohort": self.store.metadata["cohort"]}
             if preflight is not None:
                 check["signal_preflight"] = preflight.as_dict()
+            if source.get("research_input_policy") == RECOVERY_INPUT_POLICY:
+                try:
+                    candidate_check = self.store.predictions.recovery_preflight(self.clock.now(), snapshot["samples"])
+                except (ValueError, TypeError, sqlite3.Error):
+                    candidate_check = {"reason": "prediction_error"}
+                check["tcn_preflight"] = candidate_check
+                usable = candidate_check.get("windows_usable", 0)
+                if "reason" in candidate_check:
+                    self.note(f"TCN 预检：最近 6 个研究窗口合格 {usable} 个。"
+                              f"{describe_reasons([candidate_check['reason']])}。正式探针逐次核对可评分性。")
+                else:
+                    self.note(f"TCN 预检通过：最近 6 个研究窗口合格 {usable} 个。")
             blocking = [r for r in reasons if not (paired and r in ("native_clock_pending", "unit_unconfirmed"))]
             if not pilot and paired:
                 try:
@@ -915,7 +933,7 @@ class CaptureApp:
             self.root.destroy()
 
 
-def run(data_dir=None, *, lsl_markers=False):
+def run(data_dir=None, *, lsl_markers=False, tcn_recovery=False):
     root = tk.Tk()
-    CaptureApp(root, data_dir, lsl_markers=lsl_markers)
+    CaptureApp(root, data_dir, lsl_markers=lsl_markers, tcn_recovery=tcn_recovery)
     root.mainloop()

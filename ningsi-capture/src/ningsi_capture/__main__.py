@@ -17,6 +17,7 @@ def main(argv=None):
     gui = sub.add_parser("gui", help="启动独立桌面采集器（默认）")
     gui.add_argument("--data", type=Path)
     gui.add_argument("--lsl-markers", action="store_true", help="显式开启可选 LSL 任务标记流，供 LabRecorder 另行录制")
+    gui.add_argument("--tcn-recovery", action="store_true", help="启用 BioMulti 探针研究的输入恢复实验模式")
     doctor = sub.add_parser("doctor", help="检查采集器和算法依赖")
     doctor.add_argument("--output", type=Path)
     demo = sub.add_parser("demo", help="生成明确标记的合成验收记录，不接真实设备")
@@ -49,19 +50,25 @@ def main(argv=None):
     ensure_engine()
     if args.command in (None, "gui"):
         from .gui import run
-        run(getattr(args, "data", None), lsl_markers=getattr(args, "lsl_markers", False))
+        run(getattr(args, "data", None), lsl_markers=getattr(args, "lsl_markers", False),
+            tcn_recovery=getattr(args, "tcn_recovery", False))
         return 0
     try:
         if args.command == "doctor":
             from ningsi.models.attlapse import load_candidate
             from ningsi.models.attlapse_shadow import load_candidates
             from ningsi.signal.conditioning import POLICY
+            from .probe_prediction import RECOVERY_INPUT_POLICY, load_focus_tcn
             from .storage import engine_fingerprint, implementation_fingerprint
             candidate = load_candidate()
             shadow = load_candidates()
+            tcn, tcn_reason = load_focus_tcn()
             result = {"app": "ningsi-capture", "version": __version__,
                       "attlapse_model_id": candidate["model_id"] if candidate else None,
                       "shadow_250_hz": {"bundle_id": shadow["bundle_id"], "model_ids": shadow["model_ids"]},
+                      "tcn_250_hz": {"status": "available" if tcn else "unavailable",
+                                     "model_id": tcn.model_id if tcn else None, "reason": tcn_reason,
+                                     "optional_input_policy": RECOVERY_INPUT_POLICY},
                       "modules": {name: importlib.util.find_spec(name) is not None
                                   for name in ("numpy", "pylsl", "tkinter", "ningsi")},
                       "engine_fingerprint": engine_fingerprint(),

@@ -76,7 +76,8 @@ def compute_window(values, timestamps, rate, factor, indices):
             "strict_reasons": strict, "features": {} if physical else features_from_window(diff["window"])}
 
 
-def _quality(rows, total, gate, phase_start, left):
+def window_quality(rows, total, gate, phase_start, left):
+    """Apply the frozen probe gate, counting absent grid windows as rejected."""
     reason_key = f"{gate}_reasons"
     accepted = [row for row in rows if not row[reason_key]]
     rejected = Counter(reason for row in rows for reason in row[reason_key])
@@ -103,8 +104,8 @@ def aggregate_and_score(model, rows, onset, phase_start, *, expected_windows=Non
                   and left - CLOCK_EPS <= row["start"] and row["end"] <= right + CLOCK_EPS]
     # With a complete 2-s grid, 6 or 7 full 4-s windows fall in this 16-s interval.
     total = max(len(candidates), 6, expected_windows or 0)
-    usable, seconds, physical, p_counts = _quality(candidates, total, "physical", phase_start, left)
-    strict, s_seconds, s_reasons, s_counts = _quality(candidates, total, "strict", phase_start, left)
+    usable, seconds, physical, p_counts = window_quality(candidates, total, "physical", phase_start, left)
+    strict, s_seconds, s_reasons, s_counts = window_quality(candidates, total, "strict", phase_start, left)
     result = {"window_start_lsl": left, "window_end_lsl": right, "windows_total": total,
               "windows_usable": len(usable), "usable_seconds": seconds,
               "physical_qc_status": "failed" if physical else "passed", "physical_qc_reasons": physical,

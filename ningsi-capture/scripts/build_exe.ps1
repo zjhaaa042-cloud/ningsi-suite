@@ -1,9 +1,22 @@
-param([ValidateSet("onefile", "onedir")][string]$Mode = "onefile", [string]$PythonExe)
+param(
+    [ValidateSet("onefile", "onedir")][string]$Mode = "onefile",
+    [string]$PythonExe,
+    [string]$DistPath,
+    [switch]$IncludeFocusTcn
+)
 $ErrorActionPreference = "Continue"
 $CaptureRoot = Split-Path -Parent $PSScriptRoot
 $RepoRoot = Split-Path -Parent $CaptureRoot
 $CapturePython = if ($PythonExe) { $PythonExe } else { Join-Path $RepoRoot ".venv\Scripts\python.exe" }
 if (-not (Test-Path -LiteralPath $CapturePython)) { throw "Workspace Python was not found." }
+$DistRoot = if ($DistPath) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DistPath) } else { Join-Path $CaptureRoot "dist" }
+$ModelNames = @("attlapse_healthy_model.json", "attlapse_shadow_250.json")
+if ($IncludeFocusTcn) { $ModelNames += "focus_tcn_250.json" }
+$ModelFiles = foreach ($ModelName in $ModelNames) {
+    $ModelFile = Join-Path $RepoRoot ("ningsi\src\ningsi\models\" + $ModelName)
+    if (-not (Test-Path -LiteralPath $ModelFile -PathType Leaf)) { throw "Missing capture model: $ModelName" }
+    $ModelFile
+}
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $BuildRoot = Join-Path $CaptureRoot "build"
 $env:PYINSTALLER_CONFIG_DIR = Join-Path $BuildRoot "pyinstaller-cache"
@@ -26,7 +39,7 @@ $EngineSourceData = (Join-Path $EngineStage "ningsi") + ";capture_engine_source"
 $ModeFlag = if ($Mode -eq "onefile") { "--onefile" } else { "--onedir" }
 $BuildArgs = @(
     "-m", "PyInstaller", "--noconfirm", "--log-level", "WARN", $ModeFlag, "--windowed",
-    "--name", "NingsiCapture", "--distpath", (Join-Path $CaptureRoot "dist"),
+    "--name", "NingsiCapture", "--distpath", $DistRoot,
     "--workpath", (Join-Path $BuildRoot ("work_" + $Stamp)), "--specpath", $BuildRoot,
     "--paths", $CaptureStage, "--paths", $EngineStage,
     "--collect-all", "pylsl", "--collect-submodules", "ningsi_capture",
@@ -36,19 +49,18 @@ $BuildArgs = @(
     "--exclude-module", "matplotlib", "--exclude-module", "pandas", "--exclude-module", "scipy",
     (Join-Path $PSScriptRoot "frozen_entry.py")
 )
-foreach ($ModelName in @("attlapse_healthy_model.json", "attlapse_shadow_250.json")) {
-    $ModelFile = Join-Path $RepoRoot ("ningsi\src\ningsi\models\" + $ModelName)
-    if (-not (Test-Path -LiteralPath $ModelFile -PathType Leaf)) { throw "Missing capture model: $ModelName" }
+foreach ($ModelFile in $ModelFiles) {
     $BuildArgs += @("--add-data", ($ModelFile + ";ningsi/models"))
 }
 $Log = Join-Path $BuildRoot ("build_" + $Stamp + ".log")
 & $CapturePython @BuildArgs *> $Log
 if ($LASTEXITCODE -ne 0) { Get-Content -LiteralPath $Log -Tail 50; exit 1 }
-$Exe = if ($Mode -eq "onefile") { Join-Path $CaptureRoot "dist\NingsiCapture.exe" } else { Join-Path $CaptureRoot "dist\NingsiCapture\NingsiCapture.exe" }
+$Exe = if ($Mode -eq "onefile") { Join-Path $DistRoot "NingsiCapture.exe" } else { Join-Path $DistRoot "NingsiCapture\NingsiCapture.exe" }
 Get-Item -LiteralPath $Exe | Select-Object FullName,Length
 $ExeHash = (Get-FileHash -LiteralPath $Exe -Algorithm SHA256).Hash
 Write-Output $ExeHash
 $PackageVersion = & $CapturePython -c "from ningsi_capture import __version__; print(__version__)"
 $BuildRecord = [ordered]@{ app = 'ningsi-capture'; version = $PackageVersion; built_utc = (Get-Date).ToUniversalTime().ToString('o'); sha256 = $ExeHash; mode = $Mode; stage = $Stage }
+if ($IncludeFocusTcn) { $BuildRecord['focus_tcn_sha256'] = (Get-FileHash -LiteralPath $ModelFiles[-1] -Algorithm SHA256).Hash }
 $BuildRecord | ConvertTo-Json | Set-Content -LiteralPath (Join-Path (Split-Path -Parent $Exe) 'BUILD.json') -Encoding UTF8
 exit 0

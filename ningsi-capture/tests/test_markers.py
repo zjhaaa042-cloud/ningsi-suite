@@ -186,9 +186,9 @@ class MarkerTests(unittest.TestCase):
         from ningsi_capture.__main__ import main
         with patch("ningsi_capture.gui.run") as gui:
             self.assertEqual(main(["gui"]), 0)
-            gui.assert_called_with(None, lsl_markers=False)
+            gui.assert_called_with(None, lsl_markers=False, tcn_recovery=False)
             self.assertEqual(main(["gui", "--lsl-markers"]), 0)
-            gui.assert_called_with(None, lsl_markers=True)
+            gui.assert_called_with(None, lsl_markers=True, tcn_recovery=False)
 
 
 class MarkerGuiTests(unittest.TestCase):

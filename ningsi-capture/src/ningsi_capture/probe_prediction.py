@@ -9,8 +9,9 @@ import numpy as np
 from .bootstrap import ensure_engine
 ensure_engine()
 from ningsi.acquisition.eeg import source_type_conflict, unit_conflict
-from ningsi.acquisition.timing import BIOMULTI_LSL_TIMING, BIOMULTI_MAX_DELAY, BIOMULTI_REC_TIMING, PACKET_TIMING
-from ningsi.models import attlapse, attlapse_shadow
+from ningsi.acquisition.timing import (BIOMULTI_LSL_RECOVERY_TIMING, BIOMULTI_LSL_TIMING,
+                                      BIOMULTI_MAX_DELAY, BIOMULTI_REC_TIMING, PACKET_TIMING)
+from ningsi.models import attlapse, attlapse_shadow, focus_tcn, focus_tcn_recovery
 from ningsi.models.capture_protocols import RESEARCH_PROTOCOLS
 from ningsi.models.research_features import aggregate_probe
 from ningsi.signal.baseline import build_baseline
@@ -19,8 +20,68 @@ from .export import analysis_windows
 from .storage import open_readonly
 
 
+RECOVERY_INPUT_POLICY = "biomulti-field-tcn-v2"
+
+
 def lookup_margin(source):
-    return {PACKET_TIMING: .05, BIOMULTI_LSL_TIMING: BIOMULTI_MAX_DELAY}.get(source.get("timestamp_policy"), 0.)
+    return {PACKET_TIMING: .05, BIOMULTI_LSL_TIMING: BIOMULTI_MAX_DELAY,
+            BIOMULTI_LSL_RECOVERY_TIMING: BIOMULTI_MAX_DELAY}.get(source.get("timestamp_policy"), 0.)
+
+
+def load_focus_tcn():
+    try:
+        return focus_tcn.load_candidate(), None
+    except FileNotFoundError:
+        return None, "model_unavailable"
+    except (OSError, TypeError, AttributeError, KeyError, ValueError, OverflowError):
+        return None, "model_invalid"
+
+
+def _in_lookback(row, left, right):
+    eps = attlapse_shadow.CLOCK_EPS
+    return (row["start"] is not None and row["end"] is not None
+            and left - eps <= row["start"] and row["end"] <= right + eps)
+
+
+def _tcn_score(model, windows, last_end, onset, phase_start):
+    left, right = (onset + offset for offset in attlapse_shadow.LOOKBACK)
+    hop = 2 * attlapse_shadow.RATE
+    total = focus_tcn.N_FRAMES
+    candidates = {row["sample_end_index"]: row for row in windows if _in_lookback(row, left, right)}
+    ends = []
+    if last_end is not None:
+        # Correct the nominal recording grid at a jittered right boundary. A missing
+        # endpoint keeps its expected slot, even when newer data stopped arriving.
+        by_end = {row["sample_end_index"]: row for row in windows}
+        while last_end in by_end:
+            end = by_end[last_end]["end"]
+            if end is None or end <= right + attlapse_shadow.CLOCK_EPS:
+                break
+            last_end -= hop
+        last_end = max(last_end, max(candidates, default=last_end))
+        ends = list(range(last_end - (total - 1) * hop, last_end + 1, hop))
+    rows = [candidates[end] for end in ends if end in candidates]
+    usable, seconds, reasons, rejects = attlapse_shadow.window_quality(rows, total, "physical", phase_start, left)
+    strict, strict_seconds, strict_reasons, strict_rejects = attlapse_shadow.window_quality(
+        rows, total, "strict", phase_start, left)
+    observed = {row["sample_end_index"]: row["features"] for row in usable}
+    mask = np.zeros(total, dtype=bool)
+    values = np.zeros((total, len(attlapse_shadow.FEATURE_NAMES)))
+    for slot, end in enumerate(ends):
+        if end in observed:
+            values[slot] = [observed[end][name] for name in attlapse_shadow.FEATURE_NAMES]
+            mask[slot] = True
+    result = {"windows_total": total, "windows_usable": len(usable), "usable_seconds": seconds,
+              "frame_end_sample_indices": ends, "frame_mask": "".join("1" if valid else "0" for valid in mask),
+              "physical_qc_status": "failed" if reasons else "passed", "physical_window_rejections": rejects,
+              "strict_windows_usable": len(strict), "strict_usable_seconds": strict_seconds,
+              "strict_qc_status": "failed" if strict_reasons else "passed", "strict_window_rejections": strict_rejects}
+    result["recovered_windows"] = sum(bool(row.get("recovered")) for row in usable)
+    if reasons:
+        result["reason"] = "|".join(reasons)
+    else:
+        result["mw_score"] = focus_tcn.score_sequence(model, values, mask)
+    return result
 
 
 class ProbePredictions:
@@ -47,15 +108,37 @@ class ProbePredictions:
         except (OSError, TypeError, AttributeError, KeyError, ValueError, OverflowError):
             self.shadow = None
             self.shadow_error = "model_invalid"
+        self.tcn, self.tcn_error = load_focus_tcn()
 
     def shadow_metadata(self):
         return {"model_bundle_id": self.shadow["bundle_id"] if self.shadow else None,
                 "model_ids": self.shadow["model_ids"] if self.shadow else {},
                 "rate_hz": 250, "lookback_sec": [-18, -2], "montage": "Fp1-Fp2",
                 "mode": "blind_at_onset", "quality": "physical", "locally_calibrated": False,
+                "input_policy": self.metadata["source"].get("research_input_policy"),
                 "task_elapsed_origin": "first_formal_sart_phase_start_including_breaks",
                 "protocol_elapsed_origin": "protocol_start",
                 "probe_ordinal_basis": "one_based_formal_probe_onsets_across_blocks"}
+
+    def tcn_metadata(self):
+        return {"model_id": self.tcn.model_id if self.tcn else None, "reason": self.tcn_error,
+                "rate_hz": attlapse_shadow.RATE, "lookback_sec": list(attlapse_shadow.LOOKBACK),
+                "frames_total": focus_tcn.N_FRAMES, "mode": "blind_at_onset", "montage": "Fp1-Fp2",
+                "quality": "physical", "locally_calibrated": False,
+                "input_policy": self.metadata["source"].get("research_input_policy")}
+
+    def recovery_preflight(self, stamp, sample_count):
+        """Check the live candidate's input coverage, without persisting a score."""
+        if self.tcn is None:
+            return {"reason": self.tcn_error}
+        phase_start = stamp.lsl + attlapse_shadow.LOOKBACK[0]
+        with closing(open_readonly(self.directory)) as reader:
+            common = self._shadow_windows(reader, stamp, sample_count, (phase_start, 0))
+        if "reason" in common:
+            return common
+        result = _tcn_score(self.tcn, common["windows"], common["last_end"], stamp.lsl, phase_start)
+        result.pop("mw_score", None)
+        return result
 
     def observe(self, kind, payload, stamp, event_id, sample_count):
         phase = payload.get("phase")
@@ -80,17 +163,7 @@ class ProbePredictions:
             # A background model failure cannot interrupt the protocol or discard the answer.
             result = {"reason": "prediction_error", "error_type": type(exc).__name__}
         result["status"] = "unavailable" if "reason" in result else "scored"
-        # Keep the two research candidates independent of any legacy inference failure.
-        shadow = {"window_start_lsl": stamp.lsl - 18, "window_end_lsl": stamp.lsl - 2,
-                  "sample_count_at_onset": sample_count, "logistic_score": None, "rbf_score": None,
-                  "model_bundle_id": self.shadow["bundle_id"] if self.shadow else None,
-                  "model_ids": self.shadow["model_ids"] if self.shadow else {}}
-        try:
-            with closing(open_readonly(self.directory)) as reader:
-                shadow.update(self._shadow_predict(reader, practice, phase, stamp, sample_count, phase_start))
-        except Exception as exc:
-            shadow.update(reason="prediction_error", error_type=type(exc).__name__)
-        shadow["status"] = "unavailable" if "reason" in shadow else "scored"
+        shadow, tcn = self._research_predictions(practice, phase, stamp, sample_count, phase_start)
         # The ordinary QC window can include more recent samples than the model;
         # compute it separately and never pass its state or baseline into scoring.
         try:
@@ -103,10 +176,47 @@ class ProbePredictions:
             shadow["quality_error_type"] = type(exc).__name__
             shadow.setdefault("baseline_valid", None)
         result["shadow_250"] = shadow
+        result["tcn_250"] = tcn
         try:
             self.save_result(event_id, {**base, **result})
         except Exception as exc:
             self.write_failures.append({"onset_event_id": event_id, "error_type": type(exc).__name__})
+
+    def _research_predictions(self, practice, phase, stamp, sample_count, phase_start):
+        # The frozen candidates share one sample snapshot and filter pass. Each
+        # scorer can fail independently after the common input has been prepared.
+        input_policy = self.metadata["source"].get("research_input_policy")
+        shadow = {"window_start_lsl": stamp.lsl - 18, "window_end_lsl": stamp.lsl - 2, "input_policy": input_policy,
+                  "sample_count_at_onset": sample_count, "logistic_score": None, "rbf_score": None,
+                  "model_bundle_id": self.shadow["bundle_id"] if self.shadow else None,
+                  "model_ids": self.shadow["model_ids"] if self.shadow else {}}
+        tcn = {"model_id": self.tcn.model_id if self.tcn else None, "mw_score": None, "input_policy": input_policy,
+               "window_start_lsl": shadow["window_start_lsl"], "window_end_lsl": shadow["window_end_lsl"],
+               "sample_count_at_onset": sample_count}
+        eligibility = self._eligibility(practice, phase)
+        for result, error in ((shadow, self.shadow_error), (tcn, self.tcn_error)):
+            if eligibility or error:
+                result["reason"] = eligibility or error
+        common = {}
+        if "reason" not in shadow or "reason" not in tcn:
+            try:
+                with closing(open_readonly(self.directory)) as reader:
+                    common = self._shadow_windows(reader, stamp, sample_count, phase_start)
+            except Exception as exc:
+                common = {"reason": "prediction_error", "error_type": type(exc).__name__}
+        scorers = (
+            (shadow, lambda: attlapse_shadow.aggregate_and_score(
+                self.shadow, common["windows"], stamp.lsl, phase_start[0], expected_windows=common["expected"])),
+            (tcn, lambda: _tcn_score(self.tcn, common["windows"], common["last_end"], stamp.lsl, phase_start[0])),
+        )
+        for result, predict in scorers:
+            if "reason" not in result:
+                try:
+                    result.update(common if "reason" in common else predict())
+                except Exception as exc:
+                    result.update(reason="prediction_error", error_type=type(exc).__name__)
+            result["status"] = "unavailable" if "reason" in result else "scored"
+        return shadow, tcn
 
     def _input_quality(self, reader, stamp, sample_count):
         source = self.metadata["source"]
@@ -163,14 +273,9 @@ class ProbePredictions:
             self.baseline_valid = build_baseline(windows, device=source["name"], srate=source["srate"]).valid
         return self.baseline_valid
 
-    def _shadow_predict(self, reader, practice, phase, stamp, sample_count, phase_start):
+    def _shadow_windows(self, reader, stamp, sample_count, phase_start, *, recovery=None):
         source = self.metadata["source"]
-        reason = self._eligibility(practice, phase)
-        if reason:
-            return {"reason": reason}
-        if self.shadow is None:
-            return {"reason": self.shadow_error or "model_unavailable"}
-        if float(source["srate"]) != 250.:
+        if float(source["srate"]) != attlapse_shadow.RATE:
             return {"reason": "rate_mismatch"}
         reason = self._source_problem(source)
         if reason:
@@ -179,7 +284,17 @@ class ProbePredictions:
             indices = attlapse.channel_indices(source.get("channel_labels") or ())
         except ValueError:
             return {"reason": "electrode_mismatch"}
-        left, right = stamp.lsl - 18, stamp.lsl - 2
+        if recovery is None:
+            recovery = source.get("research_input_policy") == RECOVERY_INPUT_POLICY
+        if recovery and source.get("timestamp_policy") != BIOMULTI_LSL_TIMING:
+            return {"reason": "recovery_requires_biomulti_lsl"}
+        metadata = self.metadata
+        compute_window = attlapse_shadow.compute_window
+        if recovery:
+            source = {**source, "timestamp_policy": BIOMULTI_LSL_RECOVERY_TIMING}
+            metadata = {**metadata, "source": source}
+            compute_window = focus_tcn_recovery.compute_window
+        left, right = (stamp.lsl + offset for offset in attlapse_shadow.LOOKBACK)
         margin = lookup_margin(source)
         if phase_start is None or phase_start[0] > left:
             return {"reason": "lookback_crosses_phase"}
@@ -188,7 +303,7 @@ class ProbePredictions:
             "BETWEEN ? AND ? AND sample_index < ? AND received_perf <= ?",
             (left - margin - 1e-8, right + margin + 1e-8, sample_count, stamp.perf)).fetchone()
         windows = []
-        expected = None
+        expected = last_end_index = None
         if bounds[0] is not None:
             rate = source["srate"]
             anchor = reader.execute("SELECT corrected_timestamp FROM samples WHERE sample_index=?",
@@ -200,16 +315,16 @@ class ProbePredictions:
             first_end = math.ceil((left + 4 - grid_origin) / 2 - 1e-8)
             last_end = math.floor((right - grid_origin) / 2 + 1e-8)
             expected = last_end - first_end + 1
+            last_end_index = last_end * round(2 * rate) - 1
 
             def analyze(context, source):
                 values = np.stack([item[0] for item in context]).T
                 times = np.asarray([item[1] for item in context], dtype=float)
-                return attlapse_shadow.compute_window(values, times, source["srate"], source["scale_to_uv"], indices)
+                return compute_window(values, times, source["srate"], source["scale_to_uv"], indices)
 
-            windows = analysis_windows(reader, self.metadata, first_index=bounds[0], stop_index=bounds[1] + 1,
+            windows = analysis_windows(reader, metadata, first_index=bounds[0], stop_index=bounds[1] + 1,
                                        analyze=analyze, received_by=stamp.perf, sample_limit=sample_count)
-        return attlapse_shadow.aggregate_and_score(self.shadow, windows, stamp.lsl, phase_start[0],
-                                                  expected_windows=expected)
+        return {"windows": windows, "expected": expected, "last_end": last_end_index}
 
     def _eligibility(self, practice, phase):
         source = self.metadata["source"]

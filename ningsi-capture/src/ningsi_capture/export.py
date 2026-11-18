@@ -16,8 +16,9 @@ import numpy as np
 from .bootstrap import ensure_engine
 ensure_engine()
 from ningsi.acquisition.eeg import source_type_conflict, unit_conflict
-from ningsi.acquisition.timing import (BIOMULTI_CONFIRM_SAMPLES, BIOMULTI_LSL_TIMING, BIOMULTI_REC_TIMING, BIOMULTI_WARM_SAMPLES,
-                                      PACKET_TIMING, STRICT_TIMING, analysis_timestamps, biomulti_packet_clock)
+from ningsi.acquisition.timing import (BIOMULTI_CONFIRM_SAMPLES, BIOMULTI_LSL_RECOVERY_TIMING, BIOMULTI_LSL_TIMING,
+                                      BIOMULTI_REC_TIMING, BIOMULTI_WARM_SAMPLES, PACKET_TIMING, STRICT_TIMING,
+                                      analysis_timestamps, biomulti_packet_clock, biomulti_recovery_clock)
 from ningsi.models.capture_protocols import RESEARCH_PROTOCOLS
 from ningsi.signal import conditioning
 
@@ -116,7 +117,7 @@ def recent_window_quality(session):
     return analyze_context(context, source)["window"].quality.reasons
 
 
-def packet_axis(connection, first_index, stop_index, received_by=None):
+def packet_axis(connection, first_index, stop_index, received_by=None, *, policy=BIOMULTI_LSL_TIMING):
     # Include the anchor and the possible three-second transport/reset history.
     origin = max(0, first_index // 250 * 250 - BIOMULTI_WARM_SAMPLES)
     if stop_index is None:
@@ -130,7 +131,8 @@ def packet_axis(connection, first_index, stop_index, received_by=None):
         args.append(received_by)
     for index, stamp in connection.execute(sql, args):
         raw[index - origin] = stamp
-    return origin, biomulti_packet_clock(raw, first_index=origin)
+    reconstruct = biomulti_recovery_clock if policy == BIOMULTI_LSL_RECOVERY_TIMING else biomulti_packet_clock
+    return origin, reconstruct(raw, first_index=origin)
 
 
 def analysis_windows(connection, metadata, *, first_index=0, stop_index=None,
@@ -143,18 +145,19 @@ def analysis_windows(connection, metadata, *, first_index=0, stop_index=None,
     context = deque(maxlen=round(6 * rate))
     analyze = analyze or _analyze_samples
     policy = source.get("timestamp_policy")
-    separate_axis = policy in (BIOMULTI_REC_TIMING, BIOMULTI_LSL_TIMING)
+    packet_timing = policy in (BIOMULTI_LSL_TIMING, BIOMULTI_LSL_RECOVERY_TIMING)
+    separate_axis = policy == BIOMULTI_REC_TIMING or packet_timing
     raw_times = deque(maxlen=context.maxlen) if separate_axis else None
     # Read enough warm-up samples for the earliest requested window.
     start = max(0, first_index - context.maxlen + 1)
     origin = 0
-    if policy == BIOMULTI_LSL_TIMING and analysis_times is None:
+    if packet_timing and analysis_times is None:
         if rate != 250:
             raise ValueError("BioMulti 分包时钟仅适用于 250 Hz EEG。")
         axis_stop = None if stop_index is None else stop_index + BIOMULTI_CONFIRM_SAMPLES
         if sample_limit is not None:
             axis_stop = sample_limit if axis_stop is None else min(sample_limit, axis_stop)
-        origin, analysis_times = packet_axis(connection, start, axis_stop, received_by)
+        origin, analysis_times = packet_axis(connection, start, axis_stop, received_by, policy=policy)
     if separate_axis and analysis_times is not None:
         end_of_axis = origin + len(analysis_times)
         stop_index = end_of_axis if stop_index is None else min(stop_index, end_of_axis)

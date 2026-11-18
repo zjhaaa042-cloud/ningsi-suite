@@ -10,9 +10,11 @@ import numpy as np
 
 from .test_support import FakeClock
 from ningsi_capture.acquisition import simulation_source, synthetic_samples
+from ningsi_capture.probe_prediction import RECOVERY_INPUT_POLICY, _tcn_score
 from ningsi_capture.protocol import ProtocolConfig
 from ningsi_capture.storage import SessionStore
-from ningsi.models import attlapse_shadow
+from ningsi.acquisition.timing import BIOMULTI_LSL_TIMING
+from ningsi.models import attlapse_shadow, focus_tcn
 
 
 class ShadowRuntimeTest(unittest.TestCase):
@@ -62,6 +64,8 @@ class ShadowRuntimeTest(unittest.TestCase):
         self.assertEqual([e["protocol_elapsed_sec"] for e in events], [2, 47, 129])
         self.assertEqual(predictions[0]["shadow_250"]["reason"], "practice")
         self.assertTrue(all(p["shadow_250"]["status"] == "unavailable" for p in predictions))
+        self.assertEqual(predictions[0]["tcn_250"]["reason"], "practice")
+        self.assertTrue(all(p["tcn_250"]["status"] == "unavailable" for p in predictions))
 
     def test_result_is_frozen_before_answer_even_when_worker_runs_afterwards(self):
         store = self.session()
@@ -107,6 +111,19 @@ class ShadowRuntimeTest(unittest.TestCase):
         expected = attlapse_shadow.aggregate_and_score(attlapse_shadow.load_candidates(), windows, 1020., 1000.)
         self.assertAlmostEqual(first["logistic_score"], expected["logistic_score"], places=12)
         self.assertAlmostEqual(first["rbf_score"], expected["rbf_score"], places=12)
+        tcn_first, tcn_second, tcn_late = [r["tcn_250"] for r in recs]
+        model = focus_tcn.load_candidate()
+        frames = [[row["features"][name] for name in attlapse_shadow.FEATURE_NAMES] for row in windows[-6:]]
+        expected_tcn = focus_tcn.score_sequence(model, frames, np.ones(6, dtype=bool))
+        self.assertEqual(tcn_first["status"], "scored", tcn_first)
+        self.assertEqual(tcn_first["frame_mask"], "111111")
+        self.assertEqual(tcn_first["frame_end_sample_indices"], [end * 250 - 1 for end in range(8, 19, 2)])
+        self.assertEqual(tcn_first["model_id"], store.metadata["tcn_250"]["model_id"])
+        self.assertEqual(tcn_first, tcn_second)
+        self.assertAlmostEqual(tcn_first["mw_score"], expected_tcn, places=12)
+        self.assertEqual(tcn_late["status"], "unavailable")
+        self.assertIsNone(tcn_late["mw_score"])
+        self.assertEqual(tcn_late["frame_mask"], "000000")
         self.assertEqual(late["status"], "unavailable")
         self.assertIsNone(late["rbf_score"])
         self.assertEqual(late["windows_usable"], 0)
@@ -114,6 +131,72 @@ class ShadowRuntimeTest(unittest.TestCase):
         self.assertTrue({"signal_stale", "quality_window_stale", "window_clock_difference_over_3s"}.issubset(
             late["live_input_window_reasons"]))
         self.assertEqual(late["live_input_last_packet_age_sec"], 30)
+
+    def test_tcn_masks_rejected_and_absent_slots_without_moving_remaining_frames(self):
+        def window(end_sec, rejected=False, strict_only=False):
+            return {"start": 1000 + end_sec - 4, "end": 1000 + end_sec,
+                    "sample_end_index": end_sec * 250 - 1,
+                    "features": dict.fromkeys(attlapse_shadow.FEATURE_NAMES, end_sec),
+                    "physical_reasons": ["input_amplitude"] if rejected else [],
+                    "strict_reasons": ["input_amplitude"] if rejected else (["input_eog"] if strict_only else [])}
+
+        windows = [window(6), window(8), window(10, rejected=True), window(12, strict_only=True),
+                   window(14), window(16)]
+        with patch.object(focus_tcn, "score_sequence", return_value=.42) as score:
+            result = _tcn_score(object(), windows, 18 * 250 - 1, 1020, 1000)
+        self.assertEqual(result["mw_score"], .42)
+        self.assertEqual(result["frame_mask"], "101110")
+        self.assertEqual(result["physical_window_rejections"], {"input_amplitude": 1, "missing_window": 1})
+        self.assertEqual(result["strict_qc_status"], "failed")
+        _, features, mask = score.call_args.args
+        np.testing.assert_array_equal(features[:, 0], [8, 0, 12, 14, 16, 0])
+        np.testing.assert_array_equal(mask, [True, False, True, True, True, False])
+
+    def test_recovery_mode_scores_current_probe_and_keeps_late_samples_excluded(self):
+        self.source.update(timestamp_policy=BIOMULTI_LSL_TIMING, research_input_policy=RECOVERY_INPUT_POLICY)
+        store = self.session()
+        store.event("phase_start", {"phase": "sart_1"})
+        for end in range(50, 5501, 50):
+            points = np.arange(end - 50, end)
+            values = synthetic_samples(points)
+            values[:, 1] *= -.8
+            self.clock.advance(.2)
+            store.append(values, 1000 + points / 250, offset=0.)
+        preflight = store.predictions.recovery_preflight(self.clock.now(), store.sample_count)
+        self.assertGreaterEqual(preflight["windows_usable"], 4, preflight)
+        self.assertNotIn("mw_score", preflight)
+        store.event("probe_onset", {"phase": "sart_1", "probe_id": "fresh"})
+        self.clock.advance(20.)
+        store.event("probe_onset", {"phase": "sart_1", "probe_id": "before_late_arrival"})
+        late = np.arange(5500, 10500)
+        store.append(synthetic_samples(late), 1000 + late / 250, offset=0.)
+        store.close("aborted")
+        fresh, late = [record for _, record in self.read(store)]
+        for key in ("tcn_250", "shadow_250"):
+            self.assertEqual(fresh[key]["input_policy"], RECOVERY_INPUT_POLICY)
+            self.assertEqual(fresh[key]["status"], "scored", fresh[key])
+            self.assertEqual(late[key]["status"], "unavailable", late[key])
+
+    def test_tcn_failure_does_not_change_existing_scores(self):
+        for missing, reason in ((True, "model_unavailable"), (False, "prediction_error")):
+            with self.subTest(missing=missing):
+                self.clock = FakeClock()
+                with patch.object(focus_tcn, "load_candidate", side_effect=FileNotFoundError if missing else None,
+                                  wraps=focus_tcn.load_candidate):
+                    store = self.session()
+                store.event("phase_start", {"phase": "sart_1"})
+                points = np.arange(20 * 250)
+                values = synthetic_samples(points)
+                values[:, 1] *= -.8
+                self.clock.advance(20)
+                store.append(values, 1000 + points / 250, offset=0.)
+                with patch.object(focus_tcn, "score_sequence", side_effect=ValueError):
+                    store.event("probe_onset", {"phase": "sart_1", "probe_id": "tcn-failure"})
+                    store.close("aborted")
+                _, prediction = self.read(store)[0]
+                self.assertEqual(prediction["shadow_250"]["status"], "scored")
+                self.assertEqual(prediction["tcn_250"]["reason"], reason)
+                self.assertIsNone(prediction["tcn_250"]["mw_score"])
 
     def test_mismatched_rate_and_shadow_failure_preserve_legacy_record(self):
         for corrupt, expected in ((False, "rate_mismatch"), (True, "model_invalid")):
