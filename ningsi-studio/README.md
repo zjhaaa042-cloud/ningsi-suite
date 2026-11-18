@@ -163,6 +163,21 @@ $env:PYTHONPATH="src;..\ningsi\src"; python -m ningsi_studio serve --port 8765
 
 端口被占用时自动向后探测 5 个端口；`--port` 可指定起始端口。
 
+### 用公开真人录波生成报告
+
+源码版支持从 [PhysioNet EEG Motor Movement/Imagery v1.0.0](https://physionet.org/content/eegmmidb/1.0.0/)
+回放同一被试的 R01–R04 原始 EDF。输入目录应包含这四个 EDF 和发布方的
+`SHA256SUMS.txt`，Python 环境需安装 MNE。命令从仓库根目录运行。
+
+```powershell
+$env:PYTHONPATH="ningsi/src;ningsi-studio/src"
+python -m ningsi_studio replay-public-eeg --input <录波目录> --participant S002 --channels P3 P4 --data <新数据目录>
+python -m ningsi_studio serve --data <新数据目录> --open
+```
+
+在「历史记录」打开这次回放报告并导出 ZIP。报告保留源文件校验值、原始导联、采样率、采样区间、基线和逐窗质量。
+S002 的 P3/P4 是按现有门槛选出的报告示例。运动想象任务的相对指数仅用于描述录波，量表、SART、PVT-B 和反馈训练按未采集处理。
+
 Linux / macOS 等价入口（首次需要 `chmod +x run.sh scripts/smoke.sh`）：
 
 ```bash

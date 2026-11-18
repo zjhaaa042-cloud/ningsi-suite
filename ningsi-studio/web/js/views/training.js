@@ -1,5 +1,5 @@
 /**
- * 训练视图：大号专注度仪表 + 目标线、连续保持状态、分段表格、训练前后基线对比。
+ * 训练视图：专注相关指数与目标线、连续保持状态、分段表格、训练前后基线对比。
  *
  * 数据来源：
  * - SSE：`training_start`（模式/段数/初始目标）、`feedback`（逐窗目标与达标）、`segment`（分段统计）
@@ -15,6 +15,11 @@ import {
 } from '../util.js';
 import { SERIES_COLORS, drawLineChart, drawGauge } from '../charts.js';
 import { effectiveTimeContent, effectiveTimeOutcome, effectiveTimeState, formatWallRatio, trainingCoverageNote, trainingMetrics } from '../training-metrics.js';
+
+const FEEDBACK_LABELS = {
+  eeg: '脑电反馈', quality: '信号质量反馈', guided: '固定引导',
+  rest: '轮间休息', paused: '脑电反馈暂停',
+};
 
 /**
  * 训练前后基线：结构来自引擎 Baseline.as_dict()
@@ -84,6 +89,8 @@ export function render(container, ctx) {
     summary: null,
     trainingEnded: false,
     segmentStats: null,
+    feedbackMode: null,
+    feedbackNote: '',
     effectiveTime: null,
     timeScale: pick(ctx.store.state.currentSession, 'time_scale', 1),
     title: '训练进行中',
@@ -157,22 +164,28 @@ export function render(container, ctx) {
   const renderGauge = () => {
     gaugeHost.textContent = '';
     const view = finalView();
-    if (local.feedbackMode && local.feedbackMode !== 'eeg' && !local.trainingEnded) {
-      gaugeHost.append(card('当前反馈模式', el('p', { text: local.modeLabel })));
-      return;
-    }
     const body = el('div');
-    gaugeHost.append(card('专注度仪表', body, {
-      sub: `目标随训练表现调整；允许目标范围 ${fmtNum(pick(trainingConfig(), 'target_min'), 2)}–${fmtNum(pick(trainingConfig(), 'target_max'), 2)}`,
+    gaugeHost.append(card('专注相关指数', body, {
+      sub: '0.50 对应本次训练前的个人基线，目标线使用相同的 0–1 刻度。',
     }));
-    drawGauge(body, view.score, {
+    if (!view.usingFallback) {
+      const modeLabel = FEEDBACK_LABELS[local.feedbackMode] || '等待训练反馈';
+      body.append(el('p', {}, [el('strong', { text: modeLabel })]));
+      if (local.feedbackNote) body.append(el('p', { class: 'training-coverage-note', text: local.feedbackNote }));
+      if (view.score === null) return;
+    }
+    const gauge = el('div');
+    body.append(gauge);
+    drawGauge(gauge, view.score, {
+      indexScale: true,
       target: view.target,
       color: 'var(--accent)',
-      note: view.target === null || view.target === undefined ? '' : `目标 ${fmtNum(view.target, 3)}`,
-      label: '专注度仪表',
+      note: view.target === null || view.target === undefined ? '' : `目标线 ${fmtNum(view.target, 3)}`,
+      label: '专注相关指数，刻度 0–1',
     });
     if (view.usingFallback && view.hasData) {
-      body.append(el('p', { class: 'muted', text: '仪表显示已保存的最后一段平均专注度和训练目标。' }));
+      const text = Number.isFinite(view.score) ? '仪表显示已保存的末段平均指数与该段训练目标。' : '末段没有可用的脑电指数。';
+      body.append(el('p', { class: 'muted', text }));
     }
   };
 
@@ -189,7 +202,7 @@ export function render(container, ctx) {
       el('div', { class: 'training-primary' }, [el('p', { class: 'muted', text: '有效时间覆盖率' }), el('p', { class: 'mono kpi__value', text: fmtPercent(metrics?.coverage) })]),
       el('div', {}, [el('p', { class: 'muted', text: local.timeScale !== 1 ? '有效反馈秒数 / 协议时长' : '有效反馈秒数 / 实际时长' }), el('p', { class: 'mono', text: `${fmtDuration(metrics?.validSeconds)} / ${fmtDuration(metrics?.duration)}` })]),
       el('div', {}, [el('p', { class: 'muted', text: '本段达标时间占比' }), el('p', { class: 'mono', text: metrics ? formatWallRatio(metrics) : DASH })]),
-      el('div', {}, [el('p', { class: 'muted', text: view.usingFallback ? '末段平均专注度' : '当前专注度' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.score, 3) })]),
+      el('div', {}, [el('p', { class: 'muted', text: view.usingFallback ? '末段平均专注相关指数' : '当前专注相关指数' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.score, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '目标线' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.target, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '连续保持状态' }), el('p', { class: 'kpi__value', text: achieved })]),
       el('div', {}, [el('p', { class: 'muted', text: '当前段' }), el('p', { class: 'mono', text: fmtInt(view.seq) })]),
@@ -280,7 +293,7 @@ export function render(container, ctx) {
       el('div', {}, [el('p', { class: 'muted', text: '有效时间内达标率' }), el('p', { class: 'mono kpi__value', text: fmtPercent(metrics.validRatio) })]),
       el('div', {}, [el('p', { class: 'muted', text: '有效时间覆盖率' }), el('p', { class: 'mono kpi__value', text: fmtPercent(metrics.coverage) })]),
       el('div', {}, [el('p', { class: 'muted', text: local.timeScale !== 1 ? '有效反馈秒数 / 协议时长' : '有效反馈秒数 / 实际时长' }), el('p', { class: 'mono', text: `${fmtDuration(metrics.validSeconds)} / ${fmtDuration(metrics.duration)}` })]),
-      el('div', {}, [el('p', { class: 'muted', text: '训练平均专注度' }), el('p', { class: 'mono', text: fmtNum(pick(summary, 'mean_focus'), 3) })]),
+      el('div', {}, [el('p', { class: 'muted', text: '训练平均专注相关指数' }), el('p', { class: 'mono', text: fmtNum(pick(summary, 'mean_focus'), 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '实际时间达标占比 / 旧版样本占比' }), el('p', { class: 'mono', text: formatWallRatio(metrics) })]),
       el('div', {}, [el('p', { class: 'muted', text: '首末变化' }), el('p', { class: 'mono', text: fmtNum(pick(summary, 'first_to_last_change'), 4) })]),
     ]));
@@ -311,9 +324,21 @@ export function render(container, ctx) {
         && (!Number.isFinite(nextElapsed) || !Number.isFinite(currentElapsed) || nextElapsed <= currentElapsed))) return;
     }
     if (!fromSnapshot) local.hasLiveFeedback = true;
-    const usable = payload.usable !== false && Number.isFinite(payload.score);
-    local.feedbackMode = payload.feedback_mode;
-    local.modeLabel = payload.mode_label;
+    const mode = payload.feedback_mode;
+    const usable = (!mode || mode === 'eeg') && payload.usable !== false && Number.isFinite(payload.score);
+    local.feedbackMode = usable ? 'eeg' : (mode && mode !== 'eeg' ? mode : 'paused');
+    local.feedbackNote = '';
+    if (!usable) {
+      const reasons = list(payload.heatmap_cell?.reason_labels);
+      const status = mode === 'eeg' || payload.mode_label === FEEDBACK_LABELS[local.feedbackMode] ? '' : payload.mode_label;
+      if (local.feedbackMode === 'rest') {
+        local.feedbackNote = status || '等待下一轮训练。';
+      } else {
+        const reason = payload.effective_time?.baseline_valid === false ? '本次睁眼基线未通过。'
+          : reasons.length ? `最近一窗：${reasons.join('、')}。` : '';
+        local.feedbackNote = [reason, status, '当前不计入有效脑电反馈时间。'].filter(Boolean).join(' ');
+      }
+    }
     local.segment = payload.segment;
     local.currentHold = usable ? payload.current_hold_sec ?? null : 0;
     local.maxHold = payload.max_hold_sec ?? null;

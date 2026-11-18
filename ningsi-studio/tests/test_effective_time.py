@@ -43,6 +43,8 @@ class Bus:
 
 
 class FakeRuntime:
+    latest_analysis_window = None
+
     def __init__(self, clock, good, bad, pattern=None, cancel_at=None, latency=0):
         self.clock, self.scale = clock, 1
         self.source = SimpleNamespace(kind="sim", device="fixture", srate=250)

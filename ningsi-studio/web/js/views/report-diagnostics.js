@@ -11,7 +11,8 @@ function bar(label, value, max, rejected = false) {
   const number = Number.isFinite(value) ? value : 0;
   return el('div', { class: 'diagnostic-bar' }, [
     el('span', { text: label }),
-    el('progress', { max: Math.max(1, max), value: Math.max(0, number), class: rejected ? 'diagnostic-rejected' : '', 'aria-label': label }),
+    el('progress', { max: Number.isFinite(max) ? Math.max(1, max) : 1,
+      value: Math.max(0, number), class: rejected ? 'diagnostic-rejected' : '', 'aria-label': label }),
     el('strong', { text: fmtNum(value, 1) }),
   ]);
 }
@@ -19,12 +20,16 @@ function bar(label, value, max, rejected = false) {
 export function renderDiagnostics(report) {
   const d = report.extras?.signal_diagnostics;
   const quality = report.quality || {};
-  const total = d?.total ?? quality.windows_total ?? 0;
-  const accepted = d?.accepted ?? quality.windows_usable ?? 0;
+  const total = d?.total ?? quality.windows_total;
+  const accepted = d?.accepted ?? quality.windows_usable;
+  const hasCounts = Number.isFinite(total) && Number.isFinite(accepted);
   const root = el('div', { class: 'stack' });
   if (d?.scope) root.append(el('p', { text: d.scope }));
-  root.append(el('p', { text: `严格合格 ${accepted}/${total} 窗。${d ? (d.note || '质量统计按已保存结果展示；缺失的诊断项目不补算。') : '旧版本未保存完整逐窗信号；可查看已有质量与行为汇总，不能事后重建频谱。'}` }));
-  root.append(bar('严格合格窗', accepted, total), bar('排除窗', total - accepted, total, true));
+  const countNote = hasCounts ? `严格合格 ${accepted}/${total} 窗。` : '未保存完整窗口质量计数。';
+  const qualityNote = d ? (d.note || '质量统计按已保存结果展示；缺失的诊断项目不补算。')
+    : '旧版本未保存完整逐窗信号；可查看已有质量与行为汇总，不能事后重建频谱。';
+  root.append(el('p', { text: countNote + qualityNote }));
+  if (hasCounts && total > 0) root.append(bar('严格合格窗', accepted, total), bar('排除窗', total - accepted, total, true));
   const ten = report.extras?.ten_min;
   if (ten) {
     root.append(el('h3', { text: '十分钟测试＋训练：分级利用' }), el('p', { text: ten.note }));
@@ -81,10 +86,19 @@ export function renderDiagnostics(report) {
     if (!n) root.append(el('p', { text: '没有符合此组条件的频带数据。' }));
   }
   const pvt = report.behavior?.pvt;
-  if (pvt) {
+  if (pvt && Object.keys(pvt).length) {
     root.append(el('h3', { text: 'PVT 行为分析（不依赖脑电基线）' }));
-    for (const [label, key] of [['有效反应', 'responded'], ['抢答（排除RT）', 'false_starts'], ['漏答', 'missed'], ['慢反应 >500ms', 'lapses']]) root.append(bar(label, pvt[key], pvt.trials));
-    root.append(el('p', { text: `中位反应时 ${fmtNum(Number.isFinite(pvt.rt_median) ? pvt.rt_median * 1000 : null, 0)} ms；平均 ${fmtNum(Number.isFinite(pvt.rt_mean) ? pvt.rt_mean * 1000 : null, 0)} ms。慢反应率分母为${pvt.responded ?? '未知'}个有效反应；阈值待验证。` }));
+    for (const [label, key] of [['有效反应', 'responded'], ['抢答（排除RT）', 'false_starts'], ['漏答', 'missed']]) {
+      if (Number.isFinite(pvt[key]) && pvt.trials > 0) root.append(bar(label, pvt[key], pvt.trials));
+    }
+    const lapseDenominator = pvt.rate_denominators?.lapse_rate ?? pvt.responded;
+    if (Number.isFinite(pvt.lapses) && lapseDenominator > 0) root.append(bar('慢反应 >500ms', pvt.lapses, lapseDenominator));
+    const hasResponses = lapseDenominator !== 0;
+    const median = hasResponses && Number.isFinite(pvt.rt_median) ? pvt.rt_median * 1000 : null;
+    const mean = hasResponses && Number.isFinite(pvt.rt_mean) ? pvt.rt_mean * 1000 : null;
+    const lapseBasis = !Number.isFinite(lapseDenominator) ? '慢反应率分母未记录。'
+      : lapseDenominator > 0 ? `慢反应率按 ${lapseDenominator} 个有效反应计算。` : '有效反应为 0，慢反应率不可计算。';
+    root.append(el('p', { text: `中位反应时 ${fmtNum(median, 0)} ms；平均 ${fmtNum(mean, 0)} ms。${lapseBasis}阈值待验证。` }));
   }
   return card('采集质量与行为可视化', root);
 }

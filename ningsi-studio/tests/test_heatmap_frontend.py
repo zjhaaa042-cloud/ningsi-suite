@@ -151,6 +151,48 @@ assert.equal(text(countBox),'已接收窗605');
 ctx.signal.aborted=true;cleanups.forEach(fn=>fn());
 ''')
 
+    def test_live_window_explanation_survives_summaries_and_clears_at_phase_change(self):
+        self.node(r'''
+import assert from 'node:assert/strict';
+const {api}=await import(API_URI);const {render}=await import(LIVE_URI);
+const record={index:2,phase:'monitor',t_end:4,usable:true,baseline_valid:true,scores:{focus:.73},
+  focus_basis:{window_log_ratio:Math.log(2),baseline_log_ratio:Math.log(1.5)},reasons:[]};
+api.getSession=async()=>({data:{session:{uuid:'s',status:'running',phase:'monitor'}}});
+api.sessionLive=async()=>({data:{status:'running',runtime_alive:true,phase:'monitor',analysis_window:record}});
+api.sessionHeatmap=async()=>({data:{cells:[]}});
+const sources=[];globalThis.EventSource=class{constructor(url){this.url=url;this.handlers={};sources.push(this);}
+  addEventListener(type,fn){this.handlers[type]=fn;}removeEventListener(){}close(){}};
+const cleanups=[],ctx={params:new URLSearchParams('session=s'),signal:{aborted:false},navigate(){},
+store:{state:{config:{phases:[{key:'monitor',label:'任务态监测'},{key:'training',label:'反馈训练'}]}},setState(patch){Object.assign(this.state,patch);},subscribe(){return()=>{};}},onCleanup(fn){cleanups.push(fn);}};
+const root=new StubNode('main');render(root,ctx);await flush();
+const stream=sources.find(source=>source.url.includes('/signal?'));
+stream.onopen?.();
+assert.ok(text(root).includes('等待新数据'));
+stream.handlers.signal({data:JSON.stringify({samples:1,realtime:true,channels:[]})});
+assert.ok(text(root).includes('数据流正在更新'));
+assert.ok(text(root).includes('任务态监测 · 第 2 窗'));
+assert.ok(text(root).includes('本窗 β/θ 2.000 · 睁眼基线 β/θ 1.500'));
+const events=sources.find(source=>source.url.endsWith('/events'));
+const emit=(type,payload)=>events.handlers[type]({data:JSON.stringify({data:payload})});
+emit('monitor',{summary:{indicators:{focus:{mean:.55,n:4}}}});
+assert.ok(text(root).includes('监测阶段均值（4 个评分窗） · 专注相关指数 0.55'));
+assert.ok(text(root).includes('第 2 窗'));
+emit('window',{...record,index:3,t_end:6,usable:false,scores:{},reasons:['clock_unsynchronized']});
+assert.ok(text(root).includes('时标待核对'));
+assert.ok(text(root).includes('数据时间戳未同步'));
+assert.ok(text(root).includes('个人基线 · 已建立'));
+assert.ok(!text(root).includes('本窗 β/θ'));
+emit('window',record);
+assert.ok(text(root).includes('第 3 窗'));
+emit('phase',{key:'training',state:'running'});
+assert.ok(text(root).includes('等待当前阶段的分析窗'));
+assert.ok(!text(root).includes('暂停评分 · 数据时间戳未同步'));
+emit('feedback',{analysis_window:{...record,index:4,phase:'training',t_end:8}});
+assert.ok(text(root).includes('第 4 窗'));
+assert.ok(text(root).includes('本窗 β/θ'));
+ctx.signal.aborted=true;cleanups.forEach(fn=>fn());
+''')
+
     def test_history_snapshot_updates_received_window_count_without_sse(self):
         self.node(r'''
 import assert from 'node:assert/strict';

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from ningsi import config
 from ningsi.monitoring.alerts import AlertEngine
 from ningsi.processing import process_window
-from ningsi.signal.baseline import build_baseline
+from ningsi.signal.baseline import build_baseline, index_values
 from ningsi.signal.indicators import aggregate
 
 INDICATOR_LABELS = {"focus": "专注相关指数", "relax": "放松度", "load": "认知负荷"}
@@ -31,6 +31,8 @@ class WindowStep:
     raw: object = None
     graded: dict = field(default_factory=dict)
     attention_model: dict = field(default_factory=dict)
+    baseline_valid: bool | None = None
+    focus_basis: dict = field(default_factory=dict)
 
     @property
     def usable(self) -> bool:
@@ -53,6 +55,8 @@ class WindowStep:
             "indicator_available": bool(self.scores),
             "indicator_reason": ("" if self.scores else
                                  self.indicators.reason if self.indicators is not None else "baseline_pending"),
+            "baseline_valid": self.baseline_valid,
+            "focus_basis": self.focus_basis,
             "relative_band_powers": dict(getattr(window, "rel", {}) or {}),
             "index_z": ({k: round(v, 4) for k, v in self.indicators.index_z.items()}
                         if self.indicators is not None and self.indicators.available else {}),
@@ -113,6 +117,12 @@ class WindowEngine:
         processed = process_window(raw, self.srate, t_end=self.t,
                                    baseline=self.baseline, artifact_evidence=artifact_record)
         window, indicators = processed.window, processed.indicators
+        focus_basis = {}
+        if indicators.available:
+            stat = self.baseline.index_stat("focus")
+            if stat is not None:
+                focus_basis = {"window_log_ratio": index_values(window)["focus"],
+                               "baseline_log_ratio": stat["mean"]}
         events = self.alerts.feed(window, indicators)
         triggered = [event.as_dict() for event in events if event.state == "triggered"]
         self.fired_alerts.extend(triggered)
@@ -128,6 +138,8 @@ class WindowEngine:
             indicators=indicators,
             scores=dict(indicators.scores) if indicators is not None and indicators.available else {},
             alerts=triggered, raw=raw,
+            baseline_valid=self.baseline.valid if self.baseline is not None else None,
+            focus_basis=focus_basis,
         )
 
     def _min_samples(self) -> int:
@@ -143,12 +155,13 @@ class WindowEngine:
         return steps
 
     # ---------------------------------------------------------------- 质检
-    def device_qc(self, windows: int = 4, artifact: bool = True, wait_between=None, on_step=None) -> dict:
+    def device_qc(self, windows: int = 4, artifact: bool = True, wait_between=None, on_step=None,
+                  *, state: str = "rest") -> dict:
         steps = []
         for index in range(int(windows) + int(artifact)):
             if index and wait_between is not None:
                 wait_between(config.STEP_SEC)
-            steps.append(self.step("rest", artifact=artifact and index == int(windows)))
+            steps.append(self.step(state, artifact=artifact and index == int(windows)))
             if on_step is not None:
                 on_step(steps[-1])
         reasons: dict[str, int] = {}

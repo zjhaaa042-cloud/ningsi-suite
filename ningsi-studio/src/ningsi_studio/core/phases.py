@@ -208,6 +208,8 @@ PHASES: tuple[Phase, ...] = (
 
 PHASE_KEYS = tuple(phase.key for phase in PHASES)
 PHASE_BY_KEY = {phase.key: phase for phase in PHASES}
+REPLAY_PHASES = ("qc", "baseline_open", "baseline_closed", "monitor", "assessment", "report")
+REPLAY_LABEL = "公开真人脑电回放"
 
 
 # ---------------------------------------------------------------- 协议档（profile）

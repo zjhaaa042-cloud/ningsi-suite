@@ -245,6 +245,7 @@ export function drawBarChart(container, items = [], options = {}) {
 /**
  * 半圆仪表（专注度反馈、质检通过率）。
  * @param {number|null} value 0–1
+ * @param {boolean} [options.indexScale] 在 0–1 刻度上显示指数。
  */
 export function drawGauge(container, value, options = {}) {
   container.textContent = '';
@@ -306,7 +307,7 @@ export function drawGauge(container, value, options = {}) {
       x: cx + labelRadius * Math.cos(angle),
       y: cy - labelRadius * Math.sin(angle) + 4,
       class: 'chart__tick', 'text-anchor': 'middle',
-    }, [document.createTextNode(String(index * 25))]));
+    }, [document.createTextNode(options.indexScale ? fmtNum(fraction, 2) : String(index * 25))]));
   }
 
   if (typeof options.target === 'number' && Number.isFinite(options.target)) {
@@ -320,12 +321,14 @@ export function drawGauge(container, value, options = {}) {
     }));
   }
 
+  const label = options.indexScale ? fmtNum(ratio, 3) : String(Math.round(ratio * 100));
+  const unit = options.indexScale ? '指数' : '分';
   root.append(svgEl('text', {
     x: cx, y: cy - 12, class: 'chart__label', 'text-anchor': 'middle', 'font-size': 30,
-  }, [document.createTextNode(usable ? `${Math.round(ratio * 100)}` : DASH)]));
+  }, [document.createTextNode(usable ? label : DASH)]));
   root.append(svgEl('text', {
     x: cx, y: cy + 14, class: 'chart__tick', 'text-anchor': 'middle',
-  }, [document.createTextNode(usable ? '分' : '不可用')]));
+  }, [document.createTextNode(usable ? unit : '不可用')]));
   container.append(root);
   // 说明放在 SVG 之外：viewBox 只有 320 宽，长文案写进 SVG 会溢出控件边界
   if (options.note) container.append(el('p', { class: 'chart__note muted', text: options.note }));

@@ -126,6 +126,7 @@ def run(runtime, auto):
                 display_start = time.monotonic()
                 feedback = {"segment": index+1, "feedback_mode": mode,
                     "heatmap_cell": heatmap_cell,
+                    "analysis_window": r.latest_analysis_window,
                     "affect_model": r.current_affect(),
                     "attention_model": step.attention_model,
                     "mode_label": LABELS[mode], "grade": step.graded["grade"],

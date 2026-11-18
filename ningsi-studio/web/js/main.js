@@ -194,6 +194,7 @@ function kindFromKey(key) {
   const raw = String(key || '').toLowerCase();
   if (!raw) return null;
   if (raw.startsWith('lsl:')) return 'lsl';
+  if (raw.startsWith('replay:')) return 'replay';
   if (raw === 'sim' || raw.startsWith('sim-')) return 'sim';
   return null;
 }
@@ -207,6 +208,7 @@ function sourceText(kind, note, key) {
   const normalized = String(effective).toLowerCase();
   if (normalized === 'sim') return '数据来源：仿真';
   if (normalized === 'lsl') return `数据来源：LSL 实时流（${key || 'LSL'}）`;
+  if (normalized === 'replay') return '数据来源：公开真人录波';
   return `数据来源：${effective}${note ? `（${note}）` : ''}`;
 }
 

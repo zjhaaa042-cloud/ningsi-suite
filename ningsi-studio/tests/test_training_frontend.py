@@ -74,32 +74,32 @@ class TrainingFrontendTests(unittest.TestCase):
         self.run_view(r'''
 mount(); await settle();
 emit('feedback', {segment:2,score:.65,target:.5,usable:true,achieved:false,current_hold_sec:2});
-assert.equal(field('当前专注度'),'0.650');
+assert.equal(field('当前专注相关指数'),'0.650');
 emit('feedback', {segment:2,score:null,target:.5,usable:false,achieved:true,current_hold_sec:6});
-assert.equal(field('当前专注度'),'—');
+assert.equal(field('当前专注相关指数'),'—');
 assert.equal(field('连续保持状态'),'—');
 assert.equal(field('本段达标时间占比'),'—');
 assert.equal(field('当前段'),'2');
 assert.equal(field('当前连续保持 / 本段最长'),'0.0s / —');
 poll(); await settle();
-assert.equal(field('当前专注度'),'—','empty summary must not enable saved-result fallback');
+assert.equal(field('当前专注相关指数'),'—','empty summary must not enable saved-result fallback');
 assert.equal(field('连续保持状态'),'—');
 emit('feedback', {segment:2,score:.7,target:.5,usable:true,achieved:false,current_hold_sec:2});
-assert.equal(field('当前专注度'),'0.700','feedback must recover after a missing window');
+assert.equal(field('当前专注相关指数'),'0.700','feedback must recover after a missing window');
 poll(); await settle();
-assert.equal(field('当前专注度'),'0.700','polling cannot erase a valid live score');
+assert.equal(field('当前专注相关指数'),'0.700','polling cannot erase a valid live score');
 emit('feedback', {segment:2,score:0,target:.5,usable:true,achieved:false});
-assert.equal(field('当前专注度'),'0.000','a genuine zero is a valid score');
+assert.equal(field('当前专注相关指数'),'0.000','a genuine zero is a valid score');
 assert.equal(field('连续保持状态'),'未达标');
 emit('feedback', {segment:2,score:null,target:.5,usable:true,achieved:true});
-assert.equal(field('当前专注度'),'—','a valid raw window without a score remains missing');
+assert.equal(field('当前专注相关指数'),'—','a valid raw window without a score remains missing');
 assert.equal(field('连续保持状态'),'—');
 emit('feedback', {segment:2,score:.9,target:null,usable:false,achieved:true});
-assert.equal(field('当前专注度'),'—','unusable flag overrides even a numeric score');
+assert.equal(field('当前专注相关指数'),'—','unusable flag overrides even a numeric score');
 assert.equal(field('连续保持状态'),'—');
 emit('segment', saved(1,.6));
 emit('phase', {key:'training',state:'done'});
-assert.equal(field('末段平均专注度'),'0.600');
+assert.equal(field('末段平均专注相关指数'),'0.600');
 assert.equal(field('连续保持状态'),'达标','completed training retains its saved result');
 ''')
 
@@ -107,15 +107,48 @@ assert.equal(field('连续保持状态'),'达标','completed training retains it
         self.run_view(r'''
 session = {status:'running',phase:'baseline_after',runs:[{phase:'training',status:'done'}]};
 mount(); await settle();
-assert.equal(field('末段平均专注度'),'0.800');
+assert.equal(field('末段平均专注相关指数'),'0.800');
 assert.equal(field('连续保持状态'),'达标');
+''')
+
+    def test_index_gauge_and_feedback_states(self):
+        self.run_view(r'''
+mount(); await settle();
+const gaugeTexts = () => all(card('专注相关指数')).map(n => n.textContent);
+assert.ok(gaugeTexts().includes('等待训练反馈'));
+emit('feedback', {segment:1,score:.964,target:.65,usable:true,feedback_mode:'eeg'});
+for (const text of ['0.00', '0.50', '1.00', '0.964', '指数', '目标线 0.650', '脑电反馈']) {
+  assert.ok(gaugeTexts().includes(text), `missing gauge text: ${text}`);
+}
+assert.ok(gaugeTexts().some(text => text.includes('0.50 对应本次训练前的个人基线')));
+assert.ok(!gaugeTexts().includes('分'));
+
+emit('feedback', {segment:1,score:null,usable:false,feedback_mode:'quality',
+  heatmap_cell:{reason_labels:['波幅过大']}});
+assert.ok(gaugeTexts().includes('信号质量反馈'));
+assert.ok(gaugeTexts().some(text => text.includes('波幅过大') && text.includes('不计入有效脑电反馈时间')));
+assert.ok(!gaugeTexts().includes('0.964'));
+
+emit('feedback', {segment:1,score:null,usable:false,feedback_mode:'guided',
+  effective_time:{baseline_valid:false}});
+assert.ok(gaugeTexts().includes('固定引导'));
+assert.ok(gaugeTexts().some(text => text.includes('睁眼基线未通过')));
+emit('feedback', {segment:1,score:null,usable:false,feedback_mode:'rest'});
+assert.ok(gaugeTexts().includes('轮间休息'));
+assert.ok(gaugeTexts().includes('等待下一轮训练。'));
+
+const { drawGauge } = await import(new URL('../charts.js', VIEW_URI));
+const defaultGauge = new StubNode('div');
+drawGauge(defaultGauge, .964);
+const defaultTexts = all(defaultGauge).map(n => n.textContent);
+for (const text of ['0', '50', '100', '96', '分']) assert.ok(defaultTexts.includes(text));
 ''')
 
     def test_terminal_session_preserves_partial_saved_training(self):
         self.run_view(r'''
 session = {status:'cancelled',phase:'cancelled',runs:[]};
 mount(); await settle();
-assert.equal(field('末段平均专注度'),'0.800');
+assert.equal(field('末段平均专注相关指数'),'0.800');
 assert.equal(field('连续保持状态'),'达标');
 assert.equal(poll,undefined);
 assert.equal(events,undefined);
@@ -136,7 +169,7 @@ response = {segments:[saved(0,.8),saved(1,0,0)],
   summary:{mean_focus:.8,on_target_ratio:1,segments:[saved(0,.8),saved(1,0,0)]}};
 session = {status:'done',phase:'done',runs:[]};
 mount(); await settle();
-assert.equal(field('末段平均专注度'),'—','empty historic segment is missing, even if its old mean is zero');
+assert.equal(field('末段平均专注相关指数'),'—','empty historic segment is missing, even if its old mean is zero');
 assert.equal(field('连续保持状态'),'—');
 assert.equal(field('本段达标时间占比'),'—');
 ''')
@@ -167,7 +200,7 @@ Object.assign(missing.stats,{timing_spec:'neurofeedback-v3',valid_seconds:0,
 response={segments:[missing],summary:{spec:'neurofeedback-v3'}};
 session={status:'done',phase:'done',runs:[]};
 mount();await settle();
-assert.equal(field('末段平均专注度'),'—');
+assert.equal(field('末段平均专注相关指数'),'—');
 assert.equal(field('有效时间内达标率'),'—','all-bad data never becomes 0% success');
 assert.equal(field('有效时间覆盖率'),'0%');
 assert.equal(field('有效反馈秒数 / 实际时长'),'0.0s / 10.0s');
@@ -192,7 +225,7 @@ const current={segment:1,score:null,target:.5,usable:false,feedback_mode:'guided
   effective_time:progress,segment_stats:{duration_sec:10,n:1,valid_seconds:2,
     on_target_valid_ratio:1,valid_time_ratio:.2,on_target_ratio:.2,coverage_sufficient:false}};
 emit('feedback',current);
-assert.equal(field('当前专注度'),'—');
+assert.equal(field('当前专注相关指数'),'—');
 assert.equal(field('当前连续保持 / 本段最长'),'0.0s / 2.0s');
 assert.equal(field('有效时间内达标率'),'100%');
 assert.equal(field('有效时间覆盖率'),'20%');
@@ -206,14 +239,14 @@ session={status:'running',phase:'training',runs:[],runtime:{latest_feedback:curr
 mount();await settle();
 assert.equal(field('有效时间内达标率'),'100%');
 assert.equal(field('有效时间覆盖率'),'20%');
-assert.equal(field('当前专注度'),'—');
+assert.equal(field('当前专注相关指数'),'—');
 assert.equal(all(card('有效时长训练进度')).map(n=>n.textContent).join(' '),before);
 emit('effective_progress',{key:'training',effective_time:{...progress,
   elapsed_seconds:102,max_seconds:100,extension_seconds:52,quality_paused:false,completion_reason:'max_duration'}});
 const ended=all(card('有效时长训练进度')).map(n=>n.textContent).join(' ');
 assert.ok(ended.includes('数据不足'));
 assert.ok(ended.includes('1:42.0 / 1:40.0'),'actual elapsed may exceed bounded-read scheduling limit');
-assert.equal(field('当前专注度'),'—','progress events never fabricate scores');
+assert.equal(field('当前专注相关指数'),'—','progress events never fabricate scores');
 ''')
 
     def test_invalid_baseline_and_simulation_time_basis_are_explicit(self):

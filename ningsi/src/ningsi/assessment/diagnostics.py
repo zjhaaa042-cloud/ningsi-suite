@@ -56,8 +56,11 @@ def summarize_windows(rows):
 def render_html(report):
     """离线可打开、无需外部资源的可解释报告。所有输入文本转义。"""
     from ningsi.assessment.report import (_percentage, _seconds, _completion_label,
-        _effective_phase_lines, _effective_summary_lines, _effective_actual_elapsed)
-    d = report.get('extras', {}).get('signal_diagnostics') or {}
+        _effective_phase_lines, _effective_summary_lines, _effective_actual_elapsed, replay_source_lines)
+    extras = report.get('extras', {})
+    d = extras.get('signal_diagnostics') or {}
+    replay = extras.get('replay')
+    indicators = report.get('indicators', {}).get('summary') or {}
     q = report.get('quality') or {}
     total, accepted = d.get('total', q.get('windows_total', 0)), d.get('accepted', q.get('windows_usable', 0))
     def esc(value):
@@ -68,16 +71,34 @@ def render_html(report):
     parts = ['<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>脑电采集与行为分析报告</title>',
              '<style>body{font:16px/1.65 system-ui,sans-serif;background:#f2f5f4;color:#18383c;margin:auto;max-width:1100px;padding:32px}section{background:white;padding:24px;margin:20px 0;border-radius:14px}h1,h2{line-height:1.3}.muted{color:#52686c}.bar{display:grid;grid-template-columns:240px 1fr 60px;gap:12px;align-items:center;margin:10px 0}.track{background:#e8eeee;height:18px}.track>div{height:100%}.timeline{display:flex;flex-wrap:wrap;gap:3px}.window{width:12px;height:28px;background:#b35b45}.good{background:#246b73}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%}td,th{padding:9px;border-bottom:1px solid #ddd;text-align:left}@media(max-width:600px){body{padding:12px}.bar{grid-template-columns:140px 1fr 45px}}@media print{section{break-inside:avoid}body{background:white}}</style>',
              '<h1>脑电采集与行为分析报告</h1>',
-             '<p>描述性分析与个体评分分开呈现 · 工程阈值待验证 · 不作诊断</p>',
-             f'<section><h2>1. 数据可用性</h2><p>严格合格窗 <b>{accepted}/{total}</b>。' + ('本次没有可用个体脑电评分；仍可查看采集质量和行为表现。' if not report.get('indicators', {}).get('summary') else '个体指标见完整证据。') + '</p>',
+             '<p>描述性分析与个体评分分开呈现 · 工程阈值待验证 · 不作诊断</p>']
+    if replay:
+        parts.append('<section><h2>公开真人脑电回放</h2>')
+        parts.extend('<p>' + esc(line) + '</p>' for line in replay_source_lines(replay))
+        parts.append('</section><section><h2>任务态脑电指数</h2>')
+        for key, label in [('focus', '专注相关指数'), ('relax', '放松度'), ('load', '认知负荷')]:
+            stat = indicators.get(key)
+            if stat:
+                parts.append(f'<p>{label} {stat["mean"]:.4f}（{esc(stat["n"])} 个可评分窗）</p>')
+        if not indicators:
+            parts.append('<p>当前没有可评分的任务窗。可继续查看基线、质量和频带组成。</p>')
+        parts.append('</section>')
+    parts.extend([
+             f'<section><h2>1. 数据可用性</h2><p>严格合格窗 <b>{accepted}/{total}</b>。' + ('本次没有可用个体脑电评分；仍可查看采集质量和行为表现。' if not indicators else '个体指标见完整证据。') + '</p>',
              f'<p>{esc(d.get("scope", ""))}</p><p class="muted">{esc(d.get("note", "旧版未保存完整逐窗数据，以下仅展示已有汇总，不能重建频谱或重新判定质量。"))}</p>',
-             bar('严格合格', accepted, total), bar('排除', max(0,total-accepted),total,'#b35b45')]
-    observations = report.get('extras', {}).get('state_observations')
+             bar('严格合格', accepted, total), bar('排除', max(0,total-accepted),total,'#b35b45')])
+    for key, label in [('baseline_eyes_open', '睁眼'), ('baseline_eyes_closed', '闭眼')]:
+        base = extras.get(key) or {}
+        quality = base.get('quality', {})
+        parts.append(f'<p>{label}基线：{"合格" if base.get("valid") else "不合格/未采集"}；有效覆盖 {esc(quality.get("usable_seconds", "未知"))} 秒；有效窗 {esc(base.get("n_windows",0))}。阈值：至少30秒、5窗、60%有效比例。</p>')
+    parts.append('</section>')
+    observations = extras.get('state_observations')
     if observations:
-        parts.append('</section><section><h2>当下压力与情绪</h2>')
+        parts.append('<section><h2>当下压力与情绪</h2>')
         parts.extend('<p>' + esc(line) + '</p>' for line in observations['summary_lines'])
-    effective = report.get('extras', {}).get('effective_time')
-    ten = effective or report.get('extras', {}).get('ten_min')
+        parts.append('</section>')
+    effective = extras.get('effective_time')
+    ten = effective or extras.get('ten_min')
     if ten:
         parts.append('<section><h2>' + ('有效时长反馈训练' if effective else '十分钟测试＋训练') + '</h2><p>' + esc(ten.get('note') or '描述性训练记录，不代表已验证的训练效果。') + '</p>')
         if effective:
@@ -123,11 +144,7 @@ def render_html(report):
                     + '；结束原因 ' + esc(_completion_label(timing.get('completion_reason'))) + '</p>')
             parts.append('<p>训练轮 ' + esc(segment['index']) + '（协议秒）：' + esc(segment.get('mode_seconds', {})) + '；未反馈协议秒数 ' + esc(segment.get('unobserved_seconds', '未知')) + '</p>')
         parts.append('<p>实际采集耗时 ' + esc(ten.get('elapsed_sec')) + ' 秒；倍率 ' + esc(ten.get('time_scale')) + '</p></section>')
-    for key,label in [('baseline_eyes_open' ,'睁眼'),('baseline_eyes_closed','闭眼')]:
-        base = report.get('extras',{}).get(key) or {}
-        quality = base.get('quality',{})
-        parts.append(f'<p>{label}基线：{"合格" if base.get("valid") else "不合格/未采集"}；有效覆盖 {esc(quality.get("usable_seconds", "未知"))} 秒；有效窗 {esc(base.get("n_windows",0))}。阈值：至少30秒、5窗、60%有效比例。</p>')
-    parts.append('</section><section><h2>2. 窗口与排除原因</h2><p>绿色合格，橙色排除；悬停查看阶段及原因。各原因可重叠，计数之和可能超过窗数。</p><div class="timeline">')
+    parts.append('<section><h2>2. 窗口与排除原因</h2><p>绿色合格，橙色排除；悬停查看阶段及原因。各原因可重叠，计数之和可能超过窗数。</p><div class="timeline">')
     for row in d.get('windows',[]):
         label = f"{row.get('phase','')} / {row.get('index','')} / " + ', '.join(REASONS.get(r,r) for r in row.get('reasons',row.get('unusable_reasons',[])))
         parts.append(f'<span class="window {"good" if row.get("usable") else ""}" title="{esc(label)}"></span>')
@@ -156,6 +173,8 @@ def render_html(report):
     sart = report.get('behavior',{}).get('sart') or {}
     if sart:
         parts.append(f'<p>SART：正式 {esc(sart.get("trials"))} 试次；Go正确率 {esc(sart.get("go_accuracy"))}（不是全任务正确率）；No-Go误按 {esc(sart.get("commission_errors"))}/{esc(sart.get("nogo_trials"))}；漏按 {esc(sart.get("omission_errors"))}。</p>')
+    if replay and not pvt and not sart:
+        parts.append('<p>SART、PVT-B 和 SAS/SDS 量表均未采集。</p>')
     parts.append('</section><section><h2>5. 结论与下一步</h2>')
     parts.append(f'<p>{esc((report.get("assessment") or {}).get("conclusion", "尚无联合结论"))}</p>')
     for advice in (report.get('assessment') or {}).get('advice',[]):

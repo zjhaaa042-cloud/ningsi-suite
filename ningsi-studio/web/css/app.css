@@ -281,6 +281,7 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
 
 .metric-row { display: grid; grid-template-columns: 74px 1fr 84px; gap: 10px; align-items: center; }
 .metric-row__value { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.live-index-card .metric-row { grid-template-columns: 8em minmax(0, 1fr) 4em; }
 
 /* ------------------------------------------------------------ 当前该做什么 */
 /* ------------------------------------------ 会话流程：任务视图 / 总览切换
@@ -1003,6 +1004,11 @@ button.wizard__step--done:hover { border-color:var(--text-2); }
 .training-hold progress { display:block; width:100%; height:9px; margin-top:10px; accent-color:var(--text-2); }
 .training-page .card__sub { max-width:65ch; line-height:1.7; }
 .report-summary h2 { font-size:24px; line-height:1.5; margin:10px 0 14px; }
+.report-summary__evidence { display:grid; grid-template-columns:minmax(0,1.4fr) repeat(2,minmax(0,1fr)); gap:12px; margin:16px 0; }
+.report-summary__evidence > section { min-width:0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; }
+.report-summary__evidence h3 { font-size:16px; margin:0 0 8px; }
+.report-summary__evidence p { margin:4px 0; }
+@media (max-width:760px) { .report-summary__evidence { grid-template-columns:minmax(0,1fr); } }
 .summary-note { padding:10px 12px; border-left:3px solid var(--line-strong); background:var(--surface-2); }
 .completed-details { background:var(--surface); }
 @media (max-width:950px) { .training-overview { grid-template-columns:minmax(0,1fr); } }

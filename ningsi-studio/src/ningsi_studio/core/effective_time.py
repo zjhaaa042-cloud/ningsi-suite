@@ -229,7 +229,8 @@ def training_round(r, trainer, base, index, run_id):
             state["baseline_valid"] = base.valid
             _emit_progress(r, "training", state, segment=index+1)
             payload = {"segment": index+1, "feedback_mode": mode, "mode_label": LABELS[mode],
-                       "heatmap_cell": heatmap, "affect_model": r.current_affect(),
+                       "heatmap_cell": heatmap, "analysis_window": r.latest_analysis_window,
+                       "affect_model": r.current_affect(),
                        "attention_model": step.attention_model, "grade": step.graded["grade"],
                        "score": smooth, "target": trainer.target if smooth is not None else None,
                        "usable": smooth is not None, "on_target": smooth is not None and smooth >= trainer.target,

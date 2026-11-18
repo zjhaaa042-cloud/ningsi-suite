@@ -26,6 +26,41 @@ import {
   metricBar,
 } from '../charts.js';
 
+const REASON_LABELS = {
+  clock_unsynchronized: '数据时间戳未同步，请检查采集程序的推流状态。',
+  timestamp_gap_over_100ms: '时间戳存在间断，请检查推流是否停顿。',
+  nonmonotonic_timestamps: '时间戳重复或倒退，请检查采集程序。',
+  sample_rate_mismatch_over_5pct: '时标推算的采样率偏离标称值，请检查流配置。',
+  sample_gap_in_filter_history: '滤波需要的信号历史不连续，请等待新数据。',
+  preprocessing_warmup: '正在积累滤波需要的信号历史。',
+  baseline_invalid: '睁眼基线尚未通过窗数、有效时长或可用比例审核，请检查电极并完成基线采集。',
+  baseline_configuration_mismatch: '当前采样率或通道数与基线不一致，请重新建立基线。',
+  baseline_pending: '正在采集个体基线，暂不显示评分。',
+  no_data: '未收到新鲜脑电数据，请检查设备连接和采集程序。',
+  signal_too_short: '脑电样本不足，正在等待缓冲。',
+  non_finite_signal: '脑电包含无效数值，请检查采集端。',
+  amplitude: '波幅过大，请保持静止并检查电极接触。',
+  flat_channel: '通道接近平直，请检查电极接触。',
+  channel_span: '通道差异过大，请检查电极。',
+  emg: '肌电干扰偏高，请放松面部和肩部。',
+  muscle_burst: '检测到短时高频干扰，请放松下颌和额部。',
+  ocular_transient: '检测到显著慢瞬态，请检查眼动和电极接触。',
+  blink_uncalibrated: '检测到疑似眨眼，本窗暂停更新；可在开始页完成个人眨眼校准。',
+  blink_boundary: '眨眼位于窗口边缘，数据不足以可信校正，本窗暂停更新。',
+  blink_dense: '眨眼密集或重叠，本窗暂停更新。',
+  blink_calibration_mismatch: '设备或校准配置已变化，请重新做个人眨眼校准。',
+  blink_shape_mismatch: '波形与个人眨眼模板不匹配，本窗暂停更新。',
+  blink_channel_mismatch: '两路幅度关系与个人眨眼校准不同，本窗暂停更新。',
+  blink_residual: '眨眼校正后仍有残留干扰，本窗暂停更新。',
+  blink_signal_fault: '原始信号存在接触或饱和异常，本窗暂停更新。',
+  contact_dropout: '原始信号疑似接触丢失或贴轨，本窗暂停更新。',
+  electrode_step: '电极信号突跳，请保持静止并检查电极接触。',
+  motion_reference_excursion: '同步加速度显示明显活动，本窗暂停评分。',
+  motion_reference_unavailable: '所选动作参考缺失或未同步，请检查动作流名、单位及连接。',
+  emg_reference_burst: '同步肌电参考显示明显活动，本窗暂停评分。',
+  eog: '低频或眼动干扰偏高，请减少眨眼和头部运动。',
+};
+
 const INDICATORS = [
   { key: 'focus', label: '专注相关指数' },
   { key: 'relax', label: '放松度' },
@@ -107,10 +142,9 @@ export function render(container, ctx) {
 
   const local = {
     uuid,
-    scores: {},
+    analysisWindow: null,
+    monitorSummary: {},
     attentionModel: null,
-    indicatorReason: '等待采集并建立个体基线',
-    blinkNote: '',
     signal: null,
     cells: [],
     legend: [],
@@ -141,6 +175,7 @@ export function render(container, ctx) {
 
   /* ---------------------------------------------------------- 页面分区 */
   const stateHost = el('div');
+  const signalReception = el('p', { class: 'muted' });
   const metricHost = el('div');
   const modelHost = el('div');
   const signalHost = el('div');
@@ -247,6 +282,7 @@ export function render(container, ctx) {
     ctx.store.setState({ currentSession: session });
     markEnded();                 // 幂等：已降级时直接返回，下面仍要刷新状态卡与信号面板
     renderState();
+    renderMetrics();
     renderSignal({ force: true });
   };
 
@@ -271,6 +307,7 @@ export function render(container, ctx) {
         el('div', {}, [
           el('p', { class: 'muted', text: '数据源' }),
           el('p', { text: `${pick(session, 'device', DASH)}（${pick(ctx.store.state.sessionRuntime, 'source_kind', null) || pick(session, 'source', null) || DASH}）` }),
+          signalReception,
         ]),
         el('div', {}, [
           el('p', { class: 'muted', text: '已接收窗' }),
@@ -310,6 +347,13 @@ export function render(container, ctx) {
     ])));
   };
 
+  const updateAnalysisWindow = (candidate) => {
+    if (Number.isFinite(candidate?.index) && candidate.index >= (local.analysisWindow?.index ?? 0)) {
+      local.analysisWindow = candidate.index === local.analysisWindow?.index
+        ? { ...local.analysisWindow, ...candidate } : candidate;
+    }
+  };
+
   const renderMetrics = () => {
     const modelCard = attentionPredictionCard(local.attentionModel);
     modelHost.replaceChildren(...(modelCard ? [modelCard] : []));
@@ -317,38 +361,81 @@ export function render(container, ctx) {
     metricHost.textContent = '';
     const alerts = alertsConfig();
     const assess = assessConfig();
-    const summaryStat = (name) => {
-      const value = local.scores[name];
-      return typeof value === 'number' ? value : null;
-    };
+    const phase = pick(ctx.store.state.currentSession, 'phase', null);
+    const latest = local.analysisWindow;
+    const current = latest && (local.ended || !phase || !latest.phase || latest.phase === phase) ? latest : null;
+    const scores = current?.scores || {};
+    const windowSec = pick(configNow(), 'window_sec', 4);
+    const summary = INDICATORS.filter(({ key }) => Number.isFinite(local.monitorSummary[key]?.mean))
+      .map(({ key, label }) => `${label} ${fmtNum(local.monitorSummary[key].mean, 2)}`);
     const body = el('div', { class: 'stack' });
-    if (local.indicatorReason && !Object.values(local.scores).some(value => Number.isFinite(value))) {
-      body.append(el('p', { class: 'muted', text: local.indicatorReason }));
+    if (current) {
+      const reasons = list(current.reasons);
+      const timing = reasons.some(code => /^(clock_|timestamp_|nonmonotonic_timestamp|sample_rate_mismatch|sample_gap)/.test(code));
+      const noSamples = reasons.includes('no_data');
+      const signal = noSamples ? '未收到新鲜数据' : reasons.includes('signal_too_short') ? '样本不足'
+        : timing ? '时标待核对' : current.usable === true ? '本窗通过质控'
+          : current.usable === false ? '本窗未通过质控' : '本窗质控状态未知';
+      const baseline = current.baseline_valid === true ? '已建立'
+        : current.baseline_valid === false ? '未达基线要求' : Number.isFinite(scores.focus) ? '已用于评分' : '等待建立';
+      const stage = list(configNow().phases).find(item => item.key === (current.phase || phase))?.label;
+      body.append(el('div', { class: 'grid grid--3' }, [
+        el('p', { text: `${local.ended ? '最后记录窗' : '最近分析窗'}${stage ? ` · ${stage}` : ''} · 第 ${fmtInt(current.index)} 窗（${fmtSeconds(windowSec, 0)}）` }),
+        el('p', { text: `信号 · ${signal}` }),
+        el('p', { text: `个人基线 · ${baseline}` }),
+      ]));
+      const recent = local.cells.slice(-15).filter(cell => cell.phase === current.phase
+        && cell.t <= current.t_end && cell.t - windowSec >= current.t_end - 30);
+      if (recent.length && recent.every(cell => typeof cell.signal_usable === 'boolean')) {
+        const usableCount = recent.filter(cell => cell.signal_usable).length;
+        body.append(el('p', { class: 'muted', text: `本阶段最近 30 秒（分析时标）· ${usableCount}/${recent.length} 窗通过信号质控` }));
+      }
+      if (!Number.isFinite(scores.focus)) {
+        const codes = [...new Set([...reasons, current.indicator_reason].filter(code => code && code !== 'window_unusable'))];
+        const detail = codes.map(reason => REASON_LABELS[reason] || `指标暂不可用：${reason}`).join(' ');
+        body.append(el('p', { class: 'muted', text: detail ? `暂停评分 · ${detail}` : '暂停评分 · 当前窗口未形成可用指数。' }));
+      }
+      const basis = current.focus_basis;
+      if (Number.isFinite(scores.focus) && Number.isFinite(basis?.window_log_ratio) && Number.isFinite(basis.baseline_log_ratio)) {
+        body.append(el('p', { class: 'muted', text:
+          `本窗 β/θ ${fmtNum(Math.exp(basis.window_log_ratio), 3)} · 睁眼基线 β/θ ${fmtNum(Math.exp(basis.baseline_log_ratio), 3)} · 差值（对数） ${fmtNum(basis.window_log_ratio - basis.baseline_log_ratio, 3)}` }));
+      }
+      const correctedBlinks = current.blink_corrected_events ?? current.quality?.metrics?.artifact_control?.blink_control?.corrected_events;
+      if (correctedBlinks > 0) {
+        body.append(el('p', { class: 'muted', text: `本窗已局部校正 ${correctedBlinks} 次可信眨眼。评分以校正后的质量检查为准。` }));
+      }
+    } else {
+      body.append(el('p', { class: 'muted', text: local.ended ? '可查看已保存的监测阶段汇总与逐窗记录。'
+        : '等待当前阶段的分析窗。可在下方波形面板查看信号是否正在更新。' }));
     }
-    if (local.blinkNote) body.append(el('p', { class: 'muted', text: local.blinkNote }));
-    body.append(el('p', { class: 'muted', text: '专注相关脑电指数表示相对个人基线的变化，不是专注概率。评分与预警阈值为工程设定，待验证。' }));
-    body.append(metricBar('专注相关脑电指数', summaryStat('focus'), {
+    body.append(metricBar('专注相关脑电指数', scores.focus ?? null, {
       threshold: pick(alerts, 'low_focus.threshold'),
       thresholdLabel: `低专注阈值 ${fmtNum(pick(alerts, 'low_focus.threshold'), 2)}（持续 ${fmtSeconds(pick(alerts, 'low_focus.sustain_sec'), 0)}）`,
       fillClass: 'fill-0',
     }));
-    body.append(metricBar('放松度', summaryStat('relax'), {
+    body.append(metricBar('放松相关指数', scores.relax ?? null, {
       threshold: pick(assess, 'relax_low'),
       thresholdLabel: `放松度参考下限 ${fmtNum(pick(assess, 'relax_low'), 2)}`,
       fillClass: 'fill-1',
     }));
-    body.append(metricBar('认知负荷', summaryStat('load'), {
+    body.append(metricBar('认知负荷相关指数', scores.load ?? null, {
       threshold: pick(alerts, 'high_load.threshold'),
       thresholdLabel: `高负荷阈值 ${fmtNum(pick(alerts, 'high_load.threshold'), 2)}（持续 ${fmtSeconds(pick(alerts, 'high_load.sustain_sec'), 0)}）`,
       fillClass: 'fill-2',
     }));
+    if (summary.length) {
+      const count = local.monitorSummary.focus?.n;
+      body.append(el('p', { class: 'muted', text:
+        `监测阶段均值${Number.isFinite(count) ? `（${fmtInt(count)} 个评分窗）` : ''} · ${summary.join(' · ')}` }));
+    }
     body.append(el('div', { class: 'grid grid--3' }, [
       el('p', { class: 'muted', text: `预警阈值：专注 < ${fmtNum(pick(alerts, 'low_focus.threshold'), 2)}；负荷 > ${fmtNum(pick(alerts, 'high_load.threshold'), 2)}；信号可用窗比例 < ${fmtNum(pick(alerts, 'poor_signal.valid_ratio_min'), 2)}` }),
       el('p', { class: 'muted', text: `评估门槛：专注低位 ${fmtNum(pick(assess, 'focus_low'), 2)} / 高位 ${fmtNum(pick(assess, 'focus_high'), 2)}；负荷高位 ${fmtNum(pick(assess, 'load_high'), 2)}` }),
       el('p', { class: 'muted', text: `窗口 ${fmtNum(pick(configNow(), 'window_sec'), 1)} s / 步长 ${fmtNum(pick(configNow(), 'step_sec'), 1)} s` }),
     ]));
     metricHost.append(card('指标与阈值', body, {
-      sub: '阈值线为接口给出的判定门槛；每条进度条上的虚线即阈值位置',
+      class: 'live-index-card',
+      sub: '脑电相关指数使用 0–1 刻度，0.50 对应个人基线。虚线为待验证的工程阈值。',
     }));
   };
 
@@ -423,6 +510,9 @@ export function render(container, ctx) {
       : (local.signalLive
         ? '信号在收数'
         : (local.signalError ? `信号流异常：${local.signalError}` : '等待信号'));
+    const reception = local.ended ? '数据接收已结束' : local.signalLive ? '数据流正在更新'
+      : local.signalError ? '数据流暂不可用' : '等待新数据';
+    if (signalReception.textContent !== reception) signalReception.textContent = reception;
     signalPanel.badge.classList.toggle('badge--strong', local.signalLive);
     const statusBits = [];
     if (frame) {
@@ -523,6 +613,7 @@ export function render(container, ctx) {
       local.missingColor = data.missing_color || local.missingColor;
       renderHeatmap();
       renderState();
+      renderMetrics();
     } catch (error) {
       if (ctx.signal.aborted) return;
       if (isNotFound(error)) {
@@ -551,11 +642,10 @@ export function render(container, ctx) {
       session.progress = data.progress;
       session.error = data.error || session.error || null;
       ctx.store.setState({ currentSession: session, alerts: list(data.alerts) });
-      const summary = data.indicator_summary || {};
-      for (const item of INDICATORS) {
-        const mean = pick(summary, `${item.key}.mean`);
-        if (typeof mean === 'number' && Number.isFinite(mean)) local.scores[item.key] = mean;
+      if (data.indicator_summary && Object.keys(data.indicator_summary).length) {
+        local.monitorSummary = data.indicator_summary;
       }
+      updateAnalysisWindow(data.analysis_window);
       renderState();
       renderMetrics();
       renderAlerts();
@@ -586,10 +676,8 @@ export function render(container, ctx) {
       sessionRuntime: pick(data, 'runtime', null),
       alerts: list(pick(data, 'alerts', [])),
     });
-    const summary = pick(data, 'indicator_summary', {}) || {};
-    for (const item of INDICATORS) {
-      const mean = pick(summary, `${item.key}.mean`);
-      if (typeof mean === 'number') local.scores[item.key] = mean;
+    if (data.indicator_summary && Object.keys(data.indicator_summary).length) {
+      local.monitorSummary = data.indicator_summary;
     }
     // Detail and live requests may finish in either order; the persisted error is authoritative
     // when an ended runtime no longer has its original error in /live.
@@ -630,46 +718,9 @@ export function render(container, ctx) {
       case 'window': {
         checkinPanel.update({ model: payload.affect_model || null });
         local.attentionModel = payload.attention_model || null;
-        const reasonLabels = {
-          baseline_invalid: '睁眼基线尚未通过窗数、有效时长或可用比例审核，请检查电极并完成基线采集。',
-          baseline_configuration_mismatch: '当前采样率或通道数与基线不一致，请重新建立基线。',
-          baseline_pending: '正在采集个体基线，暂不显示评分。',
-          no_data: '未收到新鲜脑电数据，请检查设备连接和采集程序。',
-          signal_too_short: '脑电样本不足，正在等待缓冲。',
-          non_finite_signal: '脑电包含无效数值，请检查采集端。',
-          amplitude: '波幅过大，请保持静止并检查电极接触。',
-          flat_channel: '通道接近平直，请检查电极接触。',
-          channel_span: '通道差异过大，请检查电极。',
-          emg: '肌电干扰偏高，请放松面部和肩部。',
-          muscle_burst: '检测到短时高频干扰，请放松下颌和额部。',
-          ocular_transient: '检测到显著慢瞬态，请检查眼动和电极接触。',
-          blink_uncalibrated: '检测到疑似眨眼，本窗暂停更新；可在开始页完成个人眨眼校准。',
-          blink_boundary: '眨眼位于窗口边缘，数据不足以可信校正，本窗暂停更新。',
-          blink_dense: '眨眼密集或重叠，本窗暂停更新。',
-          blink_calibration_mismatch: '设备或校准配置已变化，请重新做个人眨眼校准。',
-          blink_shape_mismatch: '波形与个人眨眼模板不匹配，本窗暂停更新。',
-          blink_channel_mismatch: '两路幅度关系与个人眨眼校准不同，本窗暂停更新。',
-          blink_residual: '眨眼校正后仍有残留干扰，本窗暂停更新。',
-          blink_signal_fault: '原始信号存在接触或饱和异常，本窗暂停更新。',
-          contact_dropout: '原始信号疑似接触丢失或贴轨，本窗暂停更新。',
-          electrode_step: '电极信号突跳，请保持静止并检查电极接触。',
-          motion_reference_excursion: '同步加速度显示明显活动，本窗暂停评分。',
-          motion_reference_unavailable: '所选动作参考缺失或未同步，请检查动作流名、单位及连接。',
-          emg_reference_burst: '同步肌电参考显示明显活动，本窗暂停评分。',
-          eog: '低频或眼动干扰偏高，请减少眨眼和头部运动。',
-        };
-        local.indicatorReason = Object.keys(payload.scores || {}).length ? ''
-          : (payload.reasons?.length ? payload.reasons : [payload.indicator_reason || 'baseline_pending'])
-            .map(reason => reasonLabels[reason] || `指标暂不可用：${reason}`).join(' ');
-        const blink = payload.quality?.metrics?.artifact_control?.blink_control;
-        local.blinkNote = blink?.corrected_events > 0
-          ? `本窗已局部校正 ${blink.corrected_events} 次可信眨眼；评分仍以校正后的质量检查为准。` : '';
+        updateAnalysisWindow(payload);
         local.windowIndex = Number(payload.index ?? local.windowIndex);
         const scores = payload.scores || {};
-        for (const item of INDICATORS) {
-          const value = scores[item.key];
-          local.scores[item.key] = typeof value === 'number' && Number.isFinite(value) ? value : null;
-        }
         if (payload.signal && list(payload.signal.samples).length) {
           local.signal = { samples: payload.signal.samples, srate: payload.signal.srate, channels: payload.signal.channels, tEnd: payload.t_end };
         }
@@ -681,7 +732,7 @@ export function render(container, ctx) {
         const fallbackCell = { ...band, t: payload.t_end, signal_usable: payload.usable ?? null,
           status: band.index >= 0 ? 'scored' : payload.usable === false ? 'signal_limited'
             : String(payload.indicator_reason || '').startsWith('baseline_') && payload.usable === true ? 'baseline_pending' : 'unscored',
-          reason_codes: list(payload.reasons), reason_labels: list(payload.reasons).map(reason => reasonLabels[reason] || reason),
+          reason_codes: list(payload.reasons), reason_labels: list(payload.reasons).map(reason => REASON_LABELS[reason] || reason),
         };
         if (fallbackCell.status === 'baseline_pending') fallbackCell.label = '信号合格 · 待基线';
         else if (fallbackCell.status === 'unscored') fallbackCell.label = '未评分（原因未记录）';
@@ -705,26 +756,20 @@ export function render(container, ctx) {
         break;
       }
       case 'monitor': {
-        const summary = payload.summary || {};
-        const indicators = summary.indicators || summary;
-        for (const item of INDICATORS) {
-          const mean = pick(indicators, `${item.key}.mean`);
-          if (typeof mean === 'number') local.scores[item.key] = mean;
-        }
+        local.monitorSummary = payload.summary?.indicators || payload.summary || {};
         renderMetrics();
         break;
       }
       case 'feedback': {
+        updateAnalysisWindow(payload.analysis_window);
         if (payload.heatmap_cell) {
           local.cells = mergeHeatmapCells(local.cells, [payload.heatmap_cell]);
           renderHeatmap();
           renderState();
         }
         checkinPanel.update({ model: payload.affect_model || null });
-        if (payload.attention_model) {
-          local.attentionModel = payload.attention_model;
-          renderMetrics();
-        }
+        if (payload.attention_model) local.attentionModel = payload.attention_model;
+        renderMetrics();
         local.lastFeedback = payload;
         renderExtra();
         break;
@@ -747,6 +792,7 @@ export function render(container, ctx) {
         if (typeof payload.progress === 'number') session.progress = payload.progress;
         ctx.store.setState({ currentSession: session });
         renderState();
+        renderMetrics();
         break;
       }
       case 'progress': {
@@ -806,7 +852,7 @@ export function render(container, ctx) {
     local.lastFrame = frame;
     if (frame.spectrum && list(frame.spectrum.freqs).length) local.spectrum = frame.spectrum;
     if (frame.bands && Object.keys(frame.bands).length) local.bands = frame.bands;
-    local.signalLive = frame.realtime !== false;
+    local.signalLive = frame.realtime !== false && frame.samples > 0;
     local.signalError = frame.note || null;
     // 实测刷新率：每秒结算一次，便于确认"高频"是否真的到了
     const now = Date.now();
@@ -826,15 +872,13 @@ export function render(container, ctx) {
     points: 1200,
     onFrame: handleFrame,
     onOpen: () => {
-      local.signalLive = true;
       local.signalError = null;
+      renderSignal();
     },
     onError: (_error, info) => {
-      // 会话不在运行中（服务端 409）时不必反复重连，直接给出提示
-      if (!info.opened) {
-        local.signalLive = false;
-        local.signalError = local.signalError || '会话未运行或信号流不可用（HTTP 409，已停止重连）';
-      }
+      local.signalLive = false;
+      local.signalError = info.opened ? '信号流连接中断，正在重连。'
+        : '会话未运行或信号流不可用（HTTP 409，已停止重连）';
       renderSignal();
     },
   });

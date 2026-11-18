@@ -159,9 +159,10 @@ export async function render(container, ctx) {
       { title: '进度', align: 'right', render: (row) => fmtPercent(row.progress) },
       { title: '数据来源', render: (row) => {
         const source = row.source || row.device || '';
+        if (source.startsWith('replay:')) return '公开真人录波';
         return source.startsWith('sim') ? `模拟 · ${source}` : source || DASH;
       } },
-      { title: '时间倍率', align: 'right', render: (row) => fmtNum(row.time_scale, 2) },
+      { title: '时间倍率', align: 'right', render: (row) => (row.source || '').startsWith('replay:') ? DASH : fmtNum(row.time_scale, 2) },
       { title: '预警', align: 'right', render: (row) => fmtInt(row.alert_count) },
       { title: '开始时间', render: (row) => fmtTime(row.started_at) },
       {

@@ -70,6 +70,46 @@ def _lsl_note(descriptor: dict, name: str, srate: float) -> str:
             f"标签 {descriptor.get('channel_labels')}）")
 
 
+def condition_eeg_samples(raw, expected: int, srate: float, *, labels=(), units=(),
+                          research_scale=1.0, operator_scale=None, observed_srate=None,
+                          personal_blink=None):
+    """Apply Studio's EEG filtering and artifact gate to a contiguous sample block."""
+    pick, _ = channel_layout(labels, len(raw))
+    scales = voltage_scales(units, len(raw), research_scale, pick, operator_scale)
+    values = raw * np.asarray(scales)[:, None]
+    blink_evidence = {}
+    if len(pick) == 2:
+        from ningsi.signal.blinks import process_blinks
+        selected_labels = [labels[i] if i < len(labels) else f"Ch{i+1}" for i in pick]
+        try:
+            blink = (personal_blink(values[pick]) if personal_blink is not None else
+                     process_blinks(values[pick], srate, channel_labels=selected_labels))
+            values[pick] = blink.cleaned_uv
+            blink_evidence = blink.as_dict(start_index=max(0, values.shape[1] - expected))
+        except ValueError as exc:
+            blink_evidence = {"state": "invalid", "reasons": ["blink_calibration_mismatch"],
+                              "detail": str(exc), "corrected_events": 0}
+    values -= values.mean(axis=1, keepdims=True)
+    filtered = []
+    log = None
+    for channel in values:
+        wave, log = run_preprocess(channel, srate)
+        filtered.append(wave)
+    wave, evidence = process_live_artifacts(np.vstack(filtered), raw, srate, expected, labels, units,
+                                            research_scale, operator_scale, blink_evidence=blink_evidence)
+    conditioning = {
+        "spec": CONDITION_SPEC, "dc_removal": DC_REMOVAL,
+        "chain": log.as_dict() if log is not None else {},
+        "srate": round(float(srate), 3),
+        "observed_srate": None if observed_srate is None else round(float(observed_srate), 3),
+        "context_samples": int(values.shape[1]), "window_samples": int(wave.shape[1]),
+        "expected_samples": int(expected), "scale_to_uv": research_scale,
+        "channel_scale_to_uv": [scales[i] for i in evidence["eeg_source_indices"]],
+        "artifact_spec": ARTIFACT_SPEC, "blink_control": blink_evidence,
+    }
+    return wave, evidence, conditioning
+
+
 #: 真机信号调理口径的一句话说明（界面表格脚注 / 报告「采集调理」行共用）。
 CONDITION_NOTE = (f"真实设备信号按 {CONDITION_SPEC} 调理：逐通道去直流 → 0.5 Hz 去漂移 → "
                   f"50/60 Hz 陷波 → 45 Hz 低通。按 {ARTIFACT_SPEC} 检查瞬态与肌电；"
@@ -79,7 +119,7 @@ CONDITION_NOTE = (f"真实设备信号按 {CONDITION_SPEC} 调理：逐通道去
 @dataclass
 class SourceInfo:
     key: str
-    kind: str            # lsl | sim
+    kind: str            # lsl | sim | replay
     srate: float
     channels: int
     device: str
@@ -441,64 +481,30 @@ class ManagedLslSource:
                 if self.operator_eeg_scale_to_uv not in (None, documented["scale_to_uv"]):
                     raise ValueError("当前 EEG 换算倍率与 BSense-R 手册配置不一致")
                 self.operator_eeg_scale_to_uv = documented["scale_to_uv"]
-        pick, _ = channel_layout(labels, len(raw))
-        scales = voltage_scales(units, len(raw), self.research_scale_to_uv, pick, self.operator_eeg_scale_to_uv)
-        x = raw * np.asarray(scales)[:, None]
-        blink_evidence = {}
-        if len(pick) == 2:
-            from ningsi.signal.blinks import process_blinks
-            calibration, montage = None, ""
-            selected_labels = [labels[i] if i < len(labels) else f"Ch{i+1}" for i in pick]
-            try:
-                if self.blink_binding:
-                    from .blink_control import verify_binding
-                    calibration, _, _, selected_labels, montage = verify_binding(self.blink_binding, self)
-                    buffer = self._manager.buffer("eeg")
-                    if buffer is None:
-                        raise ValueError("设备已断开，请重新连接并校准")
-                    buffer_id = buffer.buffer_id
-                    generation = buffer.connection_generation
-                    if self._blink_buffer_id is not None and self._blink_buffer_id != buffer_id:
-                        raise ValueError("设备已重连，请重新做个人眨眼校准")
-                    if self._blink_connection_generation is not None and self._blink_connection_generation != generation:
-                        raise ValueError("设备已重连，请重新做个人眨眼校准")
-                    self._blink_buffer_id = buffer_id
-                    self._blink_connection_generation = generation
-                blink = process_blinks(x[pick], self.srate, calibration,
-                                       channel_labels=selected_labels, montage_id=montage)
-                x[pick] = blink.cleaned_uv
-                # Fit with all acquired conditioning context; eligibility and
-                # coverage describe only the same suffix returned for scoring.
-                blink_evidence = blink.as_dict(start_index=max(0, x.shape[1] - expected))
-            except ValueError as exc:
-                blink_evidence = {"state": "invalid", "reasons": ["blink_calibration_mismatch"],
-                                  "detail": str(exc), "corrected_events": 0}
-        x = x - x.mean(axis=1, keepdims=True)
-        filtered = []
-        log = None
-        for channel in x:
-            out, log = run_preprocess(channel, self.srate)
-            filtered.append(out)
-        y, evidence = process_live_artifacts(np.vstack(filtered), raw, self.srate, expected, labels,
-                                             units, self.research_scale_to_uv, self.operator_eeg_scale_to_uv,
-                                             blink_evidence=blink_evidence)
-        self._last_condition = {
-            "spec": CONDITION_SPEC,
-            "dc_removal": DC_REMOVAL,
-            "chain": log.as_dict() if log is not None else {},
-            "srate": round(float(self.srate), 3),
-            # 声明采样率与实际投递速率不一致时，频率轴会按声明值解释：这里把实测值一并留痕，
-            # 现场可以据此判断"频带是否可信"（本设备实测 248.5 Hz / 声明 250 Hz，偏差 0.6%）。
-            "observed_srate": (None if observed_srate is None else round(float(observed_srate), 3)),
-            "context_samples": int(x.shape[1]),
-            "window_samples": int(y.shape[1]),
-            "expected_samples": int(expected),
-            "scale_to_uv": self.research_scale_to_uv,
-            "channel_scale_to_uv": [scales[i] for i in evidence["eeg_source_indices"]],
-            "artifact_spec": ARTIFACT_SPEC,
-            "blink_control": blink_evidence,
-        }
+        y, evidence, self._last_condition = condition_eeg_samples(
+            raw, expected, self.srate, labels=labels, units=units,
+            research_scale=self.research_scale_to_uv, operator_scale=self.operator_eeg_scale_to_uv,
+            observed_srate=observed_srate,
+            personal_blink=self._apply_personal_blink if self.blink_binding else None,
+        )
         return (y, evidence) if return_artifacts else y
+
+    def _apply_personal_blink(self, values):
+        from ningsi.signal.blinks import process_blinks
+        from .blink_control import verify_binding
+
+        calibration, _, _, labels, montage = verify_binding(self.blink_binding, self)
+        buffer = self._manager.buffer("eeg")
+        if buffer is None:
+            raise ValueError("设备已断开，请重新连接并校准")
+        buffer_id, generation = buffer.buffer_id, buffer.connection_generation
+        if self._blink_buffer_id is not None and self._blink_buffer_id != buffer_id:
+            raise ValueError("设备已重连，请重新做个人眨眼校准")
+        if self._blink_connection_generation is not None and self._blink_connection_generation != generation:
+            raise ValueError("设备已重连，请重新做个人眨眼校准")
+        self._blink_buffer_id = buffer_id
+        self._blink_connection_generation = generation
+        return process_blinks(values, self.srate, calibration, channel_labels=labels, montage_id=montage)
 
     def analysis_window(self, state="rest", **kwargs):
         """取同一批样本及其伪迹处理记录，避免并发显示帧覆盖评分依据。"""

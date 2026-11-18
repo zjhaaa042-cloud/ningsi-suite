@@ -101,6 +101,19 @@ def _overlapping_windows(extras) -> bool:
     return str(extras.get("source_kind") or "") == "lsl" and scale < 0.2
 
 
+def replay_source_lines(source: dict) -> list[str]:
+    channels = " / ".join(source["channel_labels"])
+    lines = [
+        f"数据来源为公开真人录波。{source['dataset']}，被试 {source['participant']}，"
+        f"{channels}，{source['sample_rate_hz']:g} Hz，单位 {source['sample_unit']}。",
+        f"出处为 {source['citation']}，使用许可为 {source['license']}。{source['url']}",
+        source["timing"], source["scope"], source["missing"],
+    ]
+    lines.extend(f"{row['filename']} · {row['condition']} · 使用 {row['analyzed_sec']:g} 秒（{row['windows']} 窗）"
+                 for row in source["segments"])
+    return lines
+
+
 @dataclass
 class SessionReport:
     participant: str
@@ -151,6 +164,11 @@ class SessionReport:
             f"- 解释边界：{config.VALIDATION_NOTE}",
             "",
         ]
+        replay = self.extras.get("replay")
+        if replay:
+            lines.extend(["## 脑电来源与回放范围", ""])
+            lines.extend(f"- {line}" for line in replay_source_lines(replay))
+            lines.append("")
         # 真实设备专用：把采集调理口径写进报告表头（仿真源没有这一步，不出现这一行）
         conditioning = (self.extras or {}).get("signal_conditioning") or {}
         if conditioning:

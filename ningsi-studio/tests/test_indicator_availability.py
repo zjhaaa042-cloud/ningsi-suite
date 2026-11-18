@@ -1,6 +1,7 @@
 import unittest
 import numpy as np
 from ningsi.acquisition.simulate import SyntheticEEG
+from ningsi.signal.baseline import index_values
 from ningsi_studio.domain.indicators import WindowEngine
 
 
@@ -11,11 +12,19 @@ class IndicatorAvailabilityTests(unittest.TestCase):
         self.assertTrue(first["usable"])
         self.assertFalse(first["indicator_available"])
         self.assertEqual(first["indicator_reason"], "baseline_invalid")
+        self.assertIsNone(first["baseline_valid"])
+        self.assertEqual(first["focus_basis"], {})
         self.assertTrue(first["relative_band_powers"])
         baseline, _ = engine.build_baseline("rest", 30)
         self.assertTrue(baseline.valid)
-        result = engine.step("focused").payload()
+        step = engine.step("focused")
+        result = step.payload()
         self.assertTrue(result["indicator_available"])
+        self.assertTrue(result["baseline_valid"])
+        self.assertEqual(result["focus_basis"], {
+            "window_log_ratio": index_values(step.window)["focus"],
+            "baseline_log_ratio": baseline.index_stat("focus")["mean"],
+        })
         self.assertEqual(set(result["scores"]), {"focus", "relax", "load"})
 
     def test_nonfinite_and_missing_samples_do_not_generate_scores(self):

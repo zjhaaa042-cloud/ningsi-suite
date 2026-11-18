@@ -171,6 +171,18 @@ def _evaluate_field(args) -> int:
     return 0
 
 
+def _replay_public_eeg(args) -> int:
+    from ningsi_studio.tools.public_eeg_replay import run
+
+    try:
+        result = run(args.input, args.participant, args.data, tuple(args.channels))
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"公开脑电回放失败：{error}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=True, indent=2))
+    return 0
+
+
 def _check(args) -> int:
     if is_frozen():
         # 静态自检要读源码树（src/tests/web/docs），打包后这些文件不在包内
@@ -390,6 +402,14 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--speed", type=float, default=0.05, help="时间倍率，越小越快")
     demo.add_argument("--data", default=None, help="数据目录（默认 var/studio）")
     demo.set_defaults(func=_demo)
+
+    replay = sub.add_parser("replay-public-eeg", help="用 PhysioNet 原始 EDF 录波生成 Studio 会话和报告")
+    replay.add_argument("--input", type=Path, required=True, help="包含 SHA256SUMS.txt 及 R01–R04 EDF 的目录")
+    replay.add_argument("--participant", required=True, help="PhysioNet 被试编号，例如 S001")
+    replay.add_argument("--channels", nargs=2, default=("Fp1", "Fp2"),
+                        help="原始双通道名称，例如 Fp1 Fp2 或 F3 F4")
+    replay.add_argument("--data", type=Path, required=True, help="独立的新 Studio 数据目录")
+    replay.set_defaults(func=_replay_public_eeg)
 
     field = sub.add_parser("evaluate-field", help="只读核算现场脑电研究预测与压力、情绪自评的配对覆盖和个体内 AUROC")
     field.add_argument("--database", required=True, type=Path, help="已有 Studio 会话库 studio.sqlite3")

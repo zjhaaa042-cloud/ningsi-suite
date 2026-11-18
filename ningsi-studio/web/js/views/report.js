@@ -26,6 +26,71 @@ function cell(value) {
   return String(value).replace(/\|/g, '／').replace(/\n/g, ' ');
 }
 
+function evidenceLine(entries) {
+  const text = entries.filter(([, value]) => value !== DASH).map(([label, value]) => `${label} ${value}`).join(' · ');
+  return text ? el('p', { text }) : null;
+}
+
+function windowCount(count, total) {
+  if (!Number.isFinite(count)) return DASH;
+  return `${fmtInt(count)}${Number.isFinite(total) ? `/${fmtInt(total)}` : ''} 窗`;
+}
+
+function eegEvidence(report, extras, trainingOnly) {
+  const training = extras.effective_time?.indicator_overview ?? extras.ten_min?.indicator_overview;
+  const summary = trainingOnly ? training?.summary : report.indicators?.summary;
+  const quality = trainingOnly ? (training?.quality || {}) : { ...report.indicators?.quality, ...report.quality };
+  const baseline = extras.baseline_eyes_open;
+  const baselineParts = ['睁眼基线'];
+  if (typeof baseline?.valid === 'boolean') baselineParts.push(baseline.valid ? '合格' : '不合格');
+  baselineParts.push(Number.isFinite(baseline?.quality?.usable_seconds)
+    ? `有效覆盖 ${fmtNum(baseline.quality.usable_seconds, 1)} 秒` : '有效覆盖未记录');
+  if (Number.isFinite(baseline?.quality?.valid_ratio)) baselineParts.push(`可用比例 ${fmtPercent(baseline.quality.valid_ratio, 1)}`);
+
+  const indicators = evidenceLine(Object.entries(INDICATOR_LABELS).map(([key, label]) =>
+    [label, fmtNum(summary?.[key]?.mean, 2)]));
+  let source = '来源阶段未记录';
+  if (trainingOnly) source = '训练阶段（描述性）';
+  else if (extras.replay) source = '公开录波的运动想象阶段';
+  else if (['full', 'short'].includes(extras.protocol)) source = '独立监测阶段';
+  const unavailable = list(report.assessment?.evidence).find(item => item?.code === 'eeg_unavailable');
+  return el('section', {}, [
+    el('h3', { text: '脑电指数' }),
+    el('p', { class: 'muted', text: `${source}${indicators ? ' · 相对个人基线的有效窗均值（0–1）' : ''}` }),
+    indicators || el('p', { text: (trainingOnly ? training?.reason : unavailable?.summary) || '暂无可用脑电指数' }),
+    evidenceLine([
+      ['专注指数有效窗', windowCount(summary?.focus?.n ?? quality.windows_scored, quality.windows_total)],
+      ['信号合格窗', windowCount(quality.windows_usable, quality.windows_total)],
+    ]),
+    el('p', { class: 'muted', text: baselineParts.join(' · ') }),
+    indicators && unavailable?.summary && !trainingOnly ? el('p', { class: 'muted', text: unavailable.summary }) : null,
+    trainingOnly ? el('p', { class: 'muted', text: '本协议未采集独立任务态评分所需的监测脑电。' }) : null,
+  ]);
+}
+
+function behaviorEvidence(report, task, skipped) {
+  const result = report.behavior?.[task];
+  const sart = task === 'sart';
+  const evidence = list(report.assessment?.evidence).find(item => item?.code?.startsWith(`${task}_`));
+  const data = result && Object.keys(result).length ? result : evidence?.value;
+  const status = result?.valid === false || evidence?.available === false ? '行为证据不可用'
+    : evidence?.direction === 'low' ? '触发工程阈值'
+      : evidence?.direction === 'normal' ? '未触发工程阈值' : '';
+  const hasResponses = (result?.rate_denominators?.lapse_rate ?? result?.responded) !== 0;
+  const metrics = data && (sart ? evidenceLine([
+    ['虚报率', fmtPercent(data.commission_rate, 1)], ['漏报率', fmtPercent(data.omission_rate, 1)],
+    ['反应时变异系数', data.go_accuracy === 0 ? DASH : fmtNum(data.rt_variability, 2)],
+  ]) : evidenceLine([
+    ['中位反应时', hasResponses && Number.isFinite(data.rt_median) ? `${fmtNum(data.rt_median * 1000, 0)} ms` : DASH],
+    ['慢反应率', hasResponses ? fmtPercent(data.lapse_rate, 1) : DASH], ['漏答率', fmtPercent(data.omission_rate, 1)],
+  ]));
+  return el('section', {}, [
+    el('h3', { text: task.toUpperCase() }),
+    status ? el('p', { class: 'muted', text: status }) : null,
+    metrics || el('p', { text: skipped ? '未采集' : '暂无可用结果' }),
+  ]);
+}
+
 /** 结构化报告 → Markdown 文本。 */
 function composeMarkdown(report) {
   const lines = [];
@@ -256,19 +321,29 @@ export async function render(container, ctx) {
     } else if (typeof data === 'string') {
       host.append(card('评估报告', renderMarkdown(data)));
     } else {
-      const markdown = typeof data.report_markdown === 'string' && data.report_markdown.trim()
-        ? data.report_markdown : composeMarkdown(data || {});
-      const simulated = pick(data, 'extras.source_kind') === 'sim';
+      const report = data || {};
+      const markdown = typeof report.report_markdown === 'string' && report.report_markdown.trim()
+        ? report.report_markdown : composeMarkdown(report);
+      const extras = report.extras || {};
+      const simulated = extras.source_kind === 'sim';
+      const replay = extras.replay;
+      const trainingOnly = ['ten_min', 'effective_time'].includes(extras.protocol) || Boolean(extras.ten_min || extras.effective_time);
+      const replaySource = replay && ['PhysioNet', replay.participant, list(replay.channel_labels).join(' / '),
+        Number.isFinite(replay.sample_rate_hz) ? `${replay.sample_rate_hz} Hz` : null].filter(Boolean).join(' · ');
       const summary = el('div', { class: 'report-summary' }, [
-        el('h2', { text: simulated ? '模拟演示结果' : pick(data, 'assessment.conclusion', '暂无可用结论') }),
-        el('p', { class: 'muted', text: `参与者 ${pick(data, 'participant', DASH)} · ${pick(data, 'extras.protocol_label', '检测协议未记录')}` }),
-        el('p', { text: Object.entries(INDICATOR_LABELS).map(([key, label]) =>
-          label + ' ' + fmtNum(pick(data, 'indicators.summary.' + key + '.mean'), 2)).join('　') }),
-        el('p', { class: 'summary-note', text: ['ten_min', 'effective_time'].includes(data.extras?.protocol) ? '本协议未采集独立任务态评分；请查看PVT、分级信号与训练记录。' : simulated ? '以上为模拟脑电的平均指标（0–1）。' : '指标为本次有效脑电窗口的均值（0–1）。' }),
+        el('h2', { text: replay ? '公开真人脑电回放报告' : simulated ? '模拟演示结果' : report.assessment?.conclusion || '暂无可用结论' }),
+        el('p', { class: 'muted', text: `参与者 ${report.participant ?? DASH} · ${extras.protocol_label || '检测协议未记录'}` }),
+        replaySource ? el('p', { text: replaySource }) : null,
+        el('div', { class: 'report-summary__evidence' }, [
+          eegEvidence(report, extras, trainingOnly),
+          behaviorEvidence(report, 'sart', Boolean(replay || trainingOnly)),
+          behaviorEvidence(report, 'pvt', Boolean(replay)),
+        ]),
+        replay?.scope || replay?.missing ? el('p', { class: 'summary-note', text: [replay.scope, replay.missing].filter(Boolean).join(' ') }) : null,
       ]);
       host.append(card(null, summary));
-      if (data.extras?.effective_time) {
-        const timing = data.extras.effective_time;
+      if (extras.effective_time) {
+        const timing = extras.effective_time;
         host.append(card('有效时长采集结果', el('div', {}, [
           el('p', { class: 'training-coverage-note', role: 'status', text: timing.acquisition_complete
             ? '各阶段有效时间与基线门槛已完成；请结合训练覆盖率阅读表现。'
@@ -277,12 +352,12 @@ export async function render(container, ctx) {
           button('查看训练有效时间与覆盖率', () => ctx.navigate(`#/training?session=${uuid}`)),
         ])));
       }
-      const boundary = pick(data, 'assessment.boundary', null) || pick(config, 'privacy.boundary', null);
-      const advice = list(pick(data, 'assessment.advice', [])).filter(item => item !== boundary);
-      if (!simulated && advice.length) {
+      const boundary = pick(report, 'assessment.boundary', null) || pick(config, 'privacy.boundary', null);
+      const advice = list(pick(report, 'assessment.advice', [])).filter(item => item !== boundary);
+      if (!simulated && !replay && advice.length) {
         host.append(card('改善建议', el('ul', {}, advice.map(item => el('li', { text: String(item) })))));
       }
-      const observations = data.extras?.state_observations;
+      const observations = extras.state_observations;
       const observationLines = list(observations?.summary_lines);
       if (observationLines.length) {
         host.append(el('details', { class: 'result-details' }, [
@@ -291,7 +366,7 @@ export async function render(container, ctx) {
         ]));
       }
       host.append(el('details', { class: 'result-details' }, [
-        el('summary', { text: '查看采集质量与行为分析' }), renderDiagnostics(data || {}),
+        el('summary', { text: '查看采集质量与行为分析' }), renderDiagnostics(report),
       ]));
       const details = el('details', { class: 'result-details' }, [
         el('summary', { text: '查看完整报告与评估证据' }),

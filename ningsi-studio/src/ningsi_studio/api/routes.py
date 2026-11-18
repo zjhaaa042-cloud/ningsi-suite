@@ -79,6 +79,8 @@ def _source_kind_from_key(source) -> str | None:
     key = str(source or "")
     if key.startswith("lsl:"):
         return "lsl"
+    if key.startswith("replay:"):
+        return "replay"
     if key == live_source.SIM_SOURCE or key.startswith("sim"):
         return "sim"
     return None
@@ -120,6 +122,8 @@ def _training_overview(conn, row, runs):
 
 
 def session_public(row, *, extra: dict | None = None) -> dict:
+    protocol = phase_module.normalize_profile(row["protocol"] if "protocol" in row.keys() else None)
+    replay = _source_kind_from_key(row["source"]) == "replay"
     payload = {
         "uuid": row["uuid"],
         "participant": row["public_id"] if "public_id" in row.keys() else None,
@@ -135,10 +139,8 @@ def session_public(row, *, extra: dict | None = None) -> dict:
         "time_scale": row["time_scale"],
         "training_mode": row["training_mode"],
         # 协议档（full / short）：老库的行在迁移里补成 'full'；未知值按完整协议展示
-        "protocol": phase_module.normalize_profile(
-            row["protocol"] if "protocol" in row.keys() else None),
-        "protocol_label": phase_module.PROFILES[
-            phase_module.normalize_profile(row["protocol"] if "protocol" in row.keys() else None)]["label"],
+        "protocol": protocol,
+        "protocol_label": phase_module.REPLAY_LABEL if replay else phase_module.PROFILES[protocol]["label"],
         "status": row["status"],
         "phase": row["phase"],
         "phase_label": phase_module.PHASE_BY_KEY.get(row["phase"]).label
@@ -817,6 +819,8 @@ def build_router(settings: Settings) -> Router:
             # 不返回它的话，直接打开 `#/flow?session=…` 的页面只能退回前端写死的 11 步兜底表，
             # 细条就会显示"第 5 / 11 步"（实测踩到）。
             payload["phases"] = phase_module.as_list(payload.get("protocol"), payload.get("training_mode"))
+            if _source_kind_from_key(row["source"]) == "replay":
+                payload["phases"] = [phase for phase in payload["phases"] if phase["key"] in phase_module.REPLAY_PHASES]
         runtime = manager.get(uuid)
         actual_source = getattr(getattr(runtime, "source", None), "key", None)
         if actual_source:
@@ -999,6 +1003,7 @@ def build_router(settings: Settings) -> Router:
             }
         payload["awaiting_input"] = runtime.awaiting() if runtime else []
         payload["runtime_alive"] = bool(runtime and runtime.alive)
+        payload["analysis_window"] = runtime.latest_analysis_window if runtime else None
         payload["attention_model"] = runtime.latest_model_prediction if runtime else None
         payload["affect_model"] = runtime.current_affect() if runtime else None
         return Response.json(payload)
@@ -1315,6 +1320,7 @@ def build_router(settings: Settings) -> Router:
             "report_md": "text/markdown; charset=utf-8",
             "report_html": "text/html; charset=utf-8",
             "report_json": "application/json; charset=utf-8",
+            "source": "application/json; charset=utf-8",
             "heatmap_svg": "image/svg+xml",
             "trend_svg": "image/svg+xml",
             "model": "application/json; charset=utf-8",
@@ -1513,7 +1519,8 @@ def _trend_context(record):
 def _trend_reference(records, field):
     # session_points is newest first. An assessment without a monitor metric
     # must not silently choose the comparison group for unrelated scores.
-    record = next((record for record in records if _has_trend_value(record, field)), None)
+    record = next((record for record in records if _has_trend_value(record, field)
+                   and _source_kind_from_key(record.get("source") or record.get("device")) != "replay"), None)
     return _trend_context(record) if record else None
 
 
@@ -1526,6 +1533,8 @@ def _comparable(records, history_module, *, reference=None, field=None) -> tuple
     for record in records:
         context = _trend_context(record)
         reason = "metric_unavailable" if field and not _has_trend_value(record, field) else ""
+        if context["source_kind"] == "replay":
+            reason = "public_recording_replay"
         if not reason and reference:
             for key, reject in (("protocol", "protocol_changed"),
                                 ("training_mode", "training_mode_changed"),

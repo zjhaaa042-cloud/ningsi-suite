@@ -483,13 +483,26 @@ class SessionRuntime:
             "relative_band_powers": dict(step.window.rel) if not reason else {}}
         return prediction
 
+    @property
+    def latest_analysis_window(self) -> dict | None:
+        if not self.diagnostic_windows:
+            return None
+        window = self.diagnostic_windows[-1]
+        snapshot = {key: window.get(key) for key in (
+            "index", "t_end", "phase", "usable", "scores", "indicator_reason",
+            "baseline_valid", "focus_basis", "reasons",
+        )}
+        artifact = window["quality"].get("metrics", {}).get("artifact_control", {})
+        snapshot["blink_corrected_events"] = artifact.get("blink_control", {}).get("corrected_events", 0)
+        return snapshot
+
     def _record_diagnostic(self, step, phase: str) -> None:
         """诊断单独留存，不改变指标序列、预警或反馈节拍。"""
         step.attention_model = self._predict_attention(phase) or {}
         diagnostic = step.payload(include_signal=False)
         diagnostic["affect_model"] = self._affect_observation(step, phase)
         diagnostic.update(phase=phase, source_kind=self.source.kind,
-                          elapsed_sec=round(time.monotonic() - self.diagnostic_started, 3))
+                          elapsed_sec=self.elapsed_now())
         if self.source.kind == "lsl":
             diagnostic["state"] = "unknown"
         self.diagnostic_windows.append(diagnostic)
@@ -998,6 +1011,7 @@ class SessionRuntime:
                 feedback = {
                     "affect_model": self.current_affect(),
                     "heatmap_cell": heatmap_cell,
+                    "analysis_window": self.latest_analysis_window,
                     "segment": index + 1,
                     "target": trainer.target,
                     "score": None if score is None else round(score, 4),
@@ -1038,7 +1052,7 @@ class SessionRuntime:
         return record or None
 
     def _write_report(self, baseline, scale_objects, sart_result, pvt_result, monitor,
-                      training_result, assessment_result):
+                      training_result, assessment_result, *, report_context=None):
         stem = f"sub-{self.subject['public_id']}_ses-01_run-001"
         root = self.runs_root
         reports = root / "reports"
@@ -1105,6 +1119,7 @@ class SessionRuntime:
                                     "assessment": config.LABEL_SPEC,
                                     "preprocess": "preprocess-v2",
                                     "training": config.TRAINING_SPEC},
+                **(report_context or {}),
             },
         )
         paths = assessment_domain.write_report(report, reports, stem)
@@ -1138,7 +1153,8 @@ class SessionRuntime:
         except Exception:  # noqa: BLE001
             points = []
         trend_path = reports / "trend.svg"
-        trend_path.write_text(history_module.render_svg_trend(points, title="专注度周趋势"),
+        title = "专注度周趋势（公开回放不计入）" if self.source.kind == "replay" else "专注度周趋势"
+        trend_path.write_text(history_module.render_svg_trend(points, title=title),
                               encoding="utf-8")
         self.artifacts["trend_svg"] = trend_path
 
@@ -1223,7 +1239,8 @@ class SessionRuntime:
             "indicators": {name: stat.get("mean") for name, stat in (monitor["summary"] or {}).items()},
             "protocol": self.protocol,
             "quality": {"valid_ratio": monitor["quality"].get("valid_ratio"),
-                        "passed": bool((monitor["quality"].get("valid_ratio") or 0) >= config.ASSESS["min_valid_ratio"]
+                        "passed": bool(self.source.kind != "replay"
+                                       and (monitor["quality"].get("valid_ratio") or 0) >= config.ASSESS["min_valid_ratio"]
                                        and self.baselines.get("baseline_open") is not None
                                        and self.baselines["baseline_open"].valid)},
             "behavior": {"sart_rt_mean": sart_result.get("rt_mean"),
