@@ -1,12 +1,17 @@
 """Packaging guards use only disposable synthetic files, never real releases."""
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from zipfile import ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from package_product import build_members, output_paths, parse_suite, read_verification, validate_label
+import package_product as product
 
 
 class ProductPackageTests(unittest.TestCase):
@@ -97,6 +102,56 @@ class ProductPackageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_verification(path, hashes, versions)
         self.assertTrue(read_verification(path, hashes, versions, {"sha256": hashes["capture"]})["passed"])
+
+    def test_capture_tcn_build_receipt_binds_the_current_source_model(self):
+        exe = self.write("capture/NingsiCapture.exe", "MZ fixture")
+        model = self.write(product.FOCUS_TCN_MODEL, '{"model":"fixture"}')
+        version = "0.4.2"
+        legacy = {"app": "ningsi-capture", "version": version, "sha256": product.sha(exe), "mode": "onefile"}
+        with patch.object(product, "ROOT", self.root):
+            self.assertIsNone(product._capture_build_receipt(exe, version))
+            receipt = self.write("capture/BUILD.json", json.dumps(legacy))
+            self.assertNotIn("focus_tcn_sha256", product._capture_build_receipt(exe, version))
+            digest = product.sha(model)
+            receipt.write_text(json.dumps({**legacy, "focus_tcn_sha256": digest.upper()}), encoding="utf-8")
+            self.assertEqual(product._capture_build_receipt(exe, version)["focus_tcn_sha256"], digest)
+            for invalid in (None, "bad", "0" * 64):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "TCN model"):
+                    receipt.write_text(json.dumps({**legacy, "focus_tcn_sha256": invalid}), encoding="utf-8")
+                    product._capture_build_receipt(exe, version)
+
+    def test_package_adds_opt_in_tcn_launcher_and_retains_default_capture(self):
+        studio = self.write("studio/NingsiStudio.exe", "MZ studio")
+        capture = self.write("capture/NingsiCapture.exe", "MZ capture")
+        for capture_build in (None, {"focus_tcn_sha256": "a" * 64}):
+            with self.subTest(capture_build=capture_build):
+                label = "with-tcn" if capture_build else "default"
+                release, archive, checksum = output_paths(label, self.root)
+                inputs = dict(release=release, archive=archive, checksum=checksum, studio_build=studio.parent,
+                              studio_exe=studio, capture_exe=capture, members=[studio], documents={},
+                              versions={"studio": "0.1.15", "capture": "0.4.2"},
+                              executables={"studio": product.sha(studio), "capture": product.sha(capture)},
+                              capture_build=capture_build, receipt={"versions": True, "check_count": 1},
+                              suite={"total": 1}, web_files_verified=1)
+                with patch.object(product, "validate_inputs", return_value=inputs), \
+                        patch.object(product, "_source_hashes", return_value={}), \
+                        patch.object(product, "_git", return_value=""), redirect_stdout(StringIO()):
+                    self.assertEqual(product.main(["--verification", "fixture", "--suite-log", "fixture", "--label", label]), 0)
+                default = (release / "02-Start-Capture.bat").read_text(encoding="ascii")
+                self.assertIn('\n"NingsiCapture.exe"\n', default)
+                self.assertNotIn("--tcn-recovery", default)
+                instructions = (release / "使用说明.txt").read_text(encoding="utf-8-sig")
+                self.assertIn("断网运行", instructions)
+                self.assertIn("快速模拟联调", instructions)
+                launcher = "03-Start-Capture-TCN.bat"
+                self.assertEqual((release / launcher).exists(), bool(capture_build))
+                self.assertEqual(launcher in instructions, bool(capture_build))
+                with ZipFile(archive) as zipped:
+                    self.assertEqual(f"{label}/{launcher}" in zipped.namelist(), bool(capture_build))
+                    build = json.loads(zipped.read(f"{label}/BUILD.json"))
+                    self.assertEqual(build["capture_build"], capture_build)
+                    if capture_build:
+                        self.assertIn(b'"NingsiCapture.exe" gui --tcn-recovery\r\n', zipped.read(f"{label}/{launcher}"))
 
 
 if __name__ == "__main__":

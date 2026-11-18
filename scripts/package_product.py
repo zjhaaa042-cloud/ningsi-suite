@@ -41,6 +41,7 @@ REQUIRED_ASSETS = (
     "_internal/web/css/workspace.css", "_internal/ningsi_studio/db/schema.sql",
 )
 SHA_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
+FOCUS_TCN_MODEL = Path("ningsi/src/ningsi/models/focus_tcn_250.json")
 
 
 def validate_label(label):
@@ -176,7 +177,15 @@ def _capture_build_receipt(executable, version):
     if (not isinstance(record, dict) or record.get("version") != version
             or str(record.get("sha256", "")).lower() != sha(executable)):
         raise ValueError("Capture executable does not match its build version/checksum")
-    return {key: record.get(key) for key in ("app", "version", "built_utc", "sha256", "mode")}
+    result = {key: record.get(key) for key in ("app", "version", "built_utc", "sha256", "mode")}
+    if "focus_tcn_sha256" in record:
+        digest = record["focus_tcn_sha256"]
+        model = ROOT / FOCUS_TCN_MODEL
+        if (not isinstance(digest, str) or not SHA_PATTERN.fullmatch(digest)
+                or not model.is_file() or digest.lower() != sha(model)):
+            raise ValueError("Capture TCN model does not match the source model checksum")
+        result["focus_tcn_sha256"] = digest.lower()
+    return result
 
 
 def _source_hashes():
@@ -190,11 +199,17 @@ def _source_hashes():
     return values
 
 
-def _instructions(versions, studio_exe, suite, receipt):
+def _instructions(versions, studio_exe, suite, receipt, *, focus_tcn=False):
+    tcn_note = """
+双击 03-Start-Capture-TCN.bat 会打开同一个 Capture 并启用实验性的 TCN 输入恢复。适用于 BioMulti Lite
+双额 Fp1/Fp2、250 Hz 真机脑电的分包时钟方式。模型在正式探针时后台计算研究分数，结果随采集导出供复核。
+Studio 的实时指数与训练反馈继续使用相对个人基线的评分；TCN 候选的真人识别效果仍待独立验证。
+""" if focus_tcn else ""
     return f"""凝思 Windows 产品版
 Studio {versions['studio']} / Capture {versions['capture']}
 
 完整解压到可写目录后运行，无需安装 Python。保留 _internal 整个目录；不要只复制 EXE。
+两个程序均可断网运行，浏览器访问本机 Studio。真机演示请预先安装设备软件和所需驱动，并确认本机 LSL 推流。
 
 一、评估与训练
 1. 双击 01-Start-Studio.bat，程序启动本机服务并打开浏览器。端口以控制台地址为准。
@@ -226,6 +241,7 @@ Studio {versions['studio']} / Capture {versions['capture']}
 确认电极、参考、单位与时标后开始连续采集；完成任务后正常停止并导出，再到 Studio 的
 “设置与管理 → 模型管理”导入验收、训练、独立评估，并按设备和处理版本匹配后启用。
 详细模型说明见 HUMAN_MODEL_TRAINING.md，现场清单见 FIELD_ACCEPTANCE_CHECKLIST.txt。
+无设备时，Capture 可选择“模拟演示”和“快速模拟联调”，模拟数据单独标记。{tcn_note}
 Capture 可按需显式开启 LSL 任务 Marker（默认关闭），配合独立 LabRecorder 留证。
 Marker 只含白名单任务事件，不含探针答案；另行检查 XDF 的流与完整性。
 普通实时 LSL 不具备原生 REC 离线核对的全部时钟证据，不强行启用要求原生 REC 的模型。
@@ -332,10 +348,14 @@ def main(argv=None):
     shutil.copy2(inputs["capture_exe"], release / "NingsiCapture.exe")
     for name, path in inputs["documents"].items():
         shutil.copy2(path, release / name)
+    focus_tcn = bool((inputs["capture_build"] or {}).get("focus_tcn_sha256"))
     (release / "使用说明.txt").write_text(_instructions(inputs["versions"], inputs["studio_exe"].name,
-                                                      inputs["suite"], inputs["receipt"]).replace("\n", "\r\n"), encoding="utf-8-sig", newline="")
-    for name, command in (("01-Start-Studio.bat", f'"{inputs["studio_exe"].name}" serve --open'),
-                          ("02-Start-Capture.bat", '"NingsiCapture.exe"')):
+                                                      inputs["suite"], inputs["receipt"], focus_tcn=focus_tcn).replace("\n", "\r\n"), encoding="utf-8-sig", newline="")
+    launchers = [("01-Start-Studio.bat", f'"{inputs["studio_exe"].name}" serve --open'),
+                 ("02-Start-Capture.bat", '"NingsiCapture.exe"')]
+    if focus_tcn:
+        launchers.append(("03-Start-Capture-TCN.bat", '"NingsiCapture.exe" gui --tcn-recovery'))
+    for name, command in launchers:
         (release / name).write_text('@echo off\r\nsetlocal\r\ncd /d "%~dp0"\r\n' + command + '\r\nif errorlevel 1 pause\r\n', encoding="ascii", newline="")
     dirty = _git("status", "--porcelain")
     dependencies = {}

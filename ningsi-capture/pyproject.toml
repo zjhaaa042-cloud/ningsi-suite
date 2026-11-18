@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ningsi-capture"
-version = "0.4.1"
+version = "0.4.2"
 description = "Independent EEG research recorder with tasks, thought probes and training exports"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26", "pylsl==1.18.2"]
