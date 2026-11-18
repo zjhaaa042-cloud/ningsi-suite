@@ -34,18 +34,20 @@ Capture ──带版本与校验值的导出文件──▶ Studio 真人模型�
 
 ## 发行版下载与使用（Windows x64）
 
-当前正式版为 **v0.1.14**，包含 Studio 0.1.14、Capture 0.4.1 和引擎 0.1.2，无需安装 Python。Studio 和 Capture 均已从本次源码重新构建。
+当前正式版为 **v0.1.15**，包含 Studio 0.1.15、Capture 0.4.2 和引擎 0.1.2，无需安装 Python。两个程序均从发行标签对应的干净源码构建。
 
-- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.14)
-- [下载 Windows x64 完整便携套件（约 49 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/ningsi-product-0.1.14-20261118.zip)
-- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/ningsi-product-0.1.14-20261118.zip.sha256)
-- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/README.zh-CN.txt) · [构建记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/BUILD.json) · [EXE 验收记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.14/FROZEN_VERIFICATION.json)
+- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.15)
+- [下载 Windows x64 完整便携套件（约 50 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/ningsi-product-0.1.15-20261118.zip)
+- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/ningsi-product-0.1.15-20261118.zip.sha256)
+- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/README.zh-CN.txt) · [构建记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/BUILD.json) · [EXE 验收记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/FROZEN_VERIFICATION.json)
 
-完整解压到可写目录，保留整个 `_internal`，双击 `01-Start-Studio.bat` 打开平台，或 `02-Start-Capture.bat` 打开采集器。升级请使用新目录；需要原会话时先备份数据，再按包内说明指定旧数据目录。
+完整解压到可写目录，保留整个 `_internal`。双击 `01-Start-Studio.bat`，选择「运行模拟演示」即可离线展示。常规采集使用 `02-Start-Capture.bat`，试用 BioMulti 输入恢复使用 `03-Start-Capture-TCN.bat` 并选择 BioMulti 分包时钟估计。升级请使用新目录。需要原会话时先备份数据，再按包内说明指定旧数据目录。
 
-本版按手册内置 BSense-R 参数并简化设备页，新增双通道个人眨眼校准，修复断流恢复后旧样本混入、评分窗口误受相邻眨眼影响、预览状态失真、有效时长统计及取消会话回看问题。
+Studio 实时页显示数据接收、信号质控、个人基线和评分暂停原因。最近 4 秒窗的频带比值与阶段均值分别显示。报告首屏展示有效脑电覆盖、SART 和 PVT 证据。Capture 的 TCN 模型在符合质控的正式研究探针上后台评分，并将结果写入研究导出。
 
-源码全量回归共 712 项，默认通过 709 项，其余 3 项可选检查在对应环境启用后通过。四种协议的 50 项端到端检查和最终 EXE 的 44 项验收通过，Capture EXE 已实际完成短协议模拟采集及导出。程序未签名，真人识别与训练效果仍需独立验证。下载包附逐文件校验清单与构建记录。
+源码全量回归共 730 项，727 项通过、3 项跳过。55 项冻结程序和浏览器检查通过，包含短协议模拟采集与导出。最终 ZIP 也通过完整解压、逐文件校验及启动检查。程序未签名，现场设备、真人识别与训练效果仍待独立验证。下载包附逐文件校验清单与构建记录。
+
+[v0.1.14 历史发行版](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.14)
 
 ### v0.1.2 历史发行版
 
