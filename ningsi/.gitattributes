@@ -4,3 +4,6 @@
 *.jpg binary
 *.docx binary
 *.npz binary
+
+# Preserve the configuration bytes used by frozen EEG model fingerprints.
+src/ningsi/config.py -text
