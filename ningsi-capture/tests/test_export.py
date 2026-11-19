@@ -43,6 +43,41 @@ class ExportTests(unittest.TestCase):
         events = [json.loads(line) for line in (self.output / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(sum(e["kind"] == "probe_onset" for e in events), 3)
         self.assertTrue((self.output / "SHA256.json").is_file())
+        self.assertNotIn("artifact_calibration", self.summary)
+
+    def test_personal_artifact_detection_is_an_independent_hashed_export(self):
+        from .test_artifact_calibration import _record
+        from ningsi_capture.clock import Stamp
+
+        raw, stamps, events, _, _ = _record({"blink": "blink", "jaw": "muscle"})
+        clock = FakeClock(stamps[0])
+        clock.domain = "lsl_local_clock"
+        source = {**simulation_source(), "kind": "lsl", "type": "EEG", "data_origin": "real"}
+        store = SessionStore(self.root / "recordings", participant="ARTIFACT", source=source, cohort="pilot",
+                             protocol={"personal_artifact_calibration": True}, clock=clock)
+        try:
+            store.append(raw.T, stamps, offset=0.)
+            for e in events:
+                t = e["time_lsl"]
+                store.event(e["kind"], e["payload"], Stamp(t, t, "test-time"))
+        finally:
+            clock.seconds = float(stamps[-1])
+            store.close("completed")
+
+        output = self.root / "calibration_export"
+        summary = export_session(store.path, output)
+        calibration = summary["artifact_calibration"]
+        self.assertEqual((calibration["status"], calibration["calibrated_actions"]), ("partial", 2))
+        self.assertEqual(summary["train_eligible"], 0)
+        report = json.loads((output / calibration["report_file"]).read_text(encoding="utf-8"))
+        self.assertEqual(report["session_id"], summary["session_id"])
+        self.assertEqual(report["actions"]["blink"]["validation_hits"], 2)
+        rows = read_csv(output / calibration["detections_file"])
+        self.assertEqual(rows[0]["actions"], "blink")
+        self.assertEqual(json.loads(rows[0]["events"])[0]["action"], "blink")
+        hashes = json.loads((output / "SHA256.json").read_text(encoding="utf-8"))
+        self.assertIn(calibration["report_file"], hashes)
+        self.assertIn(calibration["detections_file"], hashes)
 
     def test_one_row_per_probe_correct_label_mapping_and_no_simulated_training(self):
         rows = read_csv(self.output / "features.csv")

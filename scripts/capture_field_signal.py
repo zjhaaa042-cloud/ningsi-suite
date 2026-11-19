@@ -143,7 +143,8 @@ def capture_signal(*, device, seconds, data, export):
             "capture_version": __version__, "recording": str(store.path), "export": str(export),
             "requested_seconds": seconds, "elapsed_seconds_after_ready": elapsed,
             "raw_samples": summary["raw_samples"], "windows_total": summary["windows_total"],
-            "windows_usable": summary.get("windows_usable"), "baseline_valid": summary.get("baseline_valid"),
+            "windows_usable": summary.get("windows_usable"), "descriptive_spectrum": summary.get("descriptive_spectrum"),
+            "baseline_valid": summary.get("baseline_valid"),
             "protocol_complete": False, "train_eligible": 0, "test_eligible": 0,
             "lsl_markers_enabled": False, "physical_wear_and_latency_validated": False,
             "source": {key: store.metadata["source"].get(key) for key in (

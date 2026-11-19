@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 import csv
+from functools import partial
 import hashlib
 import json
 import math
@@ -23,6 +24,7 @@ from ningsi.models.capture_protocols import RESEARCH_PROTOCOLS
 from ningsi.signal import conditioning
 
 from .readiness import formal_probe_summary, line_power_ratios
+from . import spectrum_quality
 from .storage import engine_fingerprint, implementation_fingerprint, open_readonly, read_metadata, write_json
 
 FEATURES = ("rel_theta", "rel_alpha", "rel_beta", "log_beta_theta", "log_alpha_beta", "log_theta_alpha")
@@ -54,13 +56,21 @@ def read_events(connection):
             for row in connection.execute("SELECT * FROM events ORDER BY event_id")]
 
 
-def _analyze_samples(context, source):
+def _analyze_samples(context, source, *, include_spectral=False, motion=None, motion_assisted=False):
     values = np.stack([item[0] for item in context])
     stamps = np.asarray([item[1] for item in context], dtype=float)
     factor = None if unit_conflict(source) or source_type_conflict(source) else source.get("scale_to_uv")
     rate = float(source["srate"])
     policy = source.get("preprocessing_policy")
     row = conditioning.condition(values.T, stamps, rate, factor, policy, traces=True)
+    if include_spectral and policy == conditioning.POLICY:
+        original = spectrum_quality.describe_spectrum(values.T, stamps, rate, factor, row["window"], motion=motion)
+        row["descriptive_spectrum"] = original
+        row["single_channel_spectra"] = spectrum_quality.describe_single_channels(
+            values.T, stamps, rate, factor, original, motion, source.get("channel_labels") or ())
+        if motion_assisted and motion is not None:
+            row["motion_assisted_spectrum"] = spectrum_quality.describe_motion_assisted_spectrum(
+                values.T, stamps, rate, factor, row["window"], original, motion)
     row["raw_50hz_ratios"] = line_power_ratios(values[:, :2], rate)
     if policy:
         row["raw_60hz_ratios"] = line_power_ratios(values[:, :2], rate, 60)
@@ -137,13 +147,13 @@ def packet_axis(connection, first_index, stop_index, received_by=None, *, policy
 
 def analysis_windows(connection, metadata, *, first_index=0, stop_index=None,
                      analyze=None, received_by=None, analysis_times=None, sample_limit=None,
-                     keep_traces=False, window_sink=None):
+                     keep_traces=False, window_sink=None, include_spectral=False):
     """Use recording-aligned windows with end indices in [first_index, stop_index)."""
     source = metadata["source"]
     rate = float(source["srate"])
     size, hop = round(4 * rate), max(1, round(2 * rate))
     context = deque(maxlen=round(6 * rate))
-    analyze = analyze or _analyze_samples
+    analyze = analyze or partial(_analyze_samples, include_spectral=include_spectral)
     policy = source.get("timestamp_policy")
     packet_timing = policy in (BIOMULTI_LSL_TIMING, BIOMULTI_LSL_RECOVERY_TIMING)
     separate_axis = policy == BIOMULTI_REC_TIMING or packet_timing
@@ -260,7 +270,7 @@ def prediction_table(connection, metadata, events, probes, output, *, results=No
             "interpretation": "external candidate; blind at onset; exploratory, not locally calibrated"}
 
 
-def _export_windows(connection, metadata, output, analysis_times):
+def _export_windows(connection, metadata, output, analysis_times, *, motion=None, motion_assisted=False):
     source = metadata["source"]
     if not source.get("preprocessing_policy"):
         return analysis_windows(connection, metadata, analysis_times=analysis_times)
@@ -283,20 +293,51 @@ def _export_windows(connection, metadata, output, analysis_times):
             clean.write(np.asarray(wave, dtype="<f8").tobytes())
             masks.write(mask.tobytes())
 
-        windows = analysis_windows(connection, metadata, analysis_times=analysis_times, window_sink=write_trace)
+        analyze = partial(_analyze_samples, include_spectral=True, motion=motion, motion_assisted=motion_assisted)
+        windows = analysis_windows(connection, metadata, analysis_times=analysis_times, window_sink=write_trace,
+                                   analyze=analyze)
         if len(windows) != count:
             raise ValueError("处理窗与原始样本索引不一致。")
     return windows
 
 
-def feature_tables(connection, metadata, events, output, engine_changed=False, analysis_times=None):
+def _motion_assisted_table(output, windows):
+    bands = ("theta", "alpha", "beta")
+    fields = ("sample_end_index", "eeg_reasons", "original_status", "status", "decision", "imu_status",
+              "imu_peak", "imu_reason", "support_sec", "segments", "intervals_lsl", *(f"rel_{band}" for band in bands))
+    filename = "motion_assisted_windows.csv"
+    rows = []
+    intervals = []
+    for row in windows:
+        original = row["descriptive_spectrum"]
+        assisted = row["motion_assisted_spectrum"]
+        intervals.extend(assisted["intervals"])
+        rows.append({"sample_end_index": row["sample_end_index"], "original_status": original["status"],
+                     "status": assisted["status"], "decision": assisted["decision"],
+                     "eeg_reasons": "|".join(row["window"].quality.reasons),
+                     "imu_status": assisted["imu_status"], "imu_peak": assisted["imu_peak"],
+                     "imu_reason": assisted["imu_reason"],
+                     "support_sec": assisted["support_sec"], "segments": assisted["segments"],
+                     "intervals_lsl": json.dumps(assisted["intervals"], separators=(",", ":")),
+                     **{f"rel_{band}": assisted["relative_bands"].get(band) for band in bands}})
+    csv_write(output / filename, fields, rows)
+    return {"windows_file": filename, "windows_total": len(rows),
+            "windows_analyzable": sum(row["status"] in ("full", "partial") for row in rows),
+            "windows_newly_analyzable": sum(row["original_status"] == "unavailable" and row["status"] in ("full", "partial")
+                                             for row in rows),
+            "support_seconds": round(union_seconds(intervals), 6)}
+
+
+def feature_tables(connection, metadata, events, output, engine_changed=False, analysis_times=None, *, motion=None,
+                   motion_assisted=False):
     from .comparison_export import comparison_table
     from ningsi.signal.baseline import build_baseline
     from ningsi.signal.indicators import compute_indicators
     from ningsi.models.logistic import features_from_window
     from ningsi.models.research_features import aggregate_probe
 
-    windows = _export_windows(connection, metadata, output, analysis_times)
+    windows = _export_windows(connection, metadata, output, analysis_times, motion=motion,
+                              motion_assisted=motion_assisted)
     conflict = unit_conflict(metadata["source"])
     type_conflict = source_type_conflict(metadata["source"])
     phase_starts = {e["payload"]["phase"]: e["time_lsl"] for e in events if e["kind"] == "phase_start"}
@@ -312,6 +353,12 @@ def feature_tables(connection, metadata, events, output, engine_changed=False, a
     line_columns = [f"raw_50hz_ratio_ch{i+1}" for i in range(min(2, metadata["source"]["channels"]))]
     measures = ("raw_60hz", "filtered_50hz", "filtered_60hz") if metadata["source"].get("preprocessing_policy") else ()
     extra_columns = [f"{measure}_ratio_ch{i+1}" for measure in measures for i in range(len(line_columns))]
+    spectral = [row["descriptive_spectrum"] for row in windows if "descriptive_spectrum" in row]
+    single_channels = {}
+    single_windows = 0
+    spectral_columns = ("spectral_status", "spectral_method", "spectral_support_sec", "spectral_segments",
+                        "spectral_segment_lengths_sec", "spectral_intervals_lsl",
+                        "spectral_rel_theta", "spectral_rel_alpha", "spectral_rel_beta", "spectral_single_channels")
     for row in windows:
         window = row["window"]
         result = compute_indicators(window, baseline)
@@ -327,10 +374,30 @@ def feature_tables(connection, metadata, events, output, engine_changed=False, a
                             **row["features"], **dict(zip(line_columns, row["raw_50hz_ratios"])),
                             **dict(zip(extra_columns, (v for m in measures for v in row[m + "_ratios"]))),
                             **({"masked_fraction": row["masked_fraction"]} if measures else {})})
+        diagnostic = row.get("descriptive_spectrum")
+        if diagnostic is not None:
+            single = row["single_channel_spectra"]
+            single_windows += bool(single)
+            for item in single:
+                channel = single_channels.setdefault(item["channel_index"], {
+                    "channel_index": item["channel_index"], "channel_label": item["channel_label"],
+                    "windows": 0, "intervals": [],
+                })
+                channel["windows"] += 1
+                channel["intervals"].extend(item["intervals"])
+            window_rows[-1].update(spectral_status=diagnostic["status"], spectral_support_sec=diagnostic["support_sec"],
+                                   spectral_method=diagnostic["method"],
+                                   spectral_segments=diagnostic["segments"],
+                                   spectral_segment_lengths_sec=json.dumps(diagnostic.get("segment_lengths_sec", [])),
+                                   spectral_intervals_lsl=json.dumps(diagnostic["intervals"], separators=(",", ":")),
+                                   spectral_single_channels=json.dumps(single, ensure_ascii=False, separators=(",", ":")),
+                                   **{f"spectral_rel_{band}": diagnostic["relative_bands"].get(band)
+                                      for band in ("theta", "alpha", "beta")})
     csv_write(output / "windows.csv", ("start_lsl", "end_lsl", "sample_end_index", "usable", "reasons",
                                        "focus", "focus_z", "timestamp_policy", "timestamp_adjusted",
                                        "timestamp_max_shift_ms", *FEATURES, *line_columns, *extra_columns,
-                                       *(("masked_fraction",) if measures else ())), window_rows)
+                                       *(("masked_fraction",) if measures else ()),
+                                       *(spectral_columns if measures else ())), window_rows)
     onsets = [e for e in events if e["kind"] == "probe_onset"]
     responses = {e["payload"]["probe_id"]: e for e in events if e["kind"] == "probe_response"}
     cancellations = {e["payload"]["probe_id"] for e in events if e["kind"] == "probe_cancelled"}
@@ -397,6 +464,23 @@ def feature_tables(connection, metadata, events, output, engine_changed=False, a
     csv_write(output / "probes.csv", PROBE_FIELDS, probe_rows)
     csv_write(output / "features.csv", PROBE_FIELDS, probe_rows)
     predictions = recorded_predictions(connection)
+    paired_windows = sum(row["status"] in ("full", "partial") for row in spectral)
+    for channel in single_channels.values():
+        channel["support_seconds"] = round(union_seconds(channel.pop("intervals")), 6)
+    spectral_summary = {"descriptive_spectrum": {
+        "policy": spectrum_quality.POLICY, "windows_total": len(spectral),
+        "windows_analyzable": paired_windows,
+        "windows_with_any_band_power": paired_windows + single_windows,
+        "single_channel": {"policy": spectrum_quality.SINGLE_CHANNEL_POLICY, "windows_analyzable": single_windows,
+                           "channels": sorted(single_channels.values(), key=lambda channel: channel["channel_index"])},
+        "windows_partial": sum(row["status"] == "partial" for row in spectral),
+        "windows_short_fragments": sum(row["method"] == "short_fragments" for row in spectral),
+        "support_seconds": round(union_seconds(interval for row in spectral for interval in row["intervals"]), 6),
+        "minimum_short_segment_sec": min(spectrum_quality.FRAGMENT_SECONDS),
+        "minimum_short_support_sec": spectrum_quality.MIN_FRAGMENT_SUPPORT_SEC,
+    }} if measures else {}
+    if motion_assisted and motion is not None:
+        spectral_summary["motion_assisted_spectrum"] = _motion_assisted_table(output, windows)
     return {"probe_predictions": prediction_table(connection, metadata, events, probe_rows, output, results=predictions),
             "probe_comparison": comparison_table(metadata, events, predictions, output, csv_write),
             "baseline_valid": baseline.valid, "unit_conflict": conflict, "source_type_conflict": type_conflict,
@@ -407,25 +491,82 @@ def feature_tables(connection, metadata, events, output, engine_changed=False, a
             "windows_usable": sum(row["window"].usable for row in windows), "probes_total": len(probe_rows),
             "feature_rows_usable": sum(row["feature_usable"] for row in probe_rows),
             "train_eligible": sum(row["train_eligible"] for row in probe_rows),
-            "test_eligible": sum(row["test_eligible"] for row in probe_rows)}
+            "test_eligible": sum(row["test_eligible"] for row in probe_rows), **spectral_summary}
 
 
 def export_session(session, output, *, recover=False, progress=None, native_db=None, native_record=None,
-                   calibration=None, reprocess=False):
+                   calibration=None, reprocess=False, motion_assisted=False):
     output = Path(output).resolve()
     if output.exists():
         raise FileExistsError("导出目录已存在，请选择新的目录，避免覆盖既有实验数据。")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent, prefix=".ningsi-export-") as temp:
         stage = Path(temp) / "data"
-        summary = _write_export(session, stage, recover, progress, native_db, native_record, calibration, reprocess)
+        summary = _write_export(session, stage, recover, progress, native_db, native_record, calibration, reprocess,
+                                motion_assisted=motion_assisted)
         if output.exists():
             raise FileExistsError("导出目录已存在，请选择新的目录。")
         stage.rename(output)
     return summary
 
 
-def _write_export(session, output, recover, progress, native_db, native_record, calibration, reprocess):
+def _export_artifact_calibration(output, connection, metadata, events, analysis_times, motion, motion_audit, actual):
+    if not any(event["kind"] == "artifact_calibration_start" for event in events):
+        return None
+    from . import artifact_calibration
+
+    source = metadata["source"]
+    scale = source.get("scale_to_uv")
+    timing = source.get("timestamp_policy") or STRICT_TIMING
+    reason = None
+    if not any(event["kind"] == "artifact_calibration_complete" for event in events):
+        reason = "calibration_incomplete"
+    elif source.get("channels") != 2 or metadata.get("clock_domain") != "lsl_local_clock":
+        reason = "supported_two_lead_lsl_clock_required"
+    elif scale is None or unit_conflict(source) or source_type_conflict(source):
+        reason = "eeg_units_unconfirmed"
+    elif not actual:
+        reason = "no_eeg_samples"
+    elif timing == BIOMULTI_REC_TIMING and analysis_times is None:
+        reason = "matched_native_clock_required"
+    elif timing not in (STRICT_TIMING, BIOMULTI_REC_TIMING, BIOMULTI_LSL_TIMING, BIOMULTI_LSL_RECOVERY_TIMING):
+        reason = "continuous_sample_clock_required"
+
+    if reason is not None:
+        report = {"status": "unavailable", "reason": reason, "policy": artifact_calibration.POLICY,
+                  "actions": {}, "windows": []}
+    else:
+        if analysis_times is None and timing in (BIOMULTI_LSL_TIMING, BIOMULTI_LSL_RECOVERY_TIMING):
+            _, analysis_times = packet_axis(connection, 0, None, policy=timing)
+        if analysis_times is None:
+            analysis_times = np.load(output / "timestamps.npy", allow_pickle=False)[:, 1]
+        # Windows must be able to rename the completed staging directory immediately.
+        raw = np.load(output / "raw_samples.npy", allow_pickle=False)
+        with np.errstate(over="ignore", invalid="ignore"):
+            raw_uv = raw.T * float(scale)
+        report = artifact_calibration.build_artifact_report(raw_uv, analysis_times, float(source["srate"]), events,
+                                                           motion=motion)
+
+    report_file, detections_file = "artifact_calibration.json", "artifact_detections.csv"
+    windows = report.pop("windows")
+    counts = {key: sum(row["status"] == key for row in windows)
+              for key in ("action_like", "uncertain", "no_signature", "unavailable")}
+    report.update(session_id=metadata["session_id"], timing_policy=timing,
+                  channel_labels=source.get("channel_labels"), reference=source.get("reference"),
+                  sample_rate_hz=source["srate"], unit_basis=source.get("unit_basis"), native_motion=motion_audit,
+                  detections_file=detections_file, detection_windows=counts, scope="same_session_artifact_diagnostics")
+    write_json(output / report_file, report)
+    csv_write(output / detections_file,
+              ("start_lsl", "end_lsl", "status", "actions", "reason", "assessable_frames", "planned_frames", "events"),
+              ({**row, "actions": "|".join(row["actions"]),
+                "events": json.dumps(row["events"], separators=(",", ":"))} for row in windows))
+    return {"policy": report["policy"], "status": report["status"], "reason": report.get("reason"),
+            "calibrated_actions": sum(item["status"] == "available" for item in report["actions"].values()),
+            "action_count": len(artifact_calibration.ACTIONS), "report_file": report_file, "detections_file": detections_file,
+            "detection_windows": counts}
+
+
+def _write_export(session, output, recover, progress, native_db, native_record, calibration, reprocess, *, motion_assisted):
     source = open_readonly(session)
     try:
         metadata = read_metadata(source)
@@ -448,6 +589,8 @@ def _write_export(session, output, recover, progress, native_db, native_record, 
         source = metadata["source"]
         analysis_times = None
         alignment = None
+        motion = None
+        motion_audit = {"status": "unavailable", "reason": "matched_native_rec_required"}
         from . import biomulti
         original_source = dict(source)
         recomputed = reprocess and source.get("preprocessing_policy") is None
@@ -482,6 +625,16 @@ def _write_export(session, output, recover, progress, native_db, native_record, 
             else:
                 alignment["status"] = "matched"
                 np.save(output / "device_timestamps.npy", analysis_times, allow_pickle=False)
+                if metadata["state"] == "recording":
+                    motion_audit["reason"] = "closed_capture_required"
+                elif source.get("preprocessing_policy") != conditioning.POLICY:
+                    motion_audit["reason"] = "causal_preprocessing_required"
+                elif source.get("scale_to_uv") is None or unit_conflict(source) or source_type_conflict(source):
+                    motion_audit["reason"] = "confirmed_eeg_scale_required"
+                else:
+                    from .native_motion import load_native_motion
+                    packets = tuple(packets)
+                    motion, motion_audit = load_native_motion(database, bound, packets, analysis_times)
                 with (output / "device_packets.csv").open("w", encoding="utf-8-sig", newline="") as file:
                     writer = csv.writer(file)
                     writer.writerow(("sample_start_index", "packet_number", "device_tick_ms", "outlet_last_lsl", "estimated_last_lsl"))
@@ -545,7 +698,25 @@ def _write_export(session, output, recover, progress, native_db, native_record, 
         previous = metadata.get("implementation_fingerprint_at_capture")
         captured_impl = implementation_fingerprint() if recomputed else implementation
         changed = changed or (previous is not None and captured_impl != previous)
-        summary = feature_tables(connection, metadata, events, output, changed, analysis_times)
+        summary = feature_tables(connection, metadata, events, output, changed, analysis_times, motion=motion,
+                                 motion_assisted=motion_assisted)
+        artifact_diagnostic = _export_artifact_calibration(output, connection, metadata, events, analysis_times,
+                                                          motion, motion_audit, actual)
+        if artifact_diagnostic is not None:
+            summary["artifact_calibration"] = artifact_diagnostic
+        if "descriptive_spectrum" in summary:
+            summary["descriptive_spectrum"].update(
+                motion_screening="require_quiet_support" if motion is not None else "eeg_only",
+                native_motion=motion_audit,
+            )
+        if motion_assisted:
+            layer = summary.setdefault("motion_assisted_spectrum", {})
+            layer.update(status="evaluated" if motion is not None else "unavailable",
+                         policy=spectrum_quality.MOTION_ASSISTED_POLICY,
+                         scope="descriptive_band_power_only", native_motion=motion_audit,
+                         gyro_quiet_cutoff_vendor_norm=spectrum_quality.MOTION_QUIET_CUTOFF,
+                         gyro_clock_margin_sec=spectrum_quality.MOTION_CLOCK_MARGIN_SEC,
+                         minimum_clean_segment_sec=spectrum_quality.MOTION_MIN_CLEAN_SEC)
         summary.update(schema="ningsi-capture-export-v1", checksum_required=True, session_id=metadata["session_id"],
                        protocol_id=metadata["protocol"].get("name"),
                        source_state=metadata["state"], raw_samples=actual, events=len(events),

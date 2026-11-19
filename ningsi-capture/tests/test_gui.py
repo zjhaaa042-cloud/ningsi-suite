@@ -1,4 +1,5 @@
 from contextlib import closing
+from dataclasses import replace
 import tempfile
 import gc
 import json
@@ -83,6 +84,7 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertEqual(app.config.name, SHORT_PROTOCOL)
                 self.assertEqual(app.store.metadata["protocol"], app.config.as_dict())
                 self.assertEqual(app.store.metadata["source"]["data_origin"], "simulation")
+                self.assertFalse(app.config.personal_artifact_calibration)
             finally:
                 if app.quality_monitor:
                     app.quality_monitor.stop()
@@ -168,6 +170,7 @@ class GuiLayoutTests(unittest.TestCase):
                 self.assertEqual(selected["unit_basis"], "biomulti_software_inference")
                 self.assertEqual(selected["timestamp_policy"], BIOMULTI_LSL_TIMING)
                 self.assertNotIn("native_rec", selected)
+                self.assertTrue(app.store.metadata["protocol"]["personal_artifact_calibration"])
             finally:
                 if app.store:
                     app.store.close("aborted")
@@ -348,6 +351,81 @@ class GuiLayoutTests(unittest.TestCase):
                 app.close_tasks(force=True)
                 app.store.close("aborted")
                 destroy_test_root(root)
+
+    def test_real_task_runs_calibration_before_enforcing_formal_precheck(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.withdraw()
+            app = CaptureApp(root, directory)
+            app.clock = FakeClock()
+            app.config = replace(ProtocolConfig.short(), personal_artifact_calibration=True)
+            source = {**simulation_source(), "kind": "lsl", "data_origin": "real"}
+            app.store = SessionStore(directory, participant="CAL", cohort="development", source=source,
+                                     protocol=app.config.as_dict(), clock=app.clock)
+            try:
+                times = [app.clock.seconds - 4 + index / 250 for index in range(1000)]
+                app.store.append(synthetic_samples(range(1000)), times, offset=0.)
+                with patch("ningsi_capture.gui.recent_window_quality",
+                           side_effect=[("amplitude",), ()]) as precheck:
+                    app.start_tasks()
+                    precheck.assert_not_called()
+                    self.assertEqual(app.runner.phase["name"], "artifact_calibration_rest_before")
+                    while app.runner.state != "artifact_calibration_wait":
+                        app.clock.seconds = app.runner.deadline
+                        app.runner.tick()
+                    self.assertEqual(precheck.call_count, 1)
+                    self.assertIn("幅度过大", app.task_text.cget("text"))
+                    self.assertFalse(app.runner.research_started)
+                    app.store.append(synthetic_samples(range(1000, 1250)),
+                                     [app.clock.seconds - 1 + index / 250 for index in range(250)], offset=0.)
+                    app.runner.key("return")
+                    self.assertEqual(precheck.call_count, 2)
+                    self.assertEqual(app.runner.phase["name"], "baseline_calibration")
+                    app.update_task_status()
+                    with closing(open_readonly(app.store.path)) as db:
+                        order = [row[0] for row in db.execute(
+                            "SELECT kind FROM events WHERE kind IN ('artifact_calibration_complete',"
+                            "'task_signal_precheck','protocol_start') ORDER BY event_id")]
+                        self.assertEqual(order, ["artifact_calibration_complete", "task_signal_precheck",
+                                                 "task_signal_precheck", "protocol_start"])
+            finally:
+                app.close_tasks(force=True)
+                app.store.close("aborted")
+                destroy_test_root(root)
+
+    def test_personal_calibration_checks_fixed_research_prerequisites_first(self):
+        missing_units = {"scale_to_uv": None}
+        obsolete_rec = {"timestamp_policy": BIOMULTI_REC_TIMING, "native_rec": {"record_id": 3, "created_ms": 47}}
+        for override, expected in ((missing_units, "单位"), (obsolete_rec, "REC")):
+            with self.subTest(prerequisite=expected), tempfile.TemporaryDirectory() as directory:
+                root = tk.Tk()
+                root.withdraw()
+                app = CaptureApp(root, directory)
+                app.clock = FakeClock()
+                app.config = replace(ProtocolConfig.short(), personal_artifact_calibration=True)
+                source = {**simulation_source(), "kind": "lsl", "data_origin": "real", **override}
+                app.store = SessionStore(directory, participant="CALCHK", cohort="development", source=source,
+                                         protocol=app.config.as_dict(), clock=app.clock)
+                try:
+                    times = [app.clock.seconds - 4 + index / 250 for index in range(1000)]
+                    app.store.append(synthetic_samples(range(1000)), times, offset=0.)
+                    with patch("ningsi_capture.gui.biomulti.active_record", return_value={"record_id": 4}), \
+                            patch("ningsi_capture.gui.recent_window_quality") as precheck, \
+                            patch("ningsi_capture.gui.messagebox.showwarning") as warning:
+                        app.start_tasks()
+                    precheck.assert_not_called()
+                    self.assertIn(expected, warning.call_args.args[0])
+                    self.assertIsNone(app.runner)
+                    self.assertIsNone(app.task_window)
+                    self.assertFalse(app.store.closed)
+                    self.assertEqual(app.store.sample_count, 1000)
+                    with closing(open_readonly(app.store.path)) as db:
+                        self.assertEqual(db.execute("SELECT COUNT(*) FROM events WHERE kind='artifact_calibration_start'")
+                                         .fetchone()[0], 0)
+                finally:
+                    app.close_tasks(force=True)
+                    app.store.close("aborted")
+                    destroy_test_root(root)
 
     def test_formal_paired_start_requires_same_active_rec_but_accepts_deferred_units(self):
         with tempfile.TemporaryDirectory() as directory:

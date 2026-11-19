@@ -8,9 +8,10 @@ import unittest
 import numpy as np
 
 from .test_support import FakeClock
+from ningsi.signal.artifacts import Verdict
 from ningsi_capture.acquisition import simulation_source, synthetic_samples
 from ningsi_capture.export import export_session
-from ningsi_capture.live_quality import CaptureQuality, QualityMonitor
+from ningsi_capture.live_quality import CaptureQuality, QualityMonitor, describe_window
 from ningsi_capture.readiness import line_power_ratios, formal_probe_summary
 from ningsi_capture.storage import SessionStore, open_readonly
 
@@ -69,6 +70,10 @@ class LiveQualityTests(unittest.TestCase):
         delayed = self.latest().operator_text(self.clock.now(), self.clock.seconds, False)
         self.assertIn("窗口时间与当前时钟", delayed)
         self.assertNotIn("通过", delayed)
+
+    def test_rapid_waveform_change_label_describes_only_the_observation(self):
+        verdict = Verdict(False, ("motion_transient",))
+        self.assertEqual(describe_window(verdict, self.store.metadata["source"]), "未通过 · 波形突变")
 
     def test_preflight_uses_raw_samples_before_qc_and_expires_on_disconnect(self):
         grid = np.arange(1000) / 250

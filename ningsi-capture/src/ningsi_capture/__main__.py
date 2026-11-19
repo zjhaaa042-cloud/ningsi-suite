@@ -37,6 +37,7 @@ def main(argv=None):
     export.add_argument("--unit-evidence", help="单位确认依据，如手册页或校准记录")
     export.add_argument("--uv-per-count", type=float, help="已确认的 ADC 转 µV 倍率")
     export.add_argument("--reprocess", action="store_true", help="用新版因果滤波和伪迹掩码重新导出旧记录")
+    export.add_argument("--motion-assisted", action="store_true", help="用已匹配的原生 REC 陀螺仪辅助频带描述")
     clock_check = sub.add_parser("check-clock", help="只读核对凝思已收到的样本与已保存的 BioMulti REC")
     clock_check.add_argument("session", type=Path)
     clock_check.add_argument("--rec-id", type=int, required=True)
@@ -89,7 +90,8 @@ def main(argv=None):
             if args.confirmed_unit or args.unit_evidence or args.uv_per_count is not None:
                 calibration = {"unit": args.confirmed_unit, "evidence": args.unit_evidence, "factor": args.uv_per_count}
             result = export_session(args.session, args.out, recover=args.recover, native_db=args.biomulti_db,
-                                    native_record=args.rec_id, calibration=calibration, reprocess=args.reprocess)
+                                    native_record=args.rec_id, calibration=calibration, reprocess=args.reprocess,
+                                    motion_assisted=args.motion_assisted)
         elif args.command == "check-clock":
             from contextlib import closing
             from .biomulti import align, default_database

@@ -1,9 +1,10 @@
 from collections import Counter
 from dataclasses import replace
 import unittest
+from unittest.mock import Mock
 
 from .test_support import MemoryStore
-from ningsi_capture.protocol import ProtocolConfig, TaskRunner
+from ningsi_capture.protocol import ARTIFACT_CALIBRATION_ACTIONS, ProtocolConfig, TaskRunner
 from ningsi.models.capture_protocols import SHORT_PROTOCOL
 
 
@@ -91,6 +92,69 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(Counter(p["block"] for p in probes), {0: 1, 1: 5, 2: 5, 3: 5})
         self.assertEqual(len({p["probe_id"] for p in probes}), 16)
         self.assertAlmostEqual(store.clock.seconds - start, 1133.8)
+
+    def test_session_calibration_presents_five_separate_cues_per_action_before_research(self):
+        config = replace(ProtocolConfig.short(), personal_artifact_calibration=True)
+        store = MemoryStore()
+        precheck = Mock(side_effect=["幅度过大", None])
+        runner = TaskRunner(store, lambda view: store.clock.now(), config, store.clock, research_precheck=precheck)
+        runner.start()
+        first = store.clock.seconds
+        while runner.state != "artifact_calibration_wait":
+            store.clock.seconds = runner.deadline
+            runner.tick()
+        self.assertEqual(store.clock.seconds - first, 300)
+        cues = [e for e in store.events if e["kind"] == "artifact_calibration_cue"]
+        self.assertEqual(len(cues), 30)
+        offsets = [e["stamp"].perf - first for e in cues]
+        self.assertEqual(offsets, list(range(60, 240, 6)))
+        for index, event in enumerate(cues, 1):
+            self.assertEqual(event["payload"]["cue_index"], index)
+            self.assertIs(event["payload"]["observed_action"], False)
+            self.assertEqual(event["payload"]["onset_basis"], "tk_idle_estimate")
+        for repetition in range(1, 6):
+            self.assertEqual({e["payload"]["action"] for e in cues if e["payload"]["repetition"] == repetition},
+                             {action for action, _ in ARTIFACT_CALIBRATION_ACTIONS})
+        names = [e["kind"] for e in store.events]
+        self.assertEqual(names.count("artifact_calibration_start"), 1)
+        self.assertEqual(names.count("artifact_calibration_complete"), 1)
+        self.assertNotIn("protocol_start", names)
+        store.clock.advance(60)
+        runner.tick()
+        self.assertEqual(precheck.call_count, 1)
+        runner.key("return")
+        original_start = next(e for e in store.events if e["kind"] == "protocol_start")
+        self.assertEqual(original_start["stamp"].perf, first + 360)
+        self.assertEqual(runner.phase["name"], "baseline_calibration")
+        self.assertEqual(precheck.call_count, 2)
+
+    def test_late_calibration_tick_preserves_recovery_and_abort_leaves_no_research_start(self):
+        config = replace(ProtocolConfig.demo(), personal_artifact_calibration=True)
+        store = MemoryStore()
+        painted = []
+
+        def render(view):
+            store.clock.advance(.25)
+            painted.append(store.clock.now())
+            return painted[-1]
+
+        runner = TaskRunner(store, render, config, store.clock)
+        runner.start()
+        store.clock.seconds = runner.deadline
+        runner.tick()
+        cue = next(e for e in store.events if e["kind"] == "artifact_calibration_cue")
+        self.assertEqual(cue["stamp"], painted[-1])
+        self.assertEqual(cue["stamp"].perf - cue["payload"]["requested_perf"], .25)
+        store.clock.advance(15)
+        runner.tick()
+        self.assertEqual(runner.state, "artifact_reset")
+        self.assertEqual(runner.deadline - painted[-1].perf, 4.)
+        runner.abort("operator_stop")
+        names = [e["kind"] for e in store.events]
+        self.assertEqual(names.count("artifact_calibration_cue"), 1)
+        self.assertIn("artifact_calibration_abort", names)
+        self.assertNotIn("artifact_calibration_complete", names)
+        self.assertNotIn("protocol_start", names)
 
     def test_invalid_practice_configuration_is_rejected_before_recording(self):
         with self.assertRaisesRegex(ValueError, "至少需要5"):

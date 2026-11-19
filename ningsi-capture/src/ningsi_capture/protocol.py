@@ -22,6 +22,20 @@ PROBE_CHOICES = (
     "被环境或身体感觉吸引", "想象或白日梦等任务无关的事情", "脑子空白", "不确定",
 )
 
+ARTIFACT_CALIBRATION_ACTIONS = (
+    ("blink", "轻眨一次，然后睁眼注视中央。"),
+    ("eyes", "头保持不动，眼睛轻轻向左看一下，再看回中央。"),
+    ("jaw", "轻轻收紧下颌一下，然后放松。"),
+    ("earclip", "指尖轻碰耳夹外壳一次，马上松开，保持耳夹位置。"),
+    ("forehead", "指尖轻碰前额电极外壳一次，马上松开，保持电极位置。"),
+    ("head", "轻轻向一侧转头一下，然后回正。"),
+)
+ARTIFACT_CALIBRATION_REPETITIONS = 5
+ARTIFACT_CALIBRATION_REST_BEFORE = "artifact_calibration_rest_before"
+ARTIFACT_CALIBRATION_REST_AFTER = "artifact_calibration_rest_after"
+ARTIFACT_CALIBRATION_CUE_SEC = 2.
+ARTIFACT_CALIBRATION_RESET_SEC = 4.
+
 
 @dataclass(frozen=True)
 class ProtocolConfig:
@@ -43,8 +57,11 @@ class ProtocolConfig:
     artifact_action_sec: float = 20
     artifact_rest_sec: float = 10
     seed: int = 20261113
+    personal_artifact_calibration: bool = False
 
     def __post_init__(self):
+        if type(self.personal_artifact_calibration) is not bool:
+            raise ValueError("任务前伪迹校准配置必须为布尔值。")
         if not 5 <= self.sart_practice_trials <= 10000:
             raise ValueError("SART练习至少需要5个试次。")
         if not 5 <= self.sart_trials <= 10000 or not 1 <= self.nogo_trials < self.sart_trials:
@@ -77,7 +94,28 @@ class ProtocolConfig:
                    artifact_still_sec=3, artifact_action_sec=2, artifact_rest_sec=1)
 
 
-def stages(config):
+def artifact_calibration_stages(seed):
+    def rest(name, title):
+        return {"name": name, "kind": "static", "seconds": 60., "title": title,
+                "text": "放松额头和下颌，注视中央，保持电极和参考端位置，可以自然眨眼。"}
+
+    items = [rest(ARTIFACT_CALIBRATION_REST_BEFORE, "伪迹校准 · 第一段静息")]
+    rng = random.Random(seed)
+    total = len(ARTIFACT_CALIBRATION_ACTIONS) * ARTIFACT_CALIBRATION_REPETITIONS
+    for repetition in range(1, ARTIFACT_CALIBRATION_REPETITIONS + 1):
+        actions = list(ARTIFACT_CALIBRATION_ACTIONS)
+        rng.shuffle(actions)
+        for action, text in actions:
+            index = len(items)
+            items.append({"name": f"artifact_calibration_{action}_{repetition}", "kind": "artifact_cue",
+                          "seconds": ARTIFACT_CALIBRATION_CUE_SEC + ARTIFACT_CALIBRATION_RESET_SEC,
+                          "title": f"伪迹校准 · 动作 {index}/{total}", "text": text,
+                          "action": action, "repetition": repetition, "cue_index": index})
+    items.append(rest(ARTIFACT_CALIBRATION_REST_AFTER, "伪迹校准 · 第二段静息"))
+    return items
+
+
+def stages(config, *, artifact_seed=0):
     items = [
         {"name": "baseline_calibration", "kind": "static", "seconds": config.calibration_sec,
          "title": "睁眼基线", "text": "自然呼吸，注视屏幕中央的十字，保持舒适坐姿。"},
@@ -103,15 +141,18 @@ def stages(config):
                       "title": "动作对照", "text": text + "不适时可立即停止。"})
         items.append({"name": f"artifact_rest_{action}", "kind": "static", "seconds": config.artifact_rest_sec,
                       "title": "动作间休息", "text": "回到自然静坐。"})
-    return [stage for stage in items if stage.get("seconds") != 0]
+    research = [stage for stage in items if stage.get("seconds") != 0]
+    return artifact_calibration_stages(artifact_seed) + research if config.personal_artifact_calibration else research
 
 
 class TaskRunner:
-    def __init__(self, store, render, config=None, clock=None):
+    def __init__(self, store, render, config=None, clock=None, *, research_precheck=None):
         self.store, self.render = store, render
         self.config = config or ProtocolConfig()
         self.clock = clock or store.clock
-        self.plan = stages(self.config)
+        self.plan = stages(self.config, artifact_seed=store.metadata.get("session_id", self.config.seed))
+        self.research_precheck = research_precheck
+        self.research_started = False
         seed = int(hashlib.sha256(f"{store.metadata['participant']}|{store.metadata['visit']}|{self.config.seed}".encode()).hexdigest()[:12], 16)
         self.rng = random.Random(seed)
         self.running = False
@@ -138,12 +179,42 @@ class TaskRunner:
         if self.state != "idle":
             raise RuntimeError("该次采集的实验已经开始过，请新建采集以重新实验。")
         self.running = True
-        self.emit("protocol_start", {"config": self.config.as_dict()})
+        if self.config.personal_artifact_calibration:
+            self.emit("artifact_calibration_start")
+        else:
+            self._start_research()
         self.next_phase()
+
+    def _start_research(self):
+        self.research_started = True
+        self.emit("protocol_start", {"config": self.config.as_dict()})
 
     def next_phase(self):
         if self.phase:
             self.emit("phase_end")
+        if self.phase.get("name") == ARTIFACT_CALIBRATION_REST_AFTER:
+            self.emit("artifact_calibration_complete", {
+                "cue_count": len(ARTIFACT_CALIBRATION_ACTIONS) * ARTIFACT_CALIBRATION_REPETITIONS,
+            })
+            self.phase = {}
+            self.state = "artifact_calibration_wait"
+            self.continue_research()
+            return
+        self._advance_phase()
+
+    def continue_research(self):
+        if self.state != "artifact_calibration_wait":
+            return
+        issue = self.research_precheck() if self.research_precheck else None
+        if issue:
+            self.show("伪迹校准已录完 · 等待复检", issue,
+                      "保持佩戴原位，信号稳定后按 Enter 复检。电极、耳夹参考端或头环移位，"
+                      "以及重新佩戴时，请停止保存并新建采集进行校准。")
+            return
+        self._start_research()
+        self._advance_phase()
+
+    def _advance_phase(self):
         self.phase_index += 1
         self.trial = None
         self.probe = None
@@ -153,9 +224,28 @@ class TaskRunner:
             self.show("实验已完成", "请通知实验员。原始脑电仍在连续保存。")
             return
         self.phase = self.plan[self.phase_index]
+        kind = self.phase["kind"]
+        if kind == "artifact_cue":
+            requested = self.clock.now()
+            onset = self.show(self.phase["title"], self.phase["text"], "只做一次，然后放松。不方便时可以跳过。")
+            self.phase_started = onset
+            self.emit("phase_start", {"spec": self.phase}, onset)
+            self.emit("artifact_calibration_cue", {
+                "action": self.phase["action"], "repetition": self.phase["repetition"],
+                "cue_index": self.phase["cue_index"], "observed_action": False,
+                "requested_perf": requested.perf, "onset_basis": "tk_idle_estimate",
+            }, onset)
+            self.state = "artifact_cue"
+            self.deadline = onset.perf + ARTIFACT_CALIBRATION_CUE_SEC
+            return
+        if self.phase["name"] in (ARTIFACT_CALIBRATION_REST_BEFORE, ARTIFACT_CALIBRATION_REST_AFTER):
+            self.phase_started = self.show(self.phase["title"], "+", self.phase["text"])
+            self.emit("phase_start", {"spec": self.phase}, self.phase_started)
+            self.state = "static"
+            self.deadline = self.phase_started.perf + self.phase["seconds"]
+            return
         self.phase_started = self.clock.now()
         self.emit("phase_start", {"spec": self.phase}, self.phase_started)
-        kind = self.phase["kind"]
         if kind == "static":
             self.state = "static"
             self.deadline = self.phase_started.perf + self.phase["seconds"]
@@ -172,8 +262,12 @@ class TaskRunner:
 
     def phase_remaining(self, now_perf):
         """Remaining seconds (low, high) on the phase clock, None for an untimed phase."""
-        if not self.running or self.phase["kind"] == "practice_probe":
+        if not self.running or self.state == "artifact_calibration_wait" or self.phase["kind"] == "practice_probe":
             return None
+        if self.phase["kind"] == "artifact_cue":
+            end = self.deadline + (ARTIFACT_CALIBRATION_RESET_SEC if self.state == "artifact_cue" else 0.)
+            remaining = max(0., end - now_perf)
+            return remaining, remaining
         if "seconds" in self.phase:
             remaining = max(0., self.phase_started.perf + self.phase["seconds"] - now_perf)
             return remaining, remaining
@@ -313,7 +407,7 @@ class TaskRunner:
         self.next_pvt_trial()
 
     def tick(self):
-        if not self.running:
+        if not self.running or self.state == "artifact_calibration_wait":
             return
         now = self.clock.now()
         if self.phase.get("kind") == "pvt" and now.perf >= self.phase_deadline:
@@ -321,8 +415,12 @@ class TaskRunner:
                 self.emit("trial_result", {**self.trial, "valid": False, "invalid_reason": "phase_deadline"})
             self.next_phase()
         elif now.perf >= self.deadline:
-            if self.state == "static":
+            if self.state in ("static", "artifact_reset"):
                 self.next_phase()
+            elif self.state == "artifact_cue":
+                onset = self.show(self.phase["title"], "+", "放松额头和下颌，静坐等待下一条提示。")
+                self.state = "artifact_reset"
+                self.deadline = onset.perf + ARTIFACT_CALIBRATION_RESET_SEC
             elif self.state == "sart":
                 self.finish_sart_trial()
             elif self.state == "probe":
@@ -347,7 +445,9 @@ class TaskRunner:
                                "ignored_after_transition": previous != current}, stamp)
         if previous != current:
             return
-        if self.state == "probe" and key in "1234567" and len(key) == 1:
+        if self.state == "artifact_calibration_wait" and key == "return":
+            self.continue_research()
+        elif self.state == "probe" and key in "1234567" and len(key) == 1:
             if stamp.perf >= self.probe["onset_perf"]:
                 self.finish_probe(int(key), stamp)
         elif key == "space" and self.state in ("sart", "pvt_stimulus"):
@@ -366,8 +466,12 @@ class TaskRunner:
             self.emit("trial_result", {**self.trial, "valid": False, "invalid_reason": reason})
         if self.probe is not None:
             self.emit("probe_cancelled", {**self.probe, "reason": reason})
-        self.emit("phase_end", {"incomplete": True})
-        self.emit("protocol_abort", {"reason": reason})
+        if self.phase:
+            self.emit("phase_end", {"incomplete": True})
+        if self.research_started:
+            self.emit("protocol_abort", {"reason": reason})
+        elif self.state != "artifact_calibration_wait":
+            self.emit("artifact_calibration_abort", {"reason": reason})
         self.abort_reason = reason
         self.running, self.state = False, "aborted"
         self.show("实验已停止", "请通知实验员。已采集数据保留。")

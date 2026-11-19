@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime
 import json
 import math
@@ -104,6 +105,7 @@ class CaptureApp:
         self.clock = Clock()
         self.messages = queue.Queue()
         self.store = self.recorder = self.runner = self.task_window = None
+        self.config = ProtocolConfig()
         self.last_session = None
         self.streams = []
         self.stream_key = None
@@ -415,6 +417,9 @@ class CaptureApp:
             if not simulated and self.protocol_mode.get() == "快速模拟联调":
                 raise ValueError("快速联调仅限模拟演示，真人采集请选择短版或完整研究协议。")
             self.config = PROTOCOL_CHOICES[self.protocol_mode.get()]()
+            if (not simulated and source["data_origin"] == "real" and source.get("type", "").casefold() == "eeg"
+                    and source["channels"] == 2 and 100 <= source["srate"] <= 2000):
+                self.config = replace(self.config, personal_artifact_calibration=True)
             self.store = SessionStore(self.data_dir, participant=self.participant.get().strip(),
                                       visit=self.visit.get().strip(), cohort=COHORT_LABELS[self.cohort.get()],
                                       source=source, protocol=self.config.as_dict(), clock=self.clock,
@@ -425,7 +430,10 @@ class CaptureApp:
             pilot = source["kind"] == "lsl" and self.store.metadata["cohort"] == "pilot"
             self.task_button.configure(text="2  开始预试任务（不计入训练）" if pilot else "2  打开受试者任务窗口")
             self.stop_button.configure(text="3  停止并保存本次采集")
-            if pilot:
+            if self.config.personal_artifact_calibration:
+                self.task_button.configure(text="2  开始伪迹校准与任务")
+                self.phase_text.set("收到 4 秒脑电后可开始。先录约 5 分钟伪迹校准，再进行任务预检。")
+            elif pilot:
                 self.phase_text.set("收到 4 秒脑电后可开始预试。任务按键和探针作答会随原始脑电一起保存。")
             elif source.get("native_rec"):
                 self.phase_text.set("双录已绑定原生 REC。请在两边同时录制期间进行任务，保存 REC 后导出核对。")
@@ -463,6 +471,74 @@ class CaptureApp:
         except Exception as exc:
             messagebox.showerror("无法开始采集", str(exc), parent=self.root)
 
+    def _research_prerequisites(self):
+        source = self.store.metadata["source"]
+        if source["kind"] != "lsl" or self.store.metadata["cohort"] == "pilot":
+            return None
+        paired = source.get("timestamp_policy") == BIOMULTI_REC_TIMING
+        if not paired and source.get("scale_to_uv") is None:
+            return ("请先确认 EEG 单位", "当前仅保存原始数值，无法建立有效基线。\n"
+                    "请先停止并保存，在“设备与单位”按设备说明填写源单位，然后新建采集。")
+        if paired:
+            try:
+                if biomulti.active_record(biomulti.default_database()) != source["native_rec"]:
+                    raise ValueError("原生 REC 已切换，请停止保存并重新开始双录。")
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                return "原生 REC 未就绪", str(exc)
+        return None
+
+    def _research_precheck(self):
+        issue = self._research_prerequisites()
+        if issue:
+            return issue
+        source = self.store.metadata["source"]
+        if source["kind"] != "lsl":
+            return None
+        pilot = self.store.metadata["cohort"] == "pilot"
+        paired = source.get("timestamp_policy") == BIOMULTI_REC_TIMING
+        reasons = recent_window_quality(self.store.path)
+        last = self.store.last_received
+        preflight = (self.quality_monitor.latest.latest_preflight(self.clock.now(), last)
+                     if self.quality_monitor else None)
+        check = {"reasons": list(reasons), "cohort": self.store.metadata["cohort"]}
+        if preflight is not None:
+            check["signal_preflight"] = preflight.as_dict()
+        if source.get("research_input_policy") == RECOVERY_INPUT_POLICY:
+            try:
+                candidate_check = self.store.predictions.recovery_preflight(self.clock.now(), self.store.sample_count)
+            except (ValueError, TypeError, sqlite3.Error):
+                candidate_check = {"reason": "prediction_error"}
+            check["tcn_preflight"] = candidate_check
+            usable = candidate_check.get("windows_usable", 0)
+            if "reason" in candidate_check:
+                self.note(f"TCN 预检：最近 6 个研究窗口合格 {usable} 个。"
+                          f"{describe_reasons([candidate_check['reason']])}。正式探针逐次核对可评分性。")
+            else:
+                self.note(f"TCN 预检通过：最近 6 个研究窗口合格 {usable} 个。")
+        blocking = [r for r in reasons if not (paired and r in ("native_clock_pending", "unit_unconfirmed"))]
+        if blocking and not pilot:
+            detail = describe_reasons(blocking)
+            self.store.event("task_signal_precheck", {**check, "continued": False})
+            message = (f"最近 4 秒脑电未通过导出质控：{detail}。\n\n"
+                       "原始数据仍在保存。处理提示的问题后可复检。\n"
+                       "更改设备单位或时间处理方式，需要先停止保存，再新建采集。")
+            if preflight is not None:
+                message += "\n\n" + preflight.text()
+            return "脑电预检未通过", message
+        last = self.store.last_received
+        if self.store.closed or self.stopping or last is None or self.clock.now().perf - last >= 3:
+            return "脑电接收已中断", "脑电接收已中断，请确认设备仍在发布。"
+        if pilot and reasons:
+            self.note("开始预试，保存任务与作答。脑电质控未通过：" + describe_reasons(reasons) + "。")
+        elif paired:
+            self.note("开始原生双录任务。设备对时和脑电质控将在导出时按匹配样本复核。")
+        self.store.event("task_signal_precheck", {**check, "continued": True})
+        return None
+
+    def _after_artifact_calibration(self):
+        issue = self._research_precheck()
+        return issue[1] if issue else None
+
     def start_tasks(self):
         if not self.store or self.store.closed or self.runner is not None or self.stopping:
             return
@@ -472,60 +548,10 @@ class CaptureApp:
                 or last is None or self.clock.now().perf - last >= 3):
             messagebox.showinfo("等待信号", "请确认信号持续更新并已收到至少4秒的样本。", parent=self.root)
             return
-        if self.store.metadata["source"]["kind"] == "lsl":
-            source = self.store.metadata["source"]
-            pilot = self.store.metadata["cohort"] == "pilot"
-            paired = source.get("timestamp_policy") == BIOMULTI_REC_TIMING
-            if not pilot and not paired and source.get("scale_to_uv") is None:
-                messagebox.showwarning("请先确认 EEG 单位", "当前仅保存原始数值，无法建立有效基线。\n\n"
-                                       "请先停止并保存，在“设备与单位”按设备说明填写源单位，然后新建采集。"
-                                       "不要填写光源驱动电压。", parent=self.root)
-                return
-            reasons = recent_window_quality(self.store.path)
-            preflight = (self.quality_monitor.latest.latest_preflight(self.clock.now(), last)
-                         if self.quality_monitor else None)
-            check = {"reasons": list(reasons), "cohort": self.store.metadata["cohort"]}
-            if preflight is not None:
-                check["signal_preflight"] = preflight.as_dict()
-            if source.get("research_input_policy") == RECOVERY_INPUT_POLICY:
-                try:
-                    candidate_check = self.store.predictions.recovery_preflight(self.clock.now(), snapshot["samples"])
-                except (ValueError, TypeError, sqlite3.Error):
-                    candidate_check = {"reason": "prediction_error"}
-                check["tcn_preflight"] = candidate_check
-                usable = candidate_check.get("windows_usable", 0)
-                if "reason" in candidate_check:
-                    self.note(f"TCN 预检：最近 6 个研究窗口合格 {usable} 个。"
-                              f"{describe_reasons([candidate_check['reason']])}。正式探针逐次核对可评分性。")
-                else:
-                    self.note(f"TCN 预检通过：最近 6 个研究窗口合格 {usable} 个。")
-            blocking = [r for r in reasons if not (paired and r in ("native_clock_pending", "unit_unconfirmed"))]
-            if not pilot and paired:
-                try:
-                    if biomulti.active_record(biomulti.default_database()) != source["native_rec"]:
-                        raise ValueError("原生 REC 已切换，请停止保存并重新开始双录。")
-                except (OSError, ValueError, sqlite3.Error) as exc:
-                    messagebox.showwarning("原生 REC 未就绪", str(exc), parent=self.root)
-                    return
-            if blocking and not pilot:
-                detail = describe_reasons(blocking)
-                self.store.event("task_signal_precheck", {**check, "continued": False})
-                message = (f"最近 4 秒脑电未通过导出质控：{detail}。\n\n"
-                           "原始数据仍在保存。请先处理提示的问题，再点击“打开受试者任务窗口”复检。\n"
-                           "更改设备单位或时间处理方式，需要先停止保存，再新建采集。")
-                if preflight is not None:
-                    message += "\n\n" + preflight.text()
-                messagebox.showwarning("脑电预检未通过", message, parent=self.root)
-                return
-            last = self.store.last_received
-            if self.store.closed or self.stopping or last is None or self.clock.now().perf - last >= 3:
-                self.status.set("脑电接收已中断，请确认设备仍在发布。")
-                return
-            if pilot and reasons:
-                self.note("开始预试，保存任务与作答。脑电质控未通过：" + describe_reasons(reasons) + "。")
-            elif paired:
-                self.note("开始原生双录任务。设备对时和脑电质控将在导出时按匹配样本复核。")
-            self.store.event("task_signal_precheck", {**check, "continued": True})
+        issue = self._research_prerequisites() if self.config.personal_artifact_calibration else self._research_precheck()
+        if issue:
+            messagebox.showwarning(*issue, parent=self.root)
+            return
         self.task_window = tk.Toplevel(self.root)
         win = self.task_window
         win.title("凝思实验任务  受试者窗口")
@@ -550,11 +576,13 @@ class CaptureApp:
         win.bind("<FocusOut>", self.on_focus_out)
         win.focus_force()
         self.pressed.clear()
-        self.runner = TaskRunner(self.store, self.render_task, self.config, self.clock)
+        self.runner = TaskRunner(self.store, self.render_task, self.config, self.clock,
+                                 research_precheck=self._after_artifact_calibration)
         self.task_button.configure(state="disabled")
         self.runner.start()
         self.update_task_status()
-        self.note("实验任务已开始；受试者窗口不显示专注分数或奖励。")
+        self.note("任务前伪迹校准已开始。" if self.config.personal_artifact_calibration
+                  else "实验任务已开始；受试者窗口不显示专注分数或奖励。")
 
     def render_task(self, view):
         if self.task_window is None or not self.task_window.winfo_exists():
@@ -579,10 +607,13 @@ class CaptureApp:
         key = event.keysym.lower()
         if key.startswith("kp_") and key[3:] in "1234567" and len(key) == 4:
             key = key[3:]
+        if key == "kp_enter":
+            key = "return"
         if key in self.pressed:
             return
         self.pressed.add(key)
-        if self.runner and key in ("space", "1", "2", "3", "4", "5", "6", "7"):
+        if self.runner and (key in ("space", "1", "2", "3", "4", "5", "6", "7")
+                            or key == "return" and self.runner.state == "artifact_calibration_wait"):
             self.runner.key(key, stamp, getattr(event, "time", None))
             self.update_task_status()
 
@@ -590,6 +621,8 @@ class CaptureApp:
         key = event.keysym.lower()
         if key.startswith("kp_") and key[3:] in "1234567" and len(key) == 4:
             key = key[3:]
+        if key == "kp_enter":
+            key = "return"
         self.pressed.discard(key)
         if self.runner and self.runner.running:
             self.store.event("key_up", {"key": event.keysym.lower(), "phase": self.runner.phase.get("name")})
@@ -601,7 +634,8 @@ class CaptureApp:
             self.root.after_cancel(self.focus_check)
         def check():
             self.focus_check = None
-            if self.task_close_pending or not self.runner or not self.runner.running or self.task_window is None:
+            if (self.task_close_pending or not self.runner or not self.runner.running or self.task_window is None
+                    or self.runner.state == "artifact_calibration_wait"):
                 return
             focus = self.root.focus_get()
             if focus is None or focus.winfo_toplevel() != self.task_window:
@@ -638,6 +672,8 @@ class CaptureApp:
         if runner.finished:
             message = ("预试任务已完成。停止并保存后可导出原始脑电和作答，本次预试不计入训练。"
                        if self.store.metadata["cohort"] == "pilot" else "任务已完成。请停止并保存，再导出本次采集。")
+        elif runner.state == "artifact_calibration_wait":
+            message = "伪迹校准已完成。佩戴位置保持不变时，可在受试者窗口按 Enter 复检。"
         elif runner.running:
             now = self.clock.now().perf
             elapsed = minutes_seconds(int(max(0., now - runner.phase_started.perf)))
@@ -763,8 +799,29 @@ class CaptureApp:
                 alignment_text = (f"\n原生时钟已匹配 {align['matched_packets']} 包，合格脑电窗 "
                                   f"{result['windows_usable']}/{result['windows_total']}。"
                                   if align["status"] == "matched" else f"\n原生时标未核对：{align['reason']}")
+            spectrum = result.get("descriptive_spectrum")
+            spectrum_text = ""
+            if spectrum:
+                spectrum_text = (f"\n可看频带 {spectrum['windows_with_any_band_power']}/{spectrum['windows_total']} 窗"
+                                 f"（描述性，双侧 {spectrum['windows_analyzable']} 窗，"
+                                 f"仅单侧 {spectrum['single_channel']['windows_analyzable']} 窗）。"
+                                 f"\n双侧有效 {spectrum['support_seconds']:.1f} 秒（已去重），"
+                                 f"其中 {spectrum['windows_short_fragments']} 窗使用短片段。")
+                for channel in spectrum["single_channel"]["channels"]:
+                    spectrum_text += (f"\n仅单侧可看 · {channel['channel_label']} {channel['windows']} 窗，"
+                                      f"有效 {channel['support_seconds']:.1f} 秒（已去重）。")
+            artifact = result.get("artifact_calibration")
+            artifact_text = ""
+            if artifact:
+                status = {"available": "已建立", "partial": "部分建立", "unavailable": "不可用"}.get(
+                    artifact["status"], "待核对")
+                artifact_text = (f"\n本场伪迹校准参考：{status}，"
+                                 f"{artifact['calibrated_actions']}/{artifact['action_count']} 类动作。")
+                files = [artifact[name] for name in ("report_file", "detections_file") if artifact.get(name)]
+                if files:
+                    artifact_text += "\n对应文件 " + "、".join(files) + "。"
             messagebox.showinfo("导出完成", f"文件位置：\n{output}\n\n{eligibility}"
-                                f"{alignment_text}\n\n250 Hz 双模型同时评分 {comparison['scored']} 个探针，"
+                                f"{alignment_text}{spectrum_text}{artifact_text}\n\n250 Hz 双模型同时评分 {comparison['scored']} 个探针，"
                                 f"其中 {comparison['comparable']} 个有二分类回答。"
                                 "\n两组分数、任务时间、质控及作答见 probe_comparison.csv。", parent=self.root)
         if not source.get("preprocessing_policy"):

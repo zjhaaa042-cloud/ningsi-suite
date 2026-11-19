@@ -32,7 +32,7 @@ QUALITY_TEXT = {
     "preprocessing_warmup": "等待 2 秒滤波历史和 4 秒脑电",
     "sample_gap_in_filter_history": "滤波历史内样本不连续",
     "ocular_transient": "疑似眼动或眨眼片段", "muscle_burst": "疑似短时肌电",
-    "motion_transient": "疑似运动或电极跳变", "contact_dropout": "通道出现连续相同读数",
+    "motion_transient": "波形突变", "contact_dropout": "通道出现连续相同读数",
     "insufficient_baseline_windows": "合格窗数不足", "insufficient_baseline_valid_ratio": "合格窗比例不足",
     "inconsistent_baseline_data": "基线窗数据不一致",
 }
@@ -139,6 +139,7 @@ class CaptureQuality:
         self.reading = ""
         self.end = self.received_perf = None
         self.recent = deque(maxlen=RECENT_WINDOWS)
+        self.recent_spectral = deque(maxlen=RECENT_WINDOWS)
         self.preflight = None
         self.cleaned_samples = ()
         self.filtered_samples = ()
@@ -190,10 +191,12 @@ class CaptureQuality:
                 first_end = size - 1 if self.next_index == 0 else self.next_index - 1 + hop
                 end = min(newest_end, first_end + hop * 4)
                 windows = analysis_windows(connection, metadata, first_index=self.next_index, stop_index=end + 1,
-                                           keep_traces=True)
+                                           keep_traces=True, include_spectral=True)
                 for row in windows:
                     window = row["window"]
                     self.recent.append(window.usable)
+                    spectral = row.get("descriptive_spectrum") or {}
+                    self.recent_spectral.append(spectral.get("status") in ("full", "partial"))
                     if (self.baseline_start is not None and row["start"] is not None and row["end"] is not None
                             and row["start"] >= self.baseline_start and (self.baseline_end is None or row["end"] <= self.baseline_end)):
                         self.calibration.append((row["end"], window))
@@ -201,10 +204,13 @@ class CaptureQuality:
                                                "window": ProbeWindow(window.usable)})
                 if windows:
                     row = windows[-1]
+                    spectrum = row.get("descriptive_spectrum")
                     self.preflight = Preflight(tuple(source["channel_labels"][:2]), row["raw_50hz_ratios"],
                                                rate, sum(self.recent), len(self.recent), row["sample_end_index"],
                                                row.get("filtered_50hz_ratios", ()), row.get("raw_60hz_ratios", ()),
-                                               row.get("filtered_60hz_ratios", ()))
+                                               row.get("filtered_60hz_ratios", ()),
+                                               spectral_passed=sum(self.recent_spectral) if spectrum is not None else None,
+                                               descriptive_spectrum=spectrum)
                     wave = row.get("filtered_uv")
                     self.cleaned_samples = ()
                     self.filtered_samples = ()

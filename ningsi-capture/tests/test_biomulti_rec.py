@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -102,9 +103,11 @@ class NativeRecTests(unittest.TestCase):
             f["brain_elec_channel"].reverse()
         self.save_frames(self.frames)
         info = export_session(self.session, self.root / "wrong-samples", native_db=self.vendor,
-                              calibration={"unit": "uV", "evidence": "fixture"})
+                              calibration={"unit": "uV", "evidence": "fixture"}, motion_assisted=True)
         self.assertEqual(info["native_alignment"]["status"], "unavailable")
         self.assertEqual(info["windows_usable"], 0)
+        self.assertEqual(info["motion_assisted_spectrum"]["status"], "unavailable")
+        self.assertFalse((self.root / "wrong-samples/motion_assisted_windows.csv").exists())
         self.assertFalse((self.root / "wrong-samples/device_timestamps.npy").exists())
 
     def test_binding_requires_current_record_and_export_requires_saved_record(self):
@@ -145,8 +148,28 @@ class NativeRecTests(unittest.TestCase):
             store.close("completed")
         summary = export_session(store.path, self.root / "dev-unknown", native_db=self.vendor)
         self.assertEqual(summary["train_eligible"], 0)
-        summary = export_session(store.path, self.root / "dev-confirmed", native_db=self.vendor,
-                                 calibration={"unit":"uV", "evidence":"generated in microvolts"})
+        calibration = {"unit": "uV", "evidence": "generated in microvolts"}
+        normal, assisted = self.root / "dev-confirmed", self.root / "with_motion"
+        summary = export_session(store.path, normal, native_db=self.vendor, calibration=calibration)
         self.assertTrue(summary["baseline_valid"])
         self.assertEqual((summary["train_eligible"], summary["test_eligible"]), (1, 0))
         self.assertEqual(summary["probe_comparison"]["scored"], 0)  # no retrospective blind predictions
+        trace = Mock()
+        trace.assess.return_value = {"status": "quiet", "peak": .2, "samples": 100, "reason": None}
+        with patch("ningsi_capture.native_motion.load_native_motion",
+                   return_value=(trace, {"status": "available", "record_id": 7})) as load:
+            result = export_session(store.path, assisted, native_db=self.vendor,
+                                    calibration=calibration, motion_assisted=True)
+        load.assert_called_once()
+        self.assertNotIn("motion_assisted_spectrum", summary)
+        extra = result["motion_assisted_spectrum"]
+        self.assertEqual(extra["status"], "evaluated")
+        self.assertEqual(extra["windows_total"], summary["windows_total"])
+        self.assertEqual(extra["scope"], "descriptive_band_power_only")
+        self.assertEqual(result["windows_usable"], summary["windows_usable"])
+        self.assertEqual((result["train_eligible"], result["test_eligible"]), (1, 0))
+        for name in ("windows.csv", "features.csv", "probes.csv", "baseline.json", "raw_samples.npy",
+                     "cleaned_windows_uv.npy", "artifact_mask.npy", "probe_predictions.csv"):
+            self.assertEqual((assisted / name).read_bytes(), (normal / name).read_bytes(), name)
+        checksums = json.loads((assisted / "SHA256.json").read_text(encoding="utf8"))
+        self.assertIn(extra["windows_file"], checksums)

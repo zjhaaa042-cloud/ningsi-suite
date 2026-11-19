@@ -50,6 +50,8 @@ class Preflight:
     filtered_ratios: tuple = ()
     raw_60: tuple = ()
     filtered_60: tuple = ()
+    spectral_passed: int | None = None
+    descriptive_spectrum: dict | None = None
 
     def text(self):
         if self.rate / 2 < 51:
@@ -66,15 +68,32 @@ class Preflight:
                 spectrum += " · 60 Hz 原始→处理后 " + "、".join(
                     f"{r:.1%}→{f:.2%}" if r is not None and f is not None else "待测"
                     for r, f in zip(self.raw_60, self.filtered_60))
-        return f"{spectrum}\n最近 {self.count} 窗合格 {self.passed}/{self.count}（{self.passed/self.count:.0%}）"
+        text = f"{spectrum}\n最近 {self.count} 窗严格合格 {self.passed}/{self.count}（{self.passed/self.count:.0%}）"
+        if self.spectral_passed is None:
+            return text
+        text += f"\n可看频带 {self.spectral_passed}/{self.count} 窗（描述性）"
+        latest = self.descriptive_spectrum or {}
+        if latest.get("status") not in ("full", "partial"):
+            return text + " · 本窗频带不可计算"
+        relative = latest.get("relative_bands", {})
+        bands = "、".join(f"{label} {relative[name]:.1%}" for name, label in
+                         (("theta", "θ"), ("alpha", "α"), ("beta", "β")) if name in relative)
+        text += f" · 本窗保留 {latest['support_sec']:.1f}/4 秒"
+        if latest.get("method") == "short_fragments":
+            text += " · 短片段估计，频带精度较低"
+        return text + (f" · {bands}" if bands else "")
 
     def as_dict(self):
-        return {"sample_end_index": self.end_index, "labels": self.labels,
-                "line_power_ratios": self.ratios, "line_band_hz": [49, 51],
-                "total_band_hz": [1, min(100., self.rate / 2)], "nominal_srate": self.rate,
-                "recent_windows": self.count, "recent_usable": self.passed,
-                "filtered_50hz_ratios": self.filtered_ratios, "raw_60hz_ratios": self.raw_60,
-                "filtered_60hz_ratios": self.filtered_60}
+        result = {"sample_end_index": self.end_index, "labels": self.labels,
+                  "line_power_ratios": self.ratios, "line_band_hz": [49, 51],
+                  "total_band_hz": [1, min(100., self.rate / 2)], "nominal_srate": self.rate,
+                  "recent_windows": self.count, "recent_usable": self.passed,
+                  "filtered_50hz_ratios": self.filtered_ratios, "raw_60hz_ratios": self.raw_60,
+                  "filtered_60hz_ratios": self.filtered_60}
+        if self.spectral_passed is not None:
+            result.update(recent_spectral_reportable=self.spectral_passed,
+                          descriptive_spectrum=self.descriptive_spectrum)
+        return result
 
 
 def cohort_use(cohort, origin):
