@@ -69,7 +69,7 @@ export async function render(container, ctx) {
     el('summary', { text: '单位与标定设置' }), unitField, factorField,
   ]);
   const blinkCalibration = createBlinkCalibration(ctx, {
-    getSettings: () => ({ participant: participant.value, device: device.value, eeg_calibration: calibrationSelection() }),
+    getSettings: () => ({ participant: participant.value, device: device.value, eeg_calibration: operatorCalibrationSelection() }),
     ensureParticipant: async () => {
       if (participant.value) return;
       const requestedRevision = participantRevision;
@@ -99,6 +99,9 @@ export async function render(container, ctx) {
   function calibrationSelection() {
     const documented = preflight.data?.calibration;
     if (preflight.data?.device === device.value && documented?.origin === 'manufacturer_manual') return documented;
+    return operatorCalibrationSelection();
+  }
+  function operatorCalibrationSelection() {
     return unit.value ? { source_unit: unit.value,
       ...(unit.value === 'ADC' ? { scale_to_uv: Number.isFinite(factor.valueAsNumber) ? factor.valueAsNumber : null } : {}) } : null;
   }

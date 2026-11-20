@@ -136,7 +136,7 @@ def get_session(conn, session_uuid: str):
     ).fetchone()
 
 
-def list_sessions(conn, *, public_id=None, status=None, limit=50, offset=0) -> tuple[list, int]:
+def list_sessions(conn, *, public_id=None, status=None, limit=50, offset=0, uuids=None) -> tuple[list, int]:
     joins = "JOIN subjects s ON s.id = sessions.subject_id"
     where, params = [], []
     if public_id:
@@ -145,6 +145,11 @@ def list_sessions(conn, *, public_id=None, status=None, limit=50, offset=0) -> t
     if status:
         where.append("sessions.status = ?")
         params.append(status)
+    if uuids is not None:
+        if not uuids:
+            return [], 0
+        where.append("sessions.uuid IN (" + ",".join("?" for _ in uuids) + ")")
+        params.extend(uuids)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute(
         f"SELECT COUNT(*) AS n FROM sessions {joins} {clause}", params
@@ -504,6 +509,7 @@ def all_sessions_for_ledger(conn) -> list:
         monitor_quality = (payloads.get("monitor") or {}).get("quality") or {}
         baseline = (payloads.get("baseline_open") or {}).get("baseline") or {}
         valid_ratio = monitor_quality.get("valid_ratio")
+        collection = monitor_quality.get("assessment_eeg_collection") or {}
         out.append({
             "participant": row["public_id"],
             "session": "01",
@@ -517,7 +523,8 @@ def all_sessions_for_ledger(conn) -> list:
             "time_scale": row["time_scale"],
             "indicators": {name: value["mean"] for name, value in summary.items()},
             "quality": {"valid_ratio": valid_ratio,
-                        "passed": bool((valid_ratio or 0) >= config.ASSESS["min_valid_ratio"]
+                        "passed": bool(collection.get("completed", True)
+                                       and (valid_ratio or 0) >= config.ASSESS["min_valid_ratio"]
                                        and baseline.get("valid"))},
             "alerts": [dict(item) for item in alerts],
             "session_uuid": row["uuid"],

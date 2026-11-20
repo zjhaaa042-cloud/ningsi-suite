@@ -56,6 +56,22 @@ class LiveArtifactTests(unittest.TestCase):
         _, quiet = self.process([self.alpha], ["Fp1"], ["uV"])
         self.assertEqual(quiet["reasons"], [])
 
+    def test_descriptive_mask_covers_muscle_and_neighbors_but_preserves_quiet_half(self):
+        from ningsi.signal.conditioning import MUSCLE
+
+        burst = 40 * np.sin(2 * np.pi * 38 * self.t) * ((self.t > 2.4) & (self.t < 3.1))
+        rows = np.stack([self.alpha + burst, self.alpha])
+        _, result = process_live_artifacts(rows, rows, self.rate, self.size, ["Fp1", "Fp2"],
+                                           ["uV", "uV"], fragment_masks=True)
+        self.assertIn("muscle_burst", result["reasons"])
+        excluded = (result["fragment_artifact_mask"] & MUSCLE) != 0
+        # Output starts two seconds into the recording. The guard extends on both sides.
+        self.assertTrue(excluded[round(.24*self.rate):round(1.38*self.rate)].all())
+        self.assertFalse(excluded[2*self.rate:].any())
+        _, ordinary = self.process(rows, ["Fp1", "Fp2"], ["uV", "uV"])
+        self.assertEqual(ordinary["reasons"], result["reasons"])
+        self.assertNotIn("fragment_artifact_mask", ordinary)
+
     def test_motion_stream_window_and_missing_reference_gate_scoring(self):
         profile = {"eeg": "headset", "motion": "headset-imu", "axes": [0,1,2], "unit": "g"}
         with patch.dict(os.environ, {"NINGSI_MOTION_REFERENCE": json.dumps(profile)}):
@@ -94,6 +110,27 @@ class LiveArtifactTests(unittest.TestCase):
         self.assertEqual(evidence["spec"], conditioning.POLICY)
         self.assertEqual(evidence["reasons"], list(expected["window"].quality.reasons))
         np.testing.assert_allclose(wave, expected["filtered_uv"], atol=1e-10)
+
+    def test_assessment_cursor_uses_model_window_end_and_reuses_its_snapshot(self):
+        from ningsi.signal import conditioning
+        source = ManagedLslSource("headset", device="headset", fill_timeout=0, research_timing=True)
+        source.research_profile = {"srate": self.rate, "scale_to_uv": 1., "preprocessing_policy": conditioning.POLICY}
+        eeg = StreamBuffer(StreamDescriptor("eeg", "headset", "EEG", 1, self.rate, ("Fp1",), declared_units=("uV",)))
+        times = np.arange(round(self.rate * 7.5)) / self.rate
+        raw = np.sin(2 * np.pi * 10 * times) * 12
+        eeg.append_chunk(raw[:, None], times)
+        source._manager._buffers["eeg"] = eeg
+        expected, old = source.analysis_window()
+        with patch.object(eeg, "model_snapshot", wraps=eeg.model_snapshot) as snapshot:
+            wave, evidence = source.analysis_window(assessment_timing=True)
+        snapshot.assert_called_once_with(20 * self.rate)
+        np.testing.assert_array_equal(wave, expected)
+        timing = evidence.pop("sample_timing")
+        self.assertEqual(old, evidence)
+        self.assertEqual(timing["sample_end"], old["sample_end_index"] + 1)
+        self.assertEqual(timing["sample_end"], 1500)
+        self.assertEqual(timing["latest_sample_end"], len(times))
+        self.assertEqual(timing["received_at"], source.assessment_timing_anchor()["received_at"])
 
     def test_stale_alignment_or_conflicting_motion_units_are_unavailable(self):
         stamps = self.t[::10]

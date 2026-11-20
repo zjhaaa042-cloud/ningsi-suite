@@ -101,3 +101,56 @@ assert.equal(bar({behavior:{pvt:{...pvt,rate_denominators:{lapse_rate:6}}}}).get
 assert.equal(bar({behavior:{pvt:{trials:12,lapses:2}}}),undefined);
 assert.equal(bar({behavior:{pvt:{...pvt,responded:0,lapses:0}}}),undefined);
 ''')
+
+    def test_summary_cards_use_saved_results_before_technical_disclosures(self):
+        self.node(r'''
+const {render}=await import(REPORT_URI);
+const ctx=makeCtx();ctx.params.set('session','x');
+api.getSession=async()=>({data:{uuid:'x'}});
+api.artifacts=async()=>({data:{items:[]}});
+api.report=async()=>({data:{participant:'qa-hidden',extras:{source_kind:'sim',
+  report_context:{title:'演示报告',hide_participant:true}},quality:{windows_total:20,windows_usable:19},
+  scales:{SAS:{answered:20,name:'焦虑自评量表'},SDS:{answered:17,name:'抑郁自评量表'}},
+  behavior:{sart:{trials:180,commission_errors:0,omission_errors:1},pvt:{trials:72,responded:70,rt_median:.198}},
+  assessment:{conclusion:'个人状态结论'},report_markdown:'# 原始记录'}});
+const root=new StubNode('main');await render(root,ctx);
+const cards=all(root).filter(n=>n.classList?.contains('report-metric')).map(text);
+assert.equal(cards.length,4);assert.match(cards[0],/95%.*20.*19/);assert.match(cards[1],/37 题.*20 题.*17 题/);
+assert.match(cards[2],/180 次.*误按 0 次.*漏按 1 次/);assert.match(cards[3],/198 ms.*72 次.*70 次/);
+assert.doesNotMatch(text(root),/个人状态结论|qa-hidden|原始记录/);
+const panel=all(root).find(n=>n.tagName==='DETAILS'&&text(n.children[0])==='查看采集质量与行为分析');
+assert.ok(!panel.open);assert.equal(panel.children.length,1);
+panel.open=true;panel.listeners.toggle[0]();assert.equal(panel.children.length,2);
+panel.open=false;panel.listeners.toggle[0]();panel.open=true;panel.listeners.toggle[0]();assert.equal(panel.children.length,2);
+''')
+
+    def test_report_preview_preserves_origin_response_mode_and_zero_coverage(self):
+        self.node(r'''
+const {render}=await import(REPORT_URI);
+const ctx=makeCtx(); ctx.params.set('session','archive-id');
+api.getSession=async()=>({data:{uuid:'archive-id'}});
+let fileExists=true;
+api.artifacts=async()=>({data:{items:[{kind:'report_json',exists:fileExists}]}});
+const show=async extras=>{
+  api.report=async()=>({status:200,data:{extras,report_markdown:'# 已保存记录',
+    assessment:{conclusion:'受试者测评结论',advice:['受试者训练建议']},behavior:{pvt:{trials:21,rt_median:.3}}}});
+  const root=new StubNode('main'); await render(root,ctx); return root;
+};
+const base={protocol:'ten_min',source_kind:'lsl',ten_min:{indicator_overview:{quality:{windows_total:100}},
+  segments:[{measured_focus_updates:0,stats:{valid_seconds:0}},{measured_focus_updates:0,stats:{valid_seconds:0}}]}};
+const replay=await show({...base,report_context:{title:'录波测试',source_label:'本地录波回放 · 自动反应时任务',
+  signal_origin:'local_replay',response_mode:'automated',recording_ref:'原始采集 #3'}});
+assert.match(text(replay),/录波测试.*本地录波回放 · 自动反应时任务.*原始采集 #3/);
+assert.match(text(replay),/100 次训练更新中，0 次显示专注指数/);
+assert.match(text(replay),/由程序自动作答/);
+assert.doesNotMatch(text(replay),/受试者测评结论|受试者训练建议/);
+const link=all(replay).find(n=>n.tagName==='A'&&text(n)==='打开展示报告');
+assert.equal(link.getAttribute('href'),'/api/sessions/archive-id/presentation');
+fileExists=false;
+const generated=await show({...base,device:'ningsi-sim-eeg'});
+assert.match(text(generated),/数据来源　生成信号/);
+assert.doesNotMatch(text(generated),/本地录波回放|由程序自动作答|受试者训练建议|打开展示报告/);
+const ordinary=await show({...base,device:'BioMulti'});
+assert.match(text(ordinary),/数据来源　LSL 输入/);
+assert.doesNotMatch(text(ordinary),/由程序自动作答|本地录波回放/);
+''')

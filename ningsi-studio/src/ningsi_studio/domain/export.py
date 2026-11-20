@@ -26,7 +26,7 @@ def file_manifest(path) -> dict:
             "sha256": sha256_of(target)}
 
 
-def build_zip(zip_path, files: dict, meta: dict) -> Path:
+def build_zip(zip_path, files: dict, meta: dict, *, presentation: bytes | None = None) -> Path:
     """files: {kind: Path}；meta: 会话元数据。返回 zip 路径。"""
     target = Path(zip_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -40,5 +40,10 @@ def build_zip(zip_path, files: dict, meta: dict) -> Path:
             candidate = Path(path)
             if candidate.exists() and candidate.is_file():
                 archive.write(candidate, arcname=f"{kind}/{candidate.name}")
+        if presentation is not None:
+            name = "展示报告.html"
+            archive.writestr(name, presentation)
+            manifest["files"]["presentation"] = {"path": name, "exists": True, "bytes": len(presentation),
+                                                 "sha256": hashlib.sha256(presentation).hexdigest()}
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
     return target

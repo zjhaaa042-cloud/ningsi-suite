@@ -22,6 +22,10 @@ import numpy as np
 
 from ningsi import config
 from ningsi.acquisition.simulate import SyntheticEEG
+from ningsi.acquisition.timing import (
+    BIOMULTI_CONFIRM_SAMPLES, BIOMULTI_LSL_RECOVERY_TIMING, BIOMULTI_LSL_TIMING, STRICT_TIMING,
+    analysis_timestamps,
+)
 from ningsi.signal.live_artifacts import (
     SPEC as ARTIFACT_SPEC, ACCEL_LIMITS, accel_unit, channel_layout, check_motion_reference,
     process_live_artifacts, voltage_scales, with_artifact_evidence,
@@ -48,6 +52,61 @@ def _is_sim_outlet(source_id, name="") -> bool:
     return bool(re.search(r"(^|[^a-z])(sim|simulation|synthetic|demo)([^a-z]|$)", text))
 
 
+def _known_biomulti_packet_source(descriptor) -> bool:
+    return (descriptor is not None and descriptor.nominal_srate == 250 and descriptor.channel_count == 2
+            and re.fullmatch(r"BioMulti Lite EEG-[0-9a-f]{6}", descriptor.name, flags=re.I) is not None
+            and not _is_sim_outlet(descriptor.source_id, descriptor.name))
+
+
+def _assessment_clock_reasons(stamps, rate, expected):
+    """Check the exact analysis history with Capture's clock tolerances."""
+    if not np.isfinite(stamps).all():
+        return ["clock_unsynchronized"]
+    reasons = []
+    diffs = np.diff(stamps)
+    if np.any(diffs <= 0):
+        reasons.append("nonmonotonic_timestamps")
+    if np.any(diffs > .1):
+        reasons.append("timestamp_gap_over_100ms")
+    elif np.any(diffs > 1.75 / rate):
+        reasons.append("sample_gap_in_filter_history")
+    if 1 < expected <= len(stamps):
+        span = stamps[-1] - stamps[-expected]
+        if abs(span * rate / (expected - 1) - 1) > .05:
+            reasons.append("sample_rate_mismatch_over_5pct")
+    return reasons
+
+
+def _assessment_signal_context(snapshot, rate, wanted, expected, *, recover_packets):
+    """Resolve time for exactly the EEG data passed to the Studio filter."""
+    stamps = np.asarray(snapshot["timestamps"], dtype=float)
+    samples = snapshot["samples"]
+    latest = snapshot["total_samples"]
+    raw = stamps[-wanted:]
+    reasons = _assessment_clock_reasons(raw, rate, expected)
+    audit = {"policy": STRICT_TIMING, "applied": False, "max_shift_sec": 0., "reasons": reasons}
+    if not reasons or not recover_packets:
+        return samples[:, -wanted:], raw, latest, audit
+
+    # The publisher timestamps the last sample of its ten-sample packet. The
+    # existing bounded reconstruction needs the following one-second epoch;
+    # report the earlier cursor rather than credit the confirmation samples.
+    epoch = round(rate)
+    end = (latest - BIOMULTI_CONFIRM_SAMPLES) // epoch * epoch
+    offset = latest - len(stamps)
+    stop = end - offset
+    if stop < expected:
+        return samples[:, -wanted:], raw, latest, audit
+    first = max(0, stop - wanted)
+    estimate, _ = analysis_timestamps(stamps, rate, BIOMULTI_LSL_RECOVERY_TIMING, first_index=offset)
+    timed = estimate[first:stop]
+    problems = _assessment_clock_reasons(timed, rate, expected)
+    paired = np.isfinite(timed) & np.isfinite(stamps[first:stop])
+    max_shift = float(np.max(np.abs(timed[paired] - stamps[first:stop][paired]))) if paired.any() else 0.
+    return samples[:, first:stop], timed, end, {"policy": BIOMULTI_LSL_RECOVERY_TIMING, "applied": not problems,
+                                               "max_shift_sec": max_shift, "reasons": problems}
+
+
 def _lsl_note(descriptor: dict, name: str, srate: float) -> str:
     """数据源说明文案：只写"这是什么"，不写调理链。
 
@@ -72,12 +131,13 @@ def _lsl_note(descriptor: dict, name: str, srate: float) -> str:
 
 def condition_eeg_samples(raw, expected: int, srate: float, *, labels=(), units=(),
                           research_scale=1.0, operator_scale=None, observed_srate=None,
-                          personal_blink=None):
+                          personal_blink=None, fragment_masks=False):
     """Apply Studio's EEG filtering and artifact gate to a contiguous sample block."""
     pick, _ = channel_layout(labels, len(raw))
     scales = voltage_scales(units, len(raw), research_scale, pick, operator_scale)
     values = raw * np.asarray(scales)[:, None]
     blink_evidence = {}
+    blink_mask = None
     if len(pick) == 2:
         from ningsi.signal.blinks import process_blinks
         selected_labels = [labels[i] if i < len(labels) else f"Ch{i+1}" for i in pick]
@@ -86,6 +146,7 @@ def condition_eeg_samples(raw, expected: int, srate: float, *, labels=(), units=
                      process_blinks(values[pick], srate, channel_labels=selected_labels))
             values[pick] = blink.cleaned_uv
             blink_evidence = blink.as_dict(start_index=max(0, values.shape[1] - expected))
+            blink_mask = blink.mask
         except ValueError as exc:
             blink_evidence = {"state": "invalid", "reasons": ["blink_calibration_mismatch"],
                               "detail": str(exc), "corrected_events": 0}
@@ -96,7 +157,8 @@ def condition_eeg_samples(raw, expected: int, srate: float, *, labels=(), units=
         wave, log = run_preprocess(channel, srate)
         filtered.append(wave)
     wave, evidence = process_live_artifacts(np.vstack(filtered), raw, srate, expected, labels, units,
-                                            research_scale, operator_scale, blink_evidence=blink_evidence)
+                                            research_scale, operator_scale, blink_evidence=blink_evidence,
+                                            fragment_masks=fragment_masks, blink_mask=blink_mask)
     conditioning = {
         "spec": CONDITION_SPEC, "dc_removal": DC_REMOVAL,
         "chain": log.as_dict() if log is not None else {},
@@ -449,6 +511,11 @@ class ManagedLslSource:
     def errors(self) -> dict:
         return self._manager.errors()
 
+    def assessment_timing_anchor(self) -> dict | None:
+        """Return the acquisition cursor for the beginning of an assessment phase."""
+        buffer = self._manager.buffer("eeg")
+        return None if buffer is None else buffer.assessment_timing_anchor()
+
     def model_snapshot(self) -> dict:
         buffer = self._manager.buffer("eeg")
         if buffer is None:
@@ -458,7 +525,8 @@ class ManagedLslSource:
         return snapshot
 
     # ------------------------------------------------------------------ 调理
-    def _condition(self, data, expected: int, observed_srate: float | None = None, *, return_artifacts=False):
+    def _condition(self, data, expected: int, observed_srate: float | None = None, *, return_artifacts=False,
+                   fragment_masks=False):
         """真机调理：逐通道去直流 → 文档 8.2 零相位处理链 → 截取最后一窗。
 
         为什么必须先去直流：设备把带几百 mV 电极偏置的原始值直接推出来，而 0.5 Hz
@@ -485,6 +553,7 @@ class ManagedLslSource:
             raw, expected, self.srate, labels=labels, units=units,
             research_scale=self.research_scale_to_uv, operator_scale=self.operator_eeg_scale_to_uv,
             observed_srate=observed_srate,
+            fragment_masks=fragment_masks,
             personal_blink=self._apply_personal_blink if self.blink_binding else None,
         )
         return (y, evidence) if return_artifacts else y
@@ -506,13 +575,16 @@ class ManagedLslSource:
         self._blink_connection_generation = generation
         return process_blinks(values, self.srate, calibration, channel_labels=labels, montage_id=montage)
 
-    def analysis_window(self, state="rest", **kwargs):
+    def analysis_window(self, state="rest", *, assessment_timing=False, **kwargs):
         """取同一批样本及其伪迹处理记录，避免并发显示帧覆盖评分依据。"""
+        if assessment_timing:
+            kwargs.update(wait=False, assessment_timing=True)
         return self.window(state, return_artifacts=True, **kwargs)
 
     # ------------------------------------------------------------------ 取数
     def window(self, state: str = "rest", seconds: float | None = None, artifact: bool = False,
-               wait: bool = True, return_artifacts: bool = False):
+               wait: bool = True, return_artifacts: bool = False, *, assessment_timing: bool = False,
+               fragment_masks: bool = False):
         """返回 (通道, 采样点)。
 
         三条真实设备特有的规则：
@@ -528,6 +600,8 @@ class ManagedLslSource:
         """
         duration = float(seconds or config.WINDOW_SEC)
         options = {"return_artifacts": True} if return_artifacts else {}
+        if fragment_masks:
+            options["fragment_masks"] = True
         expected = int(round(duration * self.srate))
         descriptor = self._manager.descriptor("eeg")
         has_refs = bool(descriptor and len(self.channel_labels) < descriptor.channel_count)
@@ -540,39 +614,56 @@ class ManagedLslSource:
             age = stats.get("seconds_since_last")
             fresh = age is None or age <= self.stale_timeout
             buffer = self._manager.buffer("eeg")
-            generation = buffer.connection_generation if buffer is not None else None
+            profile = self.research_profile
+            aligned_research = (return_artifacts and profile and profile.get("preprocessing_policy")
+                                and duration == config.WINDOW_SEC)
             eeg_times = ()
-            if return_artifacts and self._motion_manager and buffer is not None:
-                eeg = buffer.model_snapshot(wanted)
-                eeg_times = eeg["timestamps"][-expected:]
-                data = eeg["samples"] if eeg_times else np.zeros((self.channels, 0))
+            timing_audit = None
+            if assessment_timing and buffer is not None:
+                recover_packets = self._research_timing and _known_biomulti_packet_source(buffer.descriptor)
+                count = round(20 * self.srate) if aligned_research or recover_packets else wanted
+                snapshot = buffer.model_snapshot(count)
+                generation = snapshot["connection_generation"]
+                fresh = snapshot["age"] is not None and snapshot["age"] <= self.stale_timeout
+                if aligned_research:
+                    data = snapshot["samples"][:, -wanted:]
+                else:
+                    data, timestamps, end, timing_audit = _assessment_signal_context(
+                        snapshot, self.srate, wanted, expected, recover_packets=recover_packets)
+                    eeg_times = timestamps[-expected:]
             else:
-                data = (buffer.samples_count(wanted) if buffer is not None
-                        else np.zeros((self.channels, 0), dtype=float))
+                generation = buffer.connection_generation if buffer is not None else None
+                if return_artifacts and self._motion_manager and buffer is not None:
+                    eeg = buffer.model_snapshot(wanted)
+                    eeg_times = eeg["timestamps"][-expected:]
+                    data = eeg["samples"] if eeg_times else np.zeros((self.channels, 0))
+                else:
+                    data = (buffer.samples_count(wanted) if buffer is not None
+                            else np.zeros((self.channels, 0), dtype=float))
             # 就绪判据只看"最后一窗"那部分，与调理前完全一致（多取的历史不参与判据）。
             window_part = data[:, -expected:] if (expected > 0 and data.shape[1] > expected) else data
             if (data.size and fresh and window_part.shape[1] >= expected) or time.monotonic() >= deadline:
                 if not fresh or not data.size:
                     empty = np.zeros((self.channels, 0), dtype=float)
                     return (empty, {}) if return_artifacts else empty
-                if (return_artifacts and self.research_profile and self.research_profile.get("preprocessing_policy")
-                        and duration == config.WINDOW_SEC):
+                if aligned_research:
                     # The active human model and its baseline must see the same
                     # recording-aligned, timestamp-checked data as its training exports.
-                    from ningsi.acquisition.timing import BIOMULTI_CONFIRM_SAMPLES, BIOMULTI_LSL_TIMING
                     from .human_inference import snapshot_window
-                    snap = self.model_snapshot()
+                    snap = {**snapshot, "research_timing": self._research_timing} if assessment_timing else self.model_snapshot()
                     if not snap.get("research_timing") or snap.get("age") is None or snap["age"] > self.stale_timeout:
                         return np.zeros((self.channels, 0)), {"reasons": ["signal_stale"]}
-                    lag = BIOMULTI_CONFIRM_SAMPLES if self.research_profile.get("timestamp_policy") == BIOMULTI_LSL_TIMING else 0
+                    lag = BIOMULTI_CONFIRM_SAMPLES if profile.get("timestamp_policy") == BIOMULTI_LSL_TIMING else 0
                     hop = round(config.STEP_SEC * self.srate)
                     end = expected + (snap["total_samples"] - lag - expected) // hop * hop
-                    row = snapshot_window(snap, self.research_profile, end, traces=True)
+                    row = snapshot_window(snap, profile, end, traces=True)
                     if row is None:
                         return np.zeros((self.channels, 0)), {"reasons": ["preprocessing_warmup"]}
                     eeg_times = row["analysis_timestamps"]
-                    evidence = {"spec": self.research_profile["preprocessing_policy"],
+                    evidence = {"spec": profile["preprocessing_policy"],
                                 "sample_end_index": end-1, "reasons": list(row["window"].quality.reasons)}
+                    if fragment_masks and row.get("artifact_mask") is not None:
+                        evidence["fragment_artifact_mask"] = row["artifact_mask"]
                     wave = row["filtered_uv"]
                     # The frozen human-model pipeline stays training-aligned.
                     # Additional raw dual-channel detection may only veto a contaminated window.
@@ -593,6 +684,15 @@ class ManagedLslSource:
                     result = (wave if wave is not None else np.zeros((self.channels, 0)), evidence)
                 else:
                     result = self._condition(data, expected, stats.get("observed_srate"), **options)
+                if assessment_timing and return_artifacts:
+                    _, record = result
+                    latest = snapshot["total_samples"]
+                    record["sample_timing"] = {"buffer_id": snapshot["buffer_id"], "connection_generation": generation,
+                                               "sample_end": end,
+                                               "latest_sample_end": latest, "received_at": snapshot["received_at"]}
+                    if timing_audit is not None:
+                        record["timestamp_adjustment"] = timing_audit
+                        record["reasons"] = list(dict.fromkeys((*record["reasons"], *timing_audit["reasons"])))
                 if return_artifacts and self._motion_manager:
                     _, record = result
                     motion_buffer = self._motion_manager.buffer("motion")

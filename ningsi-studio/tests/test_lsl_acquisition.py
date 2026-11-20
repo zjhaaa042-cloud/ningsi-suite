@@ -31,6 +31,7 @@ from ningsi_studio.acquisition.lsl import (
     _StreamWorker,
 )
 from ningsi_studio.core.live_source import ManagedLslSource
+from ningsi_studio.domain.indicators import WindowEngine
 
 SRATE = 250.0
 
@@ -208,6 +209,90 @@ class WindowLengthTest(unittest.TestCase):
         self.assertEqual(snap['timestamps'], [100.])
         self.assertEqual(snap['total_samples'], 1)
         np.testing.assert_array_equal(buffer.samples_count(1000), [[21.], [22.]])
+
+    def test_assessment_read_pairs_the_window_with_its_atomic_buffer_cursor(self):
+        source = ManagedLslSource('fake', device='fake', channels=2, fill_timeout=5)
+        buffer = StreamBuffer(self.descriptor)
+        source._manager._buffers['eeg'] = buffer
+        engine = WindowEngine(source, SRATE, device='fake')
+        self.assertEqual(source.assessment_timing_anchor()['sample_end'], 0)
+        with patch('time.monotonic', return_value=10.) as clock:
+            buffer.append_chunk([[10., 11.]] * 500, np.arange(500) / SRATE)
+            original_condition = source._condition
+
+            def condition_before_new_arrival(data, *args, **kwargs):
+                self.assertEqual(data.shape, (2, 500))
+                clock.return_value = 10.2
+                buffer.append_chunk([[12., 13.]] * 500, np.arange(500, 1000) / SRATE)
+                return original_condition(data, *args, **kwargs)
+
+            with patch('time.sleep', side_effect=AssertionError('assessment must not wait for a full buffer')), \
+                    patch.object(source, '_condition', side_effect=condition_before_new_arrival):
+                step = engine.step(assessment_timing=True)
+            self.assertEqual(step.sample_timing, {"buffer_id": buffer.buffer_id, "connection_generation": 0,
+                                                  "sample_end": 500, "latest_sample_end": 500, "received_at": 10.})
+            self.assertFalse(step.usable)
+            self.assertNotIn('sample_timing', step.window.quality.metrics['artifact_control'])
+            anchor = source.assessment_timing_anchor()
+            self.assertEqual((anchor['sample_end'], anchor['received_at']), (1000, 10.2))
+            buffer.begin_connection()
+            anchor = source.assessment_timing_anchor()
+            self.assertEqual((anchor['sample_end'], anchor['received_at'], anchor['connection_generation']),
+                             (0, None, 1))
+
+    def test_assessment_rejects_window_local_clock_defects_without_changing_legacy_qc(self):
+        base = np.arange(1500) / SRATE
+        raw = np.column_stack([12 * np.sin(2 * np.pi * 10 * base), 10 * np.sin(2 * np.pi * 10 * base)])
+        duplicated = base.copy()
+        duplicated[500:600] = duplicated[499]
+        reversed_slice = base.copy()
+        reversed_slice[500:600] = reversed_slice[500:600][::-1]
+        missing_time = base.copy()
+        missing_time[700] = np.nan
+        dropped = base.copy()
+        dropped[800:] += .02
+        source = ManagedLslSource('fake', device='fake', channels=2, fill_timeout=0, research_timing=True)
+        for stamps, reason in ((duplicated, 'timestamp_gap_over_100ms'), (reversed_slice, 'nonmonotonic_timestamps'),
+                               (missing_time, 'clock_unsynchronized'), (dropped, 'sample_gap_in_filter_history')):
+            with self.subTest(reason=reason):
+                buffer = StreamBuffer(self.descriptor)
+                buffer.append_chunk(raw, stamps)
+                source._manager._buffers['eeg'] = buffer
+                engine = WindowEngine(source, SRATE, device='fake')
+                self.assertTrue(engine.step().usable)
+                step = engine.step(assessment_timing=True)
+                self.assertFalse(step.usable)
+                self.assertIn(reason, step.window.quality.reasons)
+
+    def test_assessment_uses_verified_biomulti_packets_and_keeps_unresolved_gaps(self):
+        name = 'BioMulti Lite EEG-00b050'
+        descriptor = StreamDescriptor('eeg', name, 'EEG', 2, SRATE)
+        origin = np.arange(2000) / SRATE
+        # Ten-sample batches with a delayed group followed by confirmed catch-up.
+        delays = np.resize([0., .002, .003, .004, .085, .052, .020, .001], 200)
+        stamps = origin + np.repeat(delays, 10)
+        raw = np.column_stack([12 * np.sin(2 * np.pi * 10 * origin), 10 * np.sin(2 * np.pi * 10 * origin)])
+        source = ManagedLslSource(name, device=name, channels=2, fill_timeout=0, research_timing=True)
+        buffer = StreamBuffer(descriptor)
+        buffer.append_chunk(raw, stamps)
+        source._manager._buffers['eeg'] = buffer
+        engine = WindowEngine(source, SRATE, device=name)
+        step = engine.step(assessment_timing=True)
+        self.assertTrue(step.usable, step.window.quality.reasons)
+        self.assertEqual(step.sample_timing['sample_end'], 1750)
+        self.assertEqual(step.sample_timing['latest_sample_end'], 2000)
+        audit = step.window.quality.metrics['artifact_control']['timestamp_adjustment']
+        self.assertTrue(audit['applied'])
+        self.assertEqual(audit['policy'], 'biomulti-lsl-packet-clock-v2')
+        np.testing.assert_array_equal(step.raw, source._condition(raw[250:1750].T, 1000))
+
+        other = StreamBuffer(descriptor)
+        stamps[1250:] += .3  # A permanent gap in the scoring interval, never replace it with nominal time.
+        other.append_chunk(raw, stamps)
+        source._manager._buffers['eeg'] = other
+        bad = engine.step(assessment_timing=True)
+        self.assertFalse(bad.usable)
+        self.assertIn('clock_unsynchronized', bad.window.quality.reasons)
 
     def test_first_chunk_after_stale_interval_starts_a_new_history(self):
         source = ManagedLslSource('fake', device='fake', channels=2, fill_timeout=0)

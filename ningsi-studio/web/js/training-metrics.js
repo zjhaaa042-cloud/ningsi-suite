@@ -1,6 +1,44 @@
-import { DASH, el, fmtDuration, fmtPercent } from './util.js';
+import { DASH, el, fmtDuration, fmtNum, fmtPercent, table } from './util.js';
 
 const finite = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+const expireAfter = (callback, delay) => window.setTimeout(callback, delay);
+
+export function measuredFocusPanel(feedback, scheduleExpiry = expireAfter) {
+  if (feedback?.presentation_mode !== 'measured_focus' || feedback.feedback_mode === 'rest'
+      || feedback.effective_time?.baseline_valid === false || feedback.usable === true) return null;
+  const reading = feedback.measured_focus_index;
+  const remaining = reading?.valid_until_unix_ms - Date.now();
+  if (!Number.isFinite(remaining) || remaining <= 0 || !Number.isFinite(reading?.value)
+      || reading.value < 0 || reading.value > 1) return null;
+  const panel = el('div', {}, [
+    el('strong', { class: 'feedback-score mono', text: fmtNum(reading.value, 3) }),
+    el('p', { class: 'muted', text: '本窗相对个人静息基线的指数，0.50 对应基线中心。持续反馈正在等待连续合格的读数。' }),
+  ]);
+  scheduleExpiry(() => { panel.textContent = '等待新的合格读数'; }, remaining);
+  return panel;
+}
+
+/** Show only this update's measured channel values, including during a connection interruption. */
+export function localEegPanel(feedback, scheduleExpiry = expireAfter) {
+  const reading = feedback?.local_eeg_feedback;
+  if (reading?.kind !== 'relative_band_power' || feedback.feedback_mode === 'rest' || feedback.presentation_mode === 'measured_focus'
+      || (feedback.usable && Number.isFinite(feedback.score))) return null;
+  const remaining = reading.valid_until_unix_ms - Date.now();
+  if (!Number.isFinite(remaining) || remaining <= 0) return null;
+  const bands = [['theta', 'θ 4–8 Hz'], ['alpha', 'α 8–13 Hz'], ['beta', 'β 13–30 Hz']];
+  const channels = (reading.channels || []).filter(row => Number.isInteger(row.channel)
+    && row.channel >= 0 && bands.every(([band]) => Number.isFinite(row.relative?.[band])
+      && row.relative[band] >= 0 && row.relative[band] <= 1));
+  if (!channels.length) return null;
+  const panel = el('div', {}, [
+    table([{ title: '通道', render: row => String(row.channel + 1) },
+      ...bands.map(([band, title]) => ({ title, render: row => fmtPercent(row.relative[band], 1) }))], channels),
+    el('p', { class: 'muted', text: '这些比例描述当前片段的频带分布，可能含眨眼或肌肉活动。专注评分暂停。' }),
+  ]);
+  scheduleExpiry(() => { panel.textContent = '等待新的可分析片段'; }, remaining);
+  return panel;
+}
 
 /** Keep performance and availability separate; historic sample ratios are never relabelled. */
 export function trainingMetrics(stats = {}, duration = null) {
@@ -52,7 +90,7 @@ export function effectiveTimeContent(progress, { training = true, aggregate = fa
   const accelerated = finite(p.time_scale) !== null && p.time_scale !== 1;
   const status = reason === 'cancelled' ? '采集已取消，保留已累计的有效时间。'
     : reason === 'timing_issue' ? '计时记录不一致，本次未记为完成；请查看采集记录。'
-    : (reason === 'baseline_invalid' || p.baseline_valid === false && training) ? '基线未通过：已切换固定引导，本轮不累计有效反馈；数据不足。'
+    : (reason === 'baseline_invalid' || p.baseline_valid === false && training) ? '基线未通过，专注评分数据不足。有可用片段时显示局部频带，其余时间按固定引导练习。'
     : insufficient ? '已达到补采上限或基线门槛未通过，数据不足。'
     : reason === 'target_reached' && p.completed !== false ? '有效时间目标已完成。'
     : p.quality_paused ? (training

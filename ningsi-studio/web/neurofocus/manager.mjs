@@ -15,7 +15,7 @@ export class SessionDirectory {
         // Query active sessions separately so newer history cannot hide them.
         const [active, recent] = await Promise.all([
           this.client.list({ status: 'running', limit: 100, signal }),
-          this.client.list({ limit: 8, signal }),
+          this.client.list({ limit: 8, includeArchived: true, signal }),
         ]);
         if (generation === this.generation) this.onUpdate({ active, recent, updatedAt: Date.now() });
       } catch (error) {

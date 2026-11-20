@@ -495,6 +495,7 @@ export function list(value) {
 
 /** 状态文案：会话状态与阶段状态的中文映射。 */
 export const SESSION_STATUS_TEXT = {
+  unfinished: '未记录结束',
   running: '进行中',
   done: '已完成',
   failed: '失败',

@@ -23,10 +23,17 @@ from pathlib import Path
 from ningsi import config
 from ningsi.assessment.diagnostics import summarize_windows
 from ningsi.monitoring import history as history_module
+from ningsi.signal.baseline import build_baseline
 
 from ningsi_studio.core import paired_ledger, phases as phase_module
-from ningsi_studio.core.control import SessionCancelled
-from ningsi_studio.core.live_source import build_source
+from ningsi_studio.core.assessment_eeg import (
+    AssessmentEEGCollection, AssessmentSampleClock,
+    ASSESSMENT_BASELINE_TARGET_SEC, ASSESSMENT_BASELINE_MAX_SEC,
+    ASSESSMENT_MONITOR_TARGET_SEC, ASSESSMENT_MONITOR_MAX_SEC,
+)
+from ningsi_studio.domain.training_feedback import TrainingFeedbackSignal
+from ningsi_studio.core.control import DemoClock, SessionCancelled
+from ningsi_studio.core.live_source import SIM_SOURCE, build_source
 from ningsi_studio.db import repository as repo
 from ningsi_studio.db import sqlite_store as store
 from ningsi_studio.domain import assessment as assessment_domain
@@ -70,6 +77,8 @@ def schemas_bool(value, default: bool = False) -> bool:
 
 
 class SessionRuntime:
+    demo_clock: DemoClock | None = None
+
     def __init__(self, session_uuid: str, *, settings: Settings | None = None,
                  bus: EventBus | None = None) -> None:
         self.settings = settings or Settings()
@@ -115,6 +124,7 @@ class SessionRuntime:
         self.scale_answers: dict[str, list[int]] = {}
         self.scale_results: dict[str, dict] = {}
         self.baselines: dict = {}
+        self.assessment_eeg_collection: dict = {}
         self.device_error: str | None = None
         self.latest_feedback: dict | None = None
         self.effective_time: dict | None = None
@@ -138,6 +148,8 @@ class SessionRuntime:
 
     def cancel(self) -> None:
         self.cancel_event.set()
+        if self.demo_clock is not None:
+            self.demo_clock.stop()
         with self._input_lock:
             names = list(self._input_events)
         for name in names:
@@ -263,6 +275,7 @@ class SessionRuntime:
         except (ValueError, OSError, TypeError, KeyError) as exc:
             self.human_model_error = str(exc)
             self.human_predictor = None
+        raw_lsl_clock = device.startswith("lsl:")
         try:
             self.source = build_source(
                 device,
@@ -272,13 +285,19 @@ class SessionRuntime:
                 # 真实流正常在推时样本是毫秒级到达的；8 秒足够，且能让
                 # "流在但没数据"的情况在 HTTP 请求里尽快失败（不拖到 15 秒）。
                 ready_timeout=8.0,
-                **({"research_timing": True} if self.human_predictor is not None else {}),
+                **({"research_timing": True} if raw_lsl_clock else {}),
             )
         except Exception as exc:  # noqa: BLE001 - 不再降级为仿真：没有真实信号就如实失败
             self.source = None
             self.device_error = str(exc)
             raise RuntimeError(f"无信号：数据源 {device} 不可用（{exc}）") from exc
         self.device_error = None
+        if self.source.kind == "sim" and device == SIM_SOURCE and self.scale < 0.2:
+            elapsed = time.monotonic() - self.diagnostic_started
+            self.demo_clock = DemoClock(self.bus)
+            self.protocol_now = self.demo_clock.now
+            self.precise_now = self.demo_clock.now
+            self.diagnostic_started = self.protocol_now() - elapsed
         self.eeg_calibration = json.loads(self.session["eeg_calibration"] or "null")
         if self.eeg_calibration:
             eeg_units.verify_descriptor(self.eeg_calibration, self.source.engine.descriptor_dict())
@@ -321,27 +340,34 @@ class SessionRuntime:
         """按时间倍率休眠；倍率越小演示越快（算法参数不变）。"""
         self._sleep_real(seconds * self.scale)
 
+    @staticmethod
+    def protocol_now():
+        return time.monotonic()
+
+    @staticmethod
+    def precise_now():
+        return time.perf_counter()
+
     def _sleep_real(self, seconds: float) -> None:
         """按真实秒休眠（已经是折算过的量，不再乘 time_scale）。"""
-        if seconds <= 0:
+        if self.demo_clock is not None:
+            self.demo_clock.wait(max(0, seconds), self.cancel_event)
             return
-        remaining = seconds
-        while remaining > 0:
-            if self.cancel_event.is_set():
-                raise SessionCancelled()
-            chunk = min(0.1, remaining)
-            time.sleep(chunk)
-            remaining -= chunk
+        if self.cancel_event.wait(max(0, seconds)):
+            raise SessionCancelled()
 
     def _check_cancel(self) -> None:
         if self.cancel_event.is_set():
             raise SessionCancelled()
+        if self.demo_clock is not None:
+            self.demo_clock.wait(0, self.cancel_event)
 
     # -------------------------------------------------------------- 阶段管理
     @contextmanager
     def _phase(self, key: str, run_kind: str = None):
         label = phase_module.PHASE_BY_KEY[key].label
-        started = time.time()
+        self._check_cancel()
+        started = self.protocol_now()
         run_id = None
         with store.connect(self.db_path) as conn:
             self.affect_snapshot = None
@@ -388,7 +414,7 @@ class SessionRuntime:
         try:
             with store.connect(self.db_path) as conn:
                 repo.finish_run(conn, run_id, status=status,
-                                duration_ms=int((time.time() - started) * 1000),
+                                duration_ms=int((self.protocol_now() - started) * 1000),
                                 error=error)
                 repo.update_run_payload(conn, run_id, {"status": status})
         except Exception as exc:  # noqa: BLE001
@@ -416,7 +442,7 @@ class SessionRuntime:
         self.latest_model_prediction = prediction
         if prediction is not None:
             self.attention_predictions.append({"phase": phase,
-                "elapsed_sec": round(time.monotonic() - self.diagnostic_started, 3), "prediction": prediction})
+                "elapsed_sec": self.elapsed_now(), "prediction": prediction})
         return prediction
 
     def _tick_attention_model(self, phase):
@@ -430,7 +456,7 @@ class SessionRuntime:
         self.bus.publish("model_prediction", self._predict_attention(phase))
 
     def elapsed_now(self):
-        return round(time.monotonic() - self.diagnostic_started, 3)
+        return round(self.protocol_now() - self.diagnostic_started, 3)
 
     def current_affect(self):
         snapshot = self.affect_snapshot
@@ -630,16 +656,15 @@ class SessionRuntime:
             ("baseline_closed", "eyes_closed", config.BASELINE_PROTOCOL["eyes_closed_sec"]),
         ):
             with self._phase(key) as context:
-                baseline, steps = self._collect_baseline(state, seconds, key)
-                if key == "baseline_open" and not baseline.valid:
-                    self.bus.publish("notice", {"level": "warning", "message":
-                        "睁眼基线有效窗不足，追加 30 秒采集。请保持睁眼、放松并检查电极接触。"})
-                    _, extra = self._collect_baseline(state, 30.0, key, progress=False)
-                    steps.extend(extra)
-                    from ningsi.signal.baseline import build_baseline
-                    baseline = build_baseline([step.window for step in steps if step.window is not None],
-                                              device=self.source.device, srate=self.source.srate,
-                                              min_windows=config.BASELINE_PROTOCOL["min_windows"])
+                if key == "baseline_open":
+                    try:
+                        baseline, steps = self._collect_assessment_baseline()
+                    finally:
+                        self._merge_run_payload(context["run_id"], {
+                            "assessment_eeg_collection": self.assessment_eeg_collection.get(key),
+                        })
+                else:
+                    baseline, steps = self._collect_baseline(state, seconds, key)
                 baselines[key] = baseline
                 payload = baseline.as_dict()
                 self._merge_run_payload(context["run_id"], {
@@ -655,7 +680,7 @@ class SessionRuntime:
         baseline = baselines.get("baseline_open")
         if baseline is None or not baseline.valid:
             self.bus.publish("notice", {"level": "warning", "message":
-                "睁眼基线仍不合格：保留脑电波形和频带功率，暂停个体评分。请检查电极后重新采集会话。"})
+                "睁眼基线未达到评估要求。本次继续完成量表和行为任务，报告会说明脑电缺失的原因。"})
         self.engine.baseline = baseline
 
         # 3) 量表
@@ -678,7 +703,12 @@ class SessionRuntime:
 
         # 6) 任务态监测（heatmap 数据源）
         with self._phase("monitor") as context:
-            monitor = self._run_monitor()
+            try:
+                monitor = self._run_monitor()
+            finally:
+                self._merge_run_payload(context["run_id"], {
+                    "assessment_eeg_collection": self.assessment_eeg_collection.get("monitor"),
+                })
             self._merge_run_payload(context["run_id"], {"quality": monitor["quality"]})
             self.bus.publish("monitor", {"summary": monitor["summary"], "quality": monitor["quality"]})
 
@@ -716,7 +746,8 @@ class SessionRuntime:
         # 10) 报告与产物
         with self._phase("report") as context:
             paths = self._write_report(baseline, scale_objects, sart_result, pvt_result,
-                                       monitor, training_result, assessment_result)
+                                       monitor, training_result, assessment_result,
+                                       report_context={"assessment_eeg_collection": self.assessment_eeg_collection})
             self._merge_run_payload(context["run_id"], {k: str(v) for k, v in paths.items()})
             self.bus.publish("artifacts", {k: str(v) for k, v in self.artifacts.items()})
 
@@ -728,6 +759,7 @@ class SessionRuntime:
             "skipped_phases": list(self.skipped_phases),
             "quality": monitor["quality"],
             "indicators": monitor["summary"],
+            "assessment_eeg_collection": self.assessment_eeg_collection,
             "assessment": assessment_result.as_dict(),
             "training": training_result,
             "model": model_metrics,
@@ -759,7 +791,9 @@ class SessionRuntime:
             if real_source:
                 self._sleep_real(max(0.0, phase_start + (index + 1) * config.STEP_SEC * self.scale
                                      - time.monotonic()))
-            step = self.engine.step(state)
+            # The stream is already buffered. A disconnect must not add a
+            # second buffer-fill wait to every scheduled read.
+            step = self.engine.step(state, wait_for_signal=False)
             if real_source and step.window is not None:
                 # 真实采集按经过的时间覆盖计时，禁止加速演示虚增基线时长。
                 step.window = replace(step.window, t_end=time.monotonic())
@@ -771,11 +805,165 @@ class SessionRuntime:
             if not real_source:
                 self._sleep(config.STEP_SEC)
         windows = [step.window for step in steps if step.window is not None]
-        from ningsi.signal.baseline import build_baseline as engine_baseline
-        baseline = engine_baseline(windows, device=self.source.device, srate=self.source.srate,
-                                   min_windows=config.BASELINE_PROTOCOL["min_windows"])
+        baseline = build_baseline(windows, device=self.source.device, srate=self.source.srate,
+                                  min_windows=config.BASELINE_PROTOCOL["min_windows"])
         self.engine.baseline = baseline
         return baseline, steps
+
+    def _collect_assessment_baseline(self):
+        self.engine.baseline = None
+        collection, base = self._collect_assessment_eeg("baseline_open")
+        status = self.assessment_eeg_collection["baseline_open"]
+        reasons = base.reasons
+        if not status["completed"] and status["status_reason"] not in reasons:
+            reasons = (*reasons, status["status_reason"])
+        base = replace(base, valid=status["completed"], reasons=reasons,
+                       quality={**base.quality, "assessment_eeg_collection": status})
+        self.engine.baseline = base
+        return base, self._assessment_eeg_steps(collection)
+
+    @staticmethod
+    def _assessment_window_for_use(step, sample_end, accepted):
+        if step.window is None:
+            return step
+        window = step.window
+        if not accepted and step.usable:
+            verdict = replace(window.quality, ok=False, reasons=("assessment_window_not_eligible",))
+            return replace(step, window=replace(window, quality=verdict), indicators=None, scores={},
+                           alerts=[], focus_basis={})
+        return replace(step, window=replace(window, t_end=sample_end)) if sample_end is not None else step
+
+    def _assessment_eeg_steps(self, collection):
+        return [self._assessment_window_for_use(step, end, usable)
+                for step, end, usable in zip(collection.steps, collection.sample_ends, collection.usable_mask)]
+
+    def _collect_assessment_eeg(self, phase):
+        """Bound both wall time and the amount of distinct EEG used by assessment."""
+        baseline_phase = phase == "baseline_open"
+        if baseline_phase:
+            target, maximum = ASSESSMENT_BASELINE_TARGET_SEC, ASSESSMENT_BASELINE_MAX_SEC
+            min_ratio = config.QUALITY["valid_ratio_min"]
+        else:
+            target, maximum = ASSESSMENT_MONITOR_TARGET_SEC, ASSESSMENT_MONITOR_MAX_SEC
+            min_ratio = config.ASSESS["min_valid_ratio"]
+        collection = AssessmentEEGCollection(target, maximum)
+        real_source = self.source.kind == "lsl"
+        anchor = self.source.engine.assessment_timing_anchor() if real_source else None
+        begin = time.monotonic()
+        sample_clock = AssessmentSampleClock(self.source.srate, begin, anchor) if real_source else None
+        elapsed, observed, skipped = 0.0, 0, 0
+        reason = None
+        paused = True
+        base = self.engine.baseline
+        pending_display = None
+
+        def check_baseline():
+            windows = [step.window for step in self._assessment_eeg_steps(collection) if step.window is not None]
+            return build_baseline(windows, device=self.source.device, srate=self.source.srate,
+                                  min_windows=config.BASELINE_PROTOCOL["min_windows"])
+
+        def publish_status():
+            stats = collection.state(elapsed)
+            baseline_valid = bool(base and base.valid)
+            status_reason = reason
+            if reason == "max_duration":
+                if not stats["target_reached"]:
+                    status_reason = "insufficient_effective_time"
+                elif stats["valid_ratio"] < min_ratio:
+                    status_reason = "low_valid_ratio"
+                elif baseline_phase and not baseline_valid:
+                    status_reason = "baseline_invalid"
+            status = {
+                "phase": phase, "target_seconds": target, "max_seconds": maximum,
+                "valid_seconds": round(stats["usable_seconds"], 3),
+                "shortfall_seconds": round(max(0.0, target - stats["usable_seconds"]), 3),
+                "elapsed_seconds": round(elapsed, 3), "stable_started": stats["started"],
+                "attempted_windows": stats["candidate_windows"], "observed_windows": observed,
+                "startup_windows": observed - stats["candidate_windows"], "skipped_windows": skipped,
+                "usable_windows": stats["usable_windows"], "repeated_windows": stats["repeated_windows"],
+                "valid_ratio": round(stats["valid_ratio"], 4), "min_valid_ratio": min_ratio,
+                "quality_paused": paused and reason is None,
+                "baseline_valid": baseline_valid and (not baseline_phase or reason == "target_reached"),
+                "completion_reason": reason, "status_reason": status_reason,
+                "target_reached": stats["target_reached"], "completed": reason == "target_reached",
+            }
+            self.assessment_eeg_collection[phase] = status
+            payload = {"phase": phase, "key": phase, "effective_time": status}
+            self.effective_time = payload
+            self.bus.publish("effective_progress", payload)
+            self._progress(phase, 1.0 if reason and reason != "cancelled" else min(1.0, elapsed / maximum))
+
+        def publish_window(step, index, accepted):
+            display_step = self._assessment_window_for_use(step, None, accepted)
+            if not baseline_phase and collection.started:
+                self.engine.set_step_alerts(display_step)
+            self._publish_window(display_step, phase=phase, include_signal=not baseline_phase or index % 5 == 0)
+
+        publish_status()
+        try:
+            for index in range(int(maximum / config.STEP_SEC)):
+                self._check_cancel()
+                tick = (index + 1) * config.STEP_SEC
+                if real_source:
+                    if time.monotonic() - begin - tick >= config.STEP_SEC:
+                        skipped += 1
+                        continue
+                    # Read the final snapshot just inside the cap, with room
+                    # for scheduler jitter and the normal feature calculation.
+                    read_at = min(tick, maximum - 0.1)
+                    self._sleep_real(max(0.0, begin + read_at - time.monotonic()))
+                    elapsed = time.monotonic() - begin
+                    if elapsed > maximum:
+                        break
+                else:
+                    self._sleep(config.STEP_SEC)
+                    elapsed = tick
+                state = "rest" if baseline_phase or index < 8 else "focused" if index < 20 else "drowsy"
+                step = self.engine.step(state, assessment_timing=real_source, defer_alerts=True)
+                observed += 1
+                timing = step.sample_timing
+                if real_source:
+                    sample_end = (sample_clock.end_of(timing) if timing and timing["received_at"] is not None
+                                  and timing["received_at"] <= begin + maximum else None)
+                    elapsed = min(maximum, time.monotonic() - begin)
+                else:
+                    sample_end = tick
+                accepted = collection.add(step, elapsed, sample_end=sample_end)
+                if pending_display is not None:
+                    publish_window(*pending_display, accepted=collection.started)
+                    pending_display = None
+                if collection.waiting_for_confirmation:
+                    pending_display = step, index
+                else:
+                    publish_window(step, index, accepted)
+                paused = not accepted
+                if collection.target_reached and collection.state(elapsed)["valid_ratio"] >= min_ratio:
+                    if baseline_phase:
+                        base = check_baseline()
+                    if base and base.valid:
+                        reason = "target_reached"
+                        break
+                    if not baseline_phase:
+                        reason = "baseline_invalid"
+                        break
+                publish_status()
+            if reason is None:
+                if real_source:
+                    self._sleep_real(max(0, begin + maximum - time.monotonic()))
+                elapsed = maximum
+                reason = "max_duration"
+                if baseline_phase:
+                    base = check_baseline()
+        except SessionCancelled:
+            reason = "cancelled"
+            raise
+        finally:
+            if pending_display is not None:
+                publish_window(*pending_display, accepted=False)
+            if reason is not None:
+                elapsed = min(elapsed, maximum)
+                publish_status()
+        return collection, base
 
     def _run_scales(self, auto: bool):
         results = {}
@@ -957,25 +1145,17 @@ class SessionRuntime:
         return result
 
     def _run_monitor(self):
-        plan = (("rest", 8), ("focused", 12), ("drowsy", 15))
-        total = sum(count for _, count in plan)
-        done = 0
-        steps = []
-        for state, count in plan:
-            for _ in range(count):
-                self._check_cancel()
-                step = self.engine.step(state)
-                steps.append(step)
-                done += 1
-                self._publish_window(step, phase="monitor", include_signal=True)
-                self._progress("monitor", done / total, windows_done=done, windows_total=total)
-                self._sleep(config.STEP_SEC)
+        collection, _ = self._collect_assessment_eeg("monitor")
+        steps = self._assessment_eeg_steps(collection)
         quality = self.engine.summarize(steps)
-        summary = indicators_domain.WindowEngine.summarize(steps).get("indicators", {})
+        status = self.assessment_eeg_collection["monitor"]
+        quality["assessment_eeg_collection"] = status
+        if not status["completed"]:
+            quality.pop("indicators", None)
         # Heatmap windows are already recorded per step; do not overwrite earlier
         # QC/baseline evidence with a monitor-only series at the phase boundary.
         self._persist_summary_metrics(quality, phase="monitor")
-        return {"quality": quality, "summary": summary, "steps": steps}
+        return {"quality": quality, "summary": quality.get("indicators", {}), "steps": steps}
 
     def _run_training(self, baseline, auto: bool):
         """训练闭环。`auto` 不参与时序（等待由 self.scale 决定），保留参数以便未来区分展示策略。"""
@@ -990,15 +1170,17 @@ class SessionRuntime:
         wall_segment = max(4.0, float(describe["segment_sec"]) * self.scale)
         max_windows = max(1, int(round(float(describe["segment_sec"]) / config.STEP_SEC)))
         interval = wall_segment / max_windows
+        descriptive_segments = []
         for index in range(int(describe["segments"])):
             self._check_cancel()
             segment_started = time.monotonic()
+            signal = TrainingFeedbackSignal(self)
             segment_t = self.engine.t
             states = ("focused", "drowsy")
-            deadline = time.time() + wall_segment
+            deadline = self.protocol_now() + wall_segment
             step_index = 0
-            while time.time() < deadline and step_index < max_windows:
-                step = self.engine.step(states[index % len(states)])
+            while self.protocol_now() < deadline and step_index < max_windows:
+                step = signal.read(states[index % len(states)])
                 self._record_diagnostic(step, "training")
                 heatmap_cell = self._record_heatmap(step, "training")
                 step_index += 1
@@ -1013,11 +1195,12 @@ class SessionRuntime:
                     "heatmap_cell": heatmap_cell,
                     "analysis_window": self.latest_analysis_window,
                     "segment": index + 1,
-                    "target": trainer.target,
+                    "target": trainer.target if score is not None else None,
                     "score": None if score is None else round(score, 4),
                     "on_target": bool(score is not None and score >= trainer.target),
-                    "usable": step.usable,
+                    "usable": bool(step.usable and score is not None),
                     "t": round(step.t_end, 3),
+                    "local_eeg_feedback": signal.capture(step, score, sample_time),
                     "segment_stats": trainer.segment_stats(live_duration),
                     **trainer.feedback_status(),
                 }
@@ -1025,14 +1208,22 @@ class SessionRuntime:
                 self.bus.publish("feedback", feedback)
                 self._sleep_real(interval)
             segment = trainer.close_segment()
+            segment["local_eeg_feedback"] = signal.summary()
+            descriptive_segments.append(segment["local_eeg_feedback"])
             self._persist_training_segment(segment)
             self.bus.publish("segment", segment)
             self._progress("training", (index + 1) / max(1, describe["segments"]),
                            segments_done=index + 1, segments_total=describe["segments"])
+        self.latest_feedback = {"feedback_mode": "rest", "mode_label": "训练结束，正在采集训练后基线",
+                                "score": None, "target": None,
+                                "usable": False, "on_target": False, "local_eeg_feedback": None}
+        self.bus.publish("feedback", self.latest_feedback)
         after_seconds = config.TRAINING["baseline_after_sec"]
         self.bus.publish("notice", {"level": "info", "message": f"训练结束，请静息{after_seconds:g}秒，正在采集训练后基线。"})
         baseline_after, _ = self._collect_baseline("rest", after_seconds, "training", progress=False)
         summary = trainer.summary(self.engine, baseline_after=baseline_after)
+        for segment, description in zip(summary["segments"], descriptive_segments, strict=True):
+            segment["local_eeg_feedback"] = description
         summary["describe"] = describe
         return summary
 
@@ -1066,11 +1257,9 @@ class SessionRuntime:
                 f"{basis} EEG 源单位为 {self.eeg_calibration['source_unit']}，"
                 f"换算倍率为 {self.eeg_calibration['scale_to_uv']:g} µV/源单位。")
         band_z = {}
-        for step in reversed(monitor["steps"]):
-            candidate = step.payload().get("band_z") or {}
-            if candidate:
-                band_z = candidate
-                break
+        if (monitor["quality"].get("assessment_eeg_collection") or {}).get("completed", True):
+            band_z = next((step.payload()["band_z"] for step in reversed(monitor["steps"])
+                           if step.indicators is not None and step.indicators.available), {})
         report = assessment_domain.compose_report(
             participant=self.subject["public_id"], session="01", run="001",
             indicators={"summary": monitor["summary"], "band_z": band_z,
@@ -1080,6 +1269,8 @@ class SessionRuntime:
             behavior={"sart": sart_result, "pvt": pvt_result},
             assessment=assessment_result,
             extras={
+                "report_context": {"title": self.session["label"], "uuid": self.uuid,
+                                   "started_at": self.session["started_at"]},
                 "state_observations": observations,
                 "eeg_calibration": self.eeg_calibration,
                 "blink_calibration": getattr(self, "blink_calibration", None),
@@ -1240,6 +1431,7 @@ class SessionRuntime:
             "protocol": self.protocol,
             "quality": {"valid_ratio": monitor["quality"].get("valid_ratio"),
                         "passed": bool(self.source.kind != "replay"
+                                       and (monitor["quality"].get("assessment_eeg_collection") or {}).get("completed", True)
                                        and (monitor["quality"].get("valid_ratio") or 0) >= config.ASSESS["min_valid_ratio"]
                                        and self.baselines.get("baseline_open") is not None
                                        and self.baselines["baseline_open"].valid)},
@@ -1279,6 +1471,8 @@ class SessionRuntime:
                 LOGGER.warning("释放采集资源失败：%s", exc)
 
     def _finish(self, status: str, error, summary: dict | None = None) -> None:
+        if self.demo_clock is not None:
+            self.demo_clock.stop()
         self._release_source()
         try:
             with store.connect(self.db_path) as conn:

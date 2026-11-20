@@ -2,13 +2,13 @@
  * 历史视图：会话表格（分页 + 按被试/状态筛选）、周/月趋势、不可比提示、单会话导出。
  *
  * 数据来源：
- * - GET /api/sessions?participant=&status=&page=&limit=
- * - GET /api/subjects?limit=100（筛选下拉）
+ * - GET /api/test-history?participant=&status=&page=&limit=
  * - GET /api/reports/trend?participant=&field=&period=（含 note 与 ledger_points）
  * - GET /api/sessions/{uuid}/export.zip（导出链接，直接指向接口）
  */
 
-import { api } from '../api.js';
+import { api, historyArtifactUrl } from '../api.js';
+import { sessionPresentationUrl, sessionSourceLabel } from '../session-history.js';
 import { describeError, toast } from '../store.js';
 import {
   DASH, button, card, el, empty, field, fmtInt, fmtNum, fmtPercent,
@@ -22,6 +22,7 @@ const STATUS_OPTIONS = [
   ['done', '已完成'],
   ['failed', '失败'],
   ['cancelled', '已取消'],
+  ['unfinished', '未记录结束'],
 ];
 
 /** 视图内筛选条件：切换页签/返回时保留。 */
@@ -43,20 +44,24 @@ export async function render(container, ctx) {
   ]);
 
   /* ------------------------------------------------------------ 筛选项 */
-  // 被试下拉优先用全局缓存；直接进入本页时缓存可能还没填好，这里补一次拉取
-  if (!list(ctx.store.state.subjects).length) {
-    try {
-      const response = await api.listSubjects({ limit: 100, page: 1 });
-      if (ctx.signal.aborted) return;
-      ctx.store.setState({ subjects: list(pick(response.data, 'items', [])) });
-    } catch (error) {
-      console.warn('[history] 被试列表加载失败', error);
+  let sessionsData;
+  try {
+    const response = await api.listTestHistory({
+      participant: view.participant || undefined,
+      status: view.status || undefined,
+      page: view.page,
+      limit: 20,
+    });
+    sessionsData = response.data || {};
+  } catch (error) {
+    if (!ctx.signal.aborted) {
+      host.append(card('会话列表', [empty(`加载失败：${describeError(error)}`)]));
+      toast(describeError(error));
     }
+    return;
   }
-  const participants = (() => {
-    const fromStore = list(ctx.store.state.subjects).map((subject) => subject.public_id);
-    return Array.from(new Set(fromStore.filter(Boolean)));
-  })();
+  if (ctx.signal.aborted) return;
+  const participants = list(sessionsData.participants);
 
   const participantSelect = el('select', { id: 'history-participant' });
   participantSelect.append(el('option', { value: '', text: '全部被试' }));
@@ -103,27 +108,14 @@ export async function render(container, ctx) {
   host.append(filterCard);
 
   /* -------------------------------------------------------- 会话表格 */
-  let sessionsData = null;
-  try {
-    const response = await api.listSessions({
-      participant: view.participant || undefined,
-      status: view.status || undefined,
-      page: view.page,
-      limit: 20,
-    });
-    sessionsData = response.data || {};
-  } catch (error) {
-    host.append(card('会话列表', [empty(`加载失败：${describeError(error)}`)]));
-    toast(describeError(error));
-    return;
-  }
-  if (ctx.signal.aborted) return;
-
   const items = list(pick(sessionsData, 'items', []));
   const total = Number(pick(sessionsData, 'total', 0)) || 0;
   const limit = Number(pick(sessionsData, 'limit', 20)) || 20;
   const page = Number(pick(sessionsData, 'page', view.page)) || 1;
   const pageCount = Math.max(1, Math.ceil(total / limit));
+  const participantColumns = items.some(row => !row.hide_participant && row.participant)
+    ? [{ title: '被试', render: row => !row.hide_participant && row.participant ? `sub-${row.participant}` : DASH }]
+    : [];
 
   const pagination = el('div', { class: 'row row--between', style: 'margin-top:12px' }, [
     el('span', { class: 'muted', text: `第 ${fmtInt(page)} / ${fmtInt(pageCount)} 页，共 ${fmtInt(total)} 条` }),
@@ -143,34 +135,40 @@ export async function render(container, ctx) {
     items.length ? table([
       {
         title: '会话',
-        render: (row) => el('button', {
-          class: 'btn btn--sm',
-          type: 'button',
-          text: `${String(row.uuid).slice(0, 8)}…`,
-          // 按钮文字只有 8 位短号，读屏无法区分：补上完整 uuid 与动作
-          attrs: { title: row.uuid, 'aria-label': `打开会话 ${row.uuid} 的实时监测` },
-          onClick: () => ctx.navigate(`#/live?session=${row.uuid}`),
-        }),
+        render: (row) => {
+          const report = sessionPresentationUrl(row);
+          const documentUrl = report || (row.archived && historyArtifactUrl(row.report_url || row.evidence_url));
+          return el('a', {
+            class: 'overview-session-link',
+            href: documentUrl || `#/live?session=${row.uuid}`,
+            target: documentUrl ? '_blank' : null, rel: documentUrl ? 'noopener noreferrer' : null,
+            title: row.hide_participant ? row.label : row.uuid,
+          }, [
+            row.label && el('strong', { text: row.label }),
+            (!row.hide_participant || !row.label) && el(row.label ? 'small' : 'span', { text: `${String(row.uuid).slice(0, 8)}…` }),
+          ]);
+        },
       },
-      { title: '被试', render: (row) => (row.participant ? `sub-${row.participant}` : DASH) },
+      ...participantColumns,
       { title: '状态', render: (row) => statusText(row.status) },
       { title: '方案', render: (row) => row.protocol_label || DASH },
       { title: '阶段', render: (row) => phaseText(row.phase, row.phase_label) },
       { title: '进度', align: 'right', render: (row) => fmtPercent(row.progress) },
-      { title: '数据来源', render: (row) => {
-        const source = row.source || row.device || '';
-        if (source.startsWith('replay:')) return '公开真人录波';
-        return source.startsWith('sim') ? `模拟 · ${source}` : source || DASH;
-      } },
+      { title: '数据来源', render: (row) => el('span', { text: sessionSourceLabel(row), title: row.source || row.device }) },
       { title: '时间倍率', align: 'right', render: (row) => (row.source || '').startsWith('replay:') ? DASH : fmtNum(row.time_scale, 2) },
       { title: '预警', align: 'right', render: (row) => fmtInt(row.alert_count) },
-      { title: '开始时间', render: (row) => fmtTime(row.started_at) },
+      { title: '记录时间', render: (row) => fmtTime(row.created_at || row.started_at) },
       {
         title: '操作',
-        render: (row) => el('div', { class: 'row' }, [
-          // 三个链接的可见文字（导出 zip / 报告 / 训练）每行都一样，
-          // 读屏无法区分是哪条会话：aria-label 带上完整 uuid 与动作。
-          // 原生 <a href> 本身就在 Tab 顺序里且 Enter 可激活，无需额外 keydown。
+        render: (row) => row.archived ? el('div', { class: 'row' }, [
+          row.presentation_url && el('a', { href: historyArtifactUrl(row.presentation_url), text: '展示报告', target: '_blank', rel: 'noopener noreferrer' }),
+          row.report_url && el('a', { href: historyArtifactUrl(row.report_url), text: '原始报告', target: '_blank', rel: 'noopener noreferrer' }),
+          row.evidence_url && el('a', { href: historyArtifactUrl(row.evidence_url), text: '记录详情', target: '_blank', rel: 'noopener noreferrer' }),
+        ]) : el('div', { class: 'row' }, [
+          row.has_report && el('a', {
+            href: sessionPresentationUrl(row), text: '展示报告', target: '_blank', rel: 'noopener noreferrer',
+            attrs: { 'aria-label': `查看会话 ${row.uuid} 的展示报告` },
+          }),
           row.has_artifacts && el('a', {
             href: api.exportZipUrl(row.uuid),
             text: '导出 zip',
@@ -181,8 +179,8 @@ export async function render(container, ctx) {
           }),
           el('a', {
             href: `#/report?session=${row.uuid}`,
-            text: row.has_report ? '报告' : '阶段记录',
-            attrs: { 'aria-label': `查看会话 ${row.uuid} 的${row.has_report ? '评估报告' : '阶段记录'}` },
+            text: row.has_report ? '报告详情' : '阶段记录',
+            attrs: { 'aria-label': `查看会话 ${row.uuid} 的${row.has_report ? '报告详情' : '阶段记录'}` },
           }),
           row.has_training && el('a', {
             href: `#/training?session=${row.uuid}`,
@@ -193,13 +191,17 @@ export async function render(container, ctx) {
       },
     ], items) : empty('没有符合筛选条件的会话。'),
     pagination,
-  ]), { sub: '按筛选条件分页；点会话编号进入实时监测', class: 'card--scroll' }));
+  ]), { class: 'card--scroll' }));
 
   /* ---------------------------------------------------------- 趋势图 */
   const trendHost = el('div');
   host.append(card('周 / 月趋势', trendHost, {
-    sub: '字段与周期由上方筛选控制',
+    sub: '仅汇总当前 Studio 数据库中可比较的会话。',
   }));
+  if (view.participant && !list(sessionsData.live_participants).includes(view.participant)) {
+    trendHost.append(empty('该编号仅有归档记录，可从会话列表查看各次测试结果。'));
+    return;
+  }
 
   try {
     const response = await api.reportsTrend({

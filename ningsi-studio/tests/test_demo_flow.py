@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import zipfile
 
 try:                                              # 支持直接以脚本方式运行本文件
@@ -29,6 +30,36 @@ class DemoFlowTests(StudioTestCase):
     """一次完整快速演示流程（无浏览器、无真实设备、无网络）。"""
 
     port_base = 18970
+
+    def test_pause_is_acknowledged_idempotent_and_cancelable(self):
+        participant = self.create_subject(auto_id=True)["public_id"]
+        created = self.json_body(self.post("/api/sessions", {
+            "participant": participant, "device": "sim-bsense", "protocol": "ten_min",
+            "time_scale": .05}), 201)
+        url = "/api/sessions/" + created["session"]["uuid"]
+        self.assertTrue(created["runtime"]["demo_pause"]["available"])
+        self.assert_status(self.post(url + "/demo-pause", {"paused": "false"}), 422)
+        def change(paused):
+            return self.json_body(self.post(url + "/demo-pause", {"paused": paused}), 200)
+        first = change(True)
+        self.assertTrue(first["paused"])
+        snap = self.json_body(self.get(url + "/live"), 200)
+        time.sleep(.25)
+        same = change(True)
+        self.assertEqual(same["revision"], first["revision"])
+        self.assertGreaterEqual(same["paused_seconds"], first["paused_seconds"] + .2)
+        still = self.json_body(self.get(url + "/live"), 200)
+        for key in ("phase", "progress", "analysis_window"):
+            self.assertEqual(snap[key], still[key])
+        resumed = change(False)
+        self.assertFalse(resumed["paused"])
+        self.assertEqual(change(False), resumed)
+        self.assertTrue(change(True)["paused"])
+        self.assert_status(self.delete(url), 200)
+        detail = self.wait_session_done(created["session"]["uuid"], timeout=10, expect=("cancelled",))
+        self.assertEqual(detail["status"], "cancelled")
+        self.assertFalse(detail["runtime"]["demo_pause"]["available"])
+        self.assert_status(self.post(url + "/demo-pause", {"paused": False}), 409)
 
     def test_full_demo_flow(self) -> None:
         subject = self.create_subject(auto_id=True, label="端到端演示被试")

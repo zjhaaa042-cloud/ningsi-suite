@@ -195,6 +195,16 @@ class SessionReport:
         effective = (self.extras or {}).get("effective_time")
         ten = (self.extras or {}).get("ten_min")
         feedback_protocol = effective or ten
+        training = feedback_protocol or self.extras.get("training") or {}
+        for segment in training.get("segments", []):
+            fragment = segment.get("local_eeg_feedback")
+            if "measured_focus_updates" in segment:
+                lines.append(f"- 第{segment.get('index', segment.get('seq', 0) + 1)}段测得个人脑电指数"
+                             f" {segment['measured_focus_updates']} 次。")
+            if fragment is not None:
+                lines.append(f"- 第{segment.get('index', segment.get('seq', 0) + 1)}段局部频带覆盖"
+                             f" {_seconds(fragment.get('support_seconds'))}，"
+                             f"专注评分有效时长 {_seconds((segment.get('stats') or {}).get('valid_seconds'))}。")
         if feedback_protocol:
             lines.extend(["", "## 有效时长反馈训练" if effective else "## 十分钟分级反馈",
                           feedback_protocol.get("note", "描述性训练记录，不代表已验证的训练效果。"),
@@ -218,7 +228,7 @@ class SessionReport:
                                  f"有效反馈{_seconds(stats.get('valid_seconds'))}／训练时长{_seconds(segment.get('duration_sec'))}（协议秒）。"
                                  + (f"实际时长{_seconds(_effective_actual_elapsed(segment.get('effective_time') or {}, effective, segment.get('duration_sec')))}。" if effective else "")
                                  + segment.get("adaptation_reason", "") if (_finite_number(stats.get("valid_seconds")) or 0) > 0 else
-                                 f"- 第{segment['index']}轮无有效脑电反馈；有效覆盖0%，不计算达标率、不调整目标。")
+                                 f"- 第{segment['index']}轮无有效脑电反馈评分，专注评分覆盖0%，不计算达标率，训练目标保持。")
                 timing = segment.get("effective_time") or {}
                 if effective and timing:
                     lines.append(f"- 第{segment['index']}轮有效时间进度：{_seconds(timing.get('valid_seconds'))}／"
@@ -251,6 +261,23 @@ class SessionReport:
             lines.append(f"- 相对基线的频带 z 值：{band_text}")
 
         lines += ["", "## 二、采集质量"]
+        collection = (self.extras or {}).get("assessment_eeg_collection") or {}
+        for key, label in (("baseline_open", "睁眼基线"), ("monitor", "独立脑电监测")):
+            status = collection.get(key)
+            if status:
+                if status["completed"]:
+                    outcome = "达到评估要求。"
+                elif status["status_reason"] == "low_valid_ratio":
+                    outcome = f"合格窗比例低于 {status['min_valid_ratio']:.0%} 的要求。"
+                elif status["shortfall_seconds"] > 0:
+                    outcome = f"尚缺 {status['shortfall_seconds']:g} 秒合格脑电。"
+                else:
+                    outcome = "睁眼基线未通过有效性检查。"
+                lines.append(
+                    f"- {label}累计 {status['valid_seconds']:g}/{status['target_seconds']:g} 秒合格脑电，"
+                    f"用时 {status['elapsed_seconds']:g}/{status['max_seconds']:g} 秒，"
+                    f"合格窗比例 {status['valid_ratio']:.0%}。{outcome}"
+                )
         for key, label in (("baseline_eyes_open", "睁眼"), ("baseline_eyes_closed", "闭眼")):
             baseline = (self.extras or {}).get(key) or {}
             quality = baseline.get("quality") or {}

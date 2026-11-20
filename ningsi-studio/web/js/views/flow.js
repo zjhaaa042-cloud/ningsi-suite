@@ -22,7 +22,7 @@ import {
   fmtTime, list, phaseStateText, phaseText, pick, statusText, table,
 } from '../util.js';
 import { drawAlertTimeline, drawWaveform } from '../charts.js';
-import { effectiveTimeContent, effectiveTimeOutcome, effectiveTimeState, formatWallRatio, trainingCoverageNote, trainingMetrics } from '../training-metrics.js';
+import { effectiveTimeContent, effectiveTimeOutcome, effectiveTimeState, formatWallRatio, localEegPanel, measuredFocusPanel, trainingCoverageNote, trainingMetrics } from '../training-metrics.js';
 
 /** 阶段清单兜底：started 事件没带 phases 时使用（字段与后端 phases.as_list() 对齐）。 */
 const PHASE_FALLBACK = [
@@ -83,6 +83,50 @@ const ADVANCE_TEXT = {
   operator: '本阶段需要操作者确认',
 };
 
+const ASSESSMENT_EEG_PHASES = { baseline_open: '睁眼基线', monitor: '任务态脑电' };
+
+function isAssessmentEegProgress(key, progress) {
+  return Object.hasOwn(ASSESSMENT_EEG_PHASES, key) && typeof progress?.stable_started === 'boolean';
+}
+
+function assessmentEegContent(progress) {
+  const p = progress;
+  let status;
+  if (p.completed === true) {
+    status = '已达到本阶段的有效脑电要求。';
+  } else if (p.completion_reason === 'cancelled') {
+    status = '采集已取消，已保存采集进度。';
+  } else if (p.completion_reason === 'baseline_invalid' || p.status_reason === 'baseline_invalid') {
+    status = '睁眼基线未通过，脑电指数留空，后续流程继续。';
+  } else if (p.completion_reason === 'max_duration') {
+    status = p.status_reason === 'low_valid_ratio'
+      ? '已到采集上限，信号合格比例仍不足，继续后续流程。'
+      : '已到采集上限，有效脑电时长仍不足，继续后续流程。';
+  } else if (!p.stable_started) {
+    status = '等待脑电稳定，等待时间计入采集上限。';
+  } else if (p.quality_paused) {
+    status = '当前信号未通过质检，有效时间暂不累计。';
+  } else {
+    status = '正在累计有效脑电，达到要求或采集上限后自动继续。';
+  }
+  const metric = (label, value) => el('div', {}, [
+    el('span', { class: 'muted', text: label }), el('strong', { class: 'mono', text: value }),
+  ]);
+  const ratio = p.target_seconds > 0 && Number.isFinite(p.valid_seconds) ? p.valid_seconds / p.target_seconds : 0;
+  return el('div', { class: 'effective-time' }, [
+    el('div', { class: 'effective-time__metrics' }, [
+      metric('有效脑电 / 目标', `${fmtDuration(p.valid_seconds)} / ${fmtDuration(p.target_seconds)}`),
+      metric('已用时长 / 采集上限', `${fmtDuration(p.elapsed_seconds)} / ${fmtDuration(p.max_seconds)}`),
+      p.attempted_windows > 0 && Number.isFinite(p.usable_windows) ? metric(
+        '稳定后合格窗', `${fmtInt(p.usable_windows)} / ${fmtInt(p.attempted_windows)}${Number.isFinite(p.valid_ratio) ? `（${fmtPercent(p.valid_ratio)}）` : ''}`,
+      ) : null,
+      p.startup_windows > 0 ? metric('未纳入统计的启动窗', fmtInt(p.startup_windows)) : null,
+    ]),
+    el('progress', { max: 1, value: Math.min(1, Math.max(0, ratio)), 'aria-label': '有效脑电采集进度' }),
+    el('p', { class: 'effective-time__status', role: 'status', text: status }),
+  ]);
+}
+
 // 刺激呈现和按键使用同一 performance.now 时钟；相邻试次间隔不是时钟偏差。
 
 export function render(container, ctx) {
@@ -122,8 +166,28 @@ export function render(container, ctx) {
       }
     }),
   ]);
+  const demoButton = button('暂停演示', async () => {
+    if (!canControlDemo() || local.demoPending) return;
+    local.demoPending = true;
+    paintDemoControl();
+    try {
+      const response = await api.setDemoPaused(uuid, !local.demoPause.paused);
+      if (!ctx.signal.aborted) applyDemoPause(response.data);
+    } catch (error) {
+      if (!ctx.signal.aborted) {
+        toast(describeError(error));
+        syncDemoPause();
+      }
+    } finally {
+      local.demoPending = false;
+      if (!ctx.signal.aborted) paintDemoControl();
+    }
+  });
+  const demoStatus = el('span', { role: 'status', class: 'muted' });
+  const demoControls = el('div', { class: 'flow-demo-controls', hidden: true }, [demoStatus, demoButton]);
   const head = el('div', { class: 'row row--between' }, [
     el('h1', { text: '会话流程' }),
+    demoControls,
     headActions,
   ]);
 
@@ -326,10 +390,14 @@ export function render(container, ctx) {
     uuid,
     auto: false,
     autoKnown: false,               // 是否已经收到 started 快照里的 auto（决定是否需要按 time_scale 推）
+    demoEligible: false,
+    demoPending: false,
+    demoPause: null,
     running: false,                 // 会话是否仍在运行（恢复交互区的前置条件）
     awaitingInput: [],              // 服务端 runtime.awaiting_input（如 ['scales:SAS']）
     skippedTasks: new Set(),        // 已补过"未作答"上报的行为任务（每任务最多补一次，避免吃掉后续真实试次）
     phaseState: new Map(),          // key → { label, state, progress }
+    assessmentEegProgress: new Map(),
     phaseOrder: PHASE_FALLBACK.slice(),
     phaseOrderIsSession: false,     // 阶段表是否来自会话（短协议 9 步）；config 只补文案不换集合
     guidance: [],                   // /api/config 的阶段引导字段（headline/details/why…）
@@ -349,6 +417,63 @@ export function render(container, ctx) {
     forceOverview: false,           // 任务视图下手动切回总览（换任务时自动复位）
     lastTaskLabel: null,            // 上一次的任务名，用于"换任务→回到任务视图"
     taskBarKey: null,               // 任务条已渲染的键（幂等，避免观察者自激）
+  };
+
+  // Use the service-owned demo clock for phase and stimulus displays. Real trials keep their original clock.
+  const canControlDemo = () => local.demoEligible && local.demoPause?.available && local.running && !local.finished;
+  const demoNow = (now = performance.now()) => {
+    const state = local.demoPause;
+    if (!state?.available || !local.demoEligible) return now;
+    const ongoing = state.paused ? performance.now() - state.receivedAt : 0;
+    return now - (state.paused_seconds * 1000 - local.initialPauseMs + ongoing);
+  };
+  const paintDemoControl = () => {
+    demoControls.hidden = !canControlDemo();
+    if (demoControls.hidden) return;
+    const paused = local.demoPause.paused;
+    demoButton.textContent = paused ? '继续演示' : '暂停演示';
+    demoButton.disabled = local.demoPending;
+    demoStatus.textContent = local.demoPending ? '正在同步演示状态…' : paused ? '演示已暂停' : '';
+  };
+  const updateDemoExpiry = () => {
+    const expiry = local.demoExpiry;
+    if (!expiry) return;
+    window.clearTimeout(expiry.timer);
+    if (local.demoPause?.paused) return;
+    expiry.timer = window.setTimeout(() => {
+      local.demoExpiry = null;
+      expiry.callback();
+    }, Math.max(0, expiry.deadline - demoNow()));
+  };
+  const scheduleDemoExpiry = (callback, delay) => {
+    window.clearTimeout(local.demoExpiry?.timer);
+    local.demoExpiry = { callback, deadline: demoNow() + delay };
+    updateDemoExpiry();
+  };
+  ctx.onCleanup(() => window.clearTimeout(local.demoExpiry?.timer));
+  const applyDemoPause = (state) => {
+    if (!state || typeof state.available !== 'boolean' || !Number.isFinite(state.paused_seconds) || local.finished) return;
+    const old = local.demoPause;
+    if (old && (state.revision < old.revision ||
+        (state.revision === old.revision && state.paused_seconds < old.paused_seconds))) return;
+    if (state.available && local.initialPauseMs === undefined) local.initialPauseMs = state.paused_seconds * 1000;
+    local.demoPause = { ...state, receivedAt: performance.now() };
+    paintDemoControl();
+    if (local.demoEligible && Boolean(old?.paused) !== state.paused) {
+      updateDemoExpiry();
+      local.now = demoNow(Date.now());
+      renderStep();
+    }
+  };
+  const syncDemoPause = async () => {
+    try {
+      const {data} = await api.getSession(uuid);
+      if (!ctx.signal.aborted) applyDemoPause(data?.runtime?.demo_pause);
+    } catch { /* The next session snapshot also carries pause state. */ }
+  };
+  const setDemoEligibility = (sourceKind, scale) => {
+    local.demoEligible = sourceKind === 'sim' && Number(scale) > 0 && Number(scale) < 0.2;
+    paintDemoControl();
   };
 
   /* ------------------------------------------------- 任务视图 / 总览切换 */
@@ -390,6 +515,7 @@ export function render(container, ctx) {
       const slot = child.dataset.slot;
       const phases = { quality: ['qc'], baseline: ['baseline_open', 'baseline_closed', 'baseline_after'],
         monitor: ['monitor'], waveform: ['monitor'], training: ['training'],
+        'assessment-eeg-baseline_open': ['baseline_open'], 'assessment-eeg-monitor': ['monitor'],
         'training-feedback': ['training'], 'effective-progress': ['baseline_open', 'training', 'baseline_after'], segments: ['training'], assessment: ['assessment'],
         model: ['model'], artifacts: ['report'], 'result-sart': ['sart'], 'result-pvt': ['pvt'] };
       child.classList.toggle('flow-phase-hidden', !local.finished && !!phases[slot]
@@ -509,6 +635,7 @@ export function render(container, ctx) {
 
   /** 把"已用 / 预计"折算成一句人话。 */
   const describeTiming = (phase, state) => {
+    if (local.assessmentEegProgress?.has(phase.key)) return null;
     let expected = Number(pick(phase, 'duration_sec', 0)) || 0;
     if (!expected) return null;
     const startedAt = local.phaseStartedAt.get(phase.key);
@@ -645,7 +772,7 @@ export function render(container, ctx) {
     const state = (local.phaseState.get(key) || {}).state || 'pending';
     // 第一次看到某阶段成为当前步骤时记下时刻，用于"已用/约剩"
     if (local.lastStepKey !== key) {
-      if (!local.phaseStartedAt.has(key)) local.phaseStartedAt.set(key, Date.now());
+      if (!local.phaseStartedAt.has(key)) local.phaseStartedAt.set(key, demoNow(Date.now()));
       local.lastStepKey = key;
     }
     if (!local.startedAt) local.startedAt = Date.now();
@@ -677,7 +804,9 @@ export function render(container, ctx) {
       el('span', { class: 'badge' + (state === 'running' ? ' badge--strong' : ''), text: stateLabel }),
     ]));
 
-    body.push(el('p', { class: 'step__headline', text: local.auto ? '正在模拟' + pick(phase, 'label', key) : headline }));
+    const demoPaused = canControlDemo() && local.demoPause.paused;
+    body.push(el('p', { class: 'step__headline', text: local.auto
+      ? (demoPaused ? '已暂停 · ' : '正在模拟') + pick(phase, 'label', key) : headline }));
 
     const meta = [];
     const timing = describeTiming(phase, state);
@@ -685,7 +814,7 @@ export function render(container, ctx) {
     // 也会把正在点的按钮换成新节点 → "点了没反应"）
     const timingNode = el('span', { class: 'step__meta-item mono', text: timing || '' });
     meta.push(timingNode);
-    meta.push(el('span', { class: 'step__meta-item', text: local.auto ? '自动推进' : ADVANCE_TEXT[advance] || ADVANCE_TEXT.auto }));
+    meta.push(el('span', { class: 'step__meta-item', text: demoPaused ? '等待继续演示' : local.auto ? '自动推进' : ADVANCE_TEXT[advance] || ADVANCE_TEXT.auto }));
     if (state === 'running' && typeof stageProgress === 'number' && stageProgress !== null) {
       meta.push(el('span', { class: 'step__meta-item mono', text: `本阶段 ${fmtPercent(stageProgress)}` }));
     }
@@ -765,7 +894,7 @@ export function render(container, ctx) {
    *  这是"折叠区点开就合上 / 按钮点了没反应"的根因修复：原来每秒都重建整张卡。 */
   const tickStep = () => {
     if (document.hidden || local.finished) return;
-    local.now = Date.now();
+    local.now = demoNow(Date.now());
     const key = currentPhaseKey();
     if (!local.stepTimingNode || local.stepKey !== key) {
       renderStep();
@@ -1246,10 +1375,10 @@ export function render(container, ctx) {
     clearStimulusTicker();
     const slot = local.taskSlots && local.taskSlots.get('pvt');
     if (!slot || !slot.counter || !trial) return;
-    const startedAt = performance.now();
+    const startedAt = demoNow();
     local.stimulusTicker = window.setInterval(() => {
       if (local.trial !== trial || !slot.counter) { clearStimulusTicker(); return; }
-      slot.counter.textContent = `${fmtInt(Math.max(0, Math.round(performance.now() - startedAt)))} ms`;
+      slot.counter.textContent = `${fmtInt(Math.max(0, Math.round(demoNow() - startedAt)))} ms`;
     }, 50);
   };
   ctx.onCleanup(clearStimulusTicker);
@@ -1338,7 +1467,7 @@ export function render(container, ctx) {
 
   /** 作答当前试次（空格键 / 点击刺激区 / 点「点击作答」按钮都走这里）。 */
   const answerCurrent = (trial) => {
-    if (!trial || !trial.keyReady || trial.answer) return false;
+    if (local.auto || !trial || !trial.keyReady || trial.answer) return false;
     trial.answer = { responded: true, rt: reactionTime(trial) };
     submitTrial(trial);
     return true;
@@ -1350,7 +1479,7 @@ export function render(container, ctx) {
     if (event.repeat) return;       // 长按空格不能自动变成下一试次的抢答
     // 输入类元素里允许正常输入空格
     const tag = (event.target && event.target.tagName) || '';
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || event.target === demoButton) return;
     event.preventDefault();
     const current = local.trial;
     // 抢答判定看**渲染出来的 PVT 等待态**，不依赖 behavior_request 事件是否到达
@@ -1422,11 +1551,11 @@ export function render(container, ctx) {
     const seconds = Number(trial.responseWindow) > 0
       ? Number(trial.responseWindow)
       : (DEFAULT_TRIAL_WINDOW[trial.task] || 2.2);
-    const endsAt = performance.now() + seconds * 1000;
+    const endsAt = demoNow() + seconds * 1000;
     const tick = () => {
       const current = local.trial;
       if (current !== trial) return;                    // 试次已被替换/结束
-      const remain = (endsAt - performance.now()) / 1000;
+      const remain = (endsAt - demoNow()) / 1000;
       if (remain <= 0) {
         local.trialTicker = null;
         if (!current.answer && !current.posting) {
@@ -1512,6 +1641,7 @@ export function render(container, ctx) {
       const response = await api.sessionLive(uuid);
       if (ctx.signal.aborted) return;
       const data = response.data || {};
+      applyDemoPause(data.demo_pause);
       const current = { ...(ctx.store.state.currentSession || {}) };
       current.uuid = data.uuid || current.uuid;
       current.status = data.status;
@@ -1566,12 +1696,19 @@ export function render(container, ctx) {
         session.protocol = local.protocol;
         session.protocol_label = local.protocolLabel;
         session.status = 'running';
+        setDemoEligibility(payload.source_kind, session.time_scale);
+        applyDemoPause(payload.demo_pause);
+        if (local.demoEligible && !local.demoPause?.available) syncDemoPause();
         ctx.store.setState({
           currentSession: session,
           phases: local.phaseOrder,
           sessionRuntime: { source_kind: payload.source_kind, source_note: payload.source_note },
         });
         refresh();
+        break;
+      }
+      case 'demo_pause': {
+        applyDemoPause(payload);
         break;
       }
       case 'notice': {
@@ -1619,12 +1756,26 @@ export function render(container, ctx) {
         break;
       }
       case 'effective_progress': {
-        if (!payload.effective_time) break;
+        const progress = payload.effective_time;
+        if (!progress) break;
+        const key = payload.key || payload.phase || progress.phase;
+        if (isAssessmentEegProgress(key, progress)) {
+          const previous = local.assessmentEegProgress.get(key);
+          if (previous && (progress.elapsed_seconds < previous.elapsed_seconds
+              || previous.completion_reason && !progress.completion_reason)) break;
+          local.assessmentEegProgress.set(key, progress);
+          const slot = ensureTaskSlot(`assessment-eeg-${key}`);
+          slot.host.textContent = '';
+          slot.host.append(card(`${ASSESSMENT_EEG_PHASES[key]}采集进度`, assessmentEegContent(progress)));
+          if (local.stepKey === key && local.stepTimingNode) local.stepTimingNode.textContent = '';
+          markTaskCards();
+          break;
+        }
         const slot = ensureTaskSlot('effective-progress');
         slot.host.textContent = '';
         const training = payload.key === 'training';
         slot.host.append(card(training ? '有效时长训练进度' : '有效基线采集进度',
-          effectiveTimeContent(payload.effective_time, { training })));
+          effectiveTimeContent(progress, { training })));
         markTaskCards();
         break;
       }
@@ -1824,25 +1975,35 @@ export function render(container, ctx) {
           slot.status = el('p');
           slot.hint = el('p', { class: 'muted', text: '自然呼吸，保持坐姿，尝试把专注度稳定在目标线以上。' });
           slot.metrics = el('p', { class: 'training-feedback-metrics' });
+          slot.bands = el('div');
           slot.coverage = el('p', { class: 'training-coverage-note', role: 'status' });
           slot.host.append(card('当前训练反馈', el('div', { class: 'flow-feedback' }, [
             el('div', { class: 'row row--between' }, [slot.value, slot.target]),
-            slot.metrics, slot.hold, slot.status, slot.hint, slot.coverage,
+            slot.bands, slot.metrics, slot.hold, slot.status, slot.hint, slot.coverage,
           ])));
           interactionHost.prepend(slot.host);
         }
         const usable = payload.usable === true && Number.isFinite(payload.score);
         const hold = Math.max(0, Number(payload.current_hold_sec) || 0);
         const required = Math.max(0, Number(payload.hold_sec) || 0);
-        slot.value.textContent = usable ? fmtNum(payload.score, 3) : '信号待恢复';
-        slot.target.textContent = `第 ${fmtInt(payload.segment)} 段 · 目标 ${fmtNum(payload.target, 3)}`;
+        const expiry = local.demoEligible ? scheduleDemoExpiry : undefined;
+        const measured = measuredFocusPanel(payload, expiry);
+        const bands = localEegPanel(payload, expiry);
+        slot.bands.textContent = '';
+        if (measured || bands) slot.bands.append(measured || bands);
+        slot.value.textContent = usable ? fmtNum(payload.score, 3) : measured ? '单窗专注相关指数' : bands ? '实时脑电频带'
+          : payload.feedback_mode === 'rest' ? '轮间休息' : '专注评分暂停';
+        slot.target.textContent = usable ? `第 ${fmtInt(payload.segment)} 段 · 目标 ${fmtNum(payload.target, 3)}` : `第 ${fmtInt(payload.segment)} 段`;
         slot.hold.value = usable && required > 0 ? Math.min(1, hold / required) : 0;
         const metrics = payload.segment_stats ? trainingMetrics(payload.segment_stats) : null;
         const accelerated = (payload.effective_time?.time_scale ?? ctx.store.state.currentSession?.time_scale ?? 1) !== 1;
         slot.metrics.textContent = `有效时间内达标率 ${fmtPercent(metrics?.validRatio)} · 有效覆盖 ${fmtPercent(metrics?.coverage)} · 有效反馈 ${fmtDuration(metrics?.validSeconds)} / ${accelerated ? '协议时长' : '实际'} ${fmtDuration(metrics?.duration)}`;
         slot.coverage.textContent = metrics ? trainingCoverageNote(metrics) : '等待有效时间统计；当前缺失不填零。';
-        if (payload.feedback_mode) slot.hint.textContent = payload.mode_label;
-        slot.status.textContent = payload.feedback_mode && payload.feedback_mode !== 'eeg' ? payload.mode_label : !usable ? '当前信号质量不足，此窗不计入有效训练。'
+        slot.hint.textContent = usable ? '自然呼吸，保持坐姿。' : '';
+        const reasons = list(payload.heatmap_cell?.reason_labels).join('、');
+        slot.status.textContent = (measured || bands) ? '' : !usable
+          ? payload.feedback_mode === 'rest' ? '等待下一轮训练。'
+            : [payload.effective_time?.baseline_valid === false ? '本次睁眼基线未通过。' : '', reasons || payload.mode_label || '等待可用脑电片段。'].join(' ')
           : payload.achieved ? '本段已达到连续保持要求，继续稳定保持。'
           : `连续保持 ${fmtDuration(hold)} / ${fmtDuration(required)} · ${payload.on_target ? '已到目标线，继续保持' : '尚未到目标线，平稳调整'}`;
         if (payload.effective_time) handleEvent('effective_progress', null, { key: 'training', effective_time: payload.effective_time });
@@ -1858,6 +2019,8 @@ export function render(container, ctx) {
           .map(row => ({ ...row, __metrics: trainingMetrics(row.stats || {}, row.duration_sec) }));
         body.append(table([
           { title: '段', render: row => fmtInt(Number(pick(row, 'seq', 0)) + 1) },
+          ...(rows.some(row => Number.isInteger(row.measured_focus_updates)) ? [{ title: '测得指数次数', render: row => fmtInt(row.measured_focus_updates) }] : []),
+          ...(rows.some(row => row.local_eeg_feedback) ? [{ title: '局部频带覆盖', render: row => fmtDuration(row.local_eeg_feedback?.support_seconds) }] : []),
           { title: '有效时间内达标率', align: 'right', render: row => fmtPercent(row.__metrics.validRatio) },
           { title: '有效覆盖', align: 'right', render: row => fmtPercent(row.__metrics.coverage) },
           { title: (ctx.store.state.currentSession?.time_scale ?? 1) !== 1 ? '有效秒数 / 协议时长' : '有效秒数 / 实际时长', render: row => `${fmtDuration(row.__metrics.validSeconds)} / ${fmtDuration(row.__metrics.duration)}` },
@@ -1927,6 +2090,7 @@ export function render(container, ctx) {
       case 'finished': {
         local.finished = true;
         local.running = false;
+        paintDemoControl();
         local.awaitingInput = [];
         local.trial = null;
         const status = payload.status;
@@ -2034,11 +2198,14 @@ export function render(container, ctx) {
     // 中途打开/刷新页面：SSE 不重放历史事件，收不到已经过去的 scale_request，
     // 只能按后端"正在等谁作答"（runtime.awaiting_input）补建交互区，否则页面上没有作答界面。
     local.running = data.status === 'running';
+    setDemoEligibility(runtime.source_kind, session.time_scale);
+    applyDemoPause(runtime.demo_pause);
     if (!local.feedbackSeen && runtime.latest_feedback && data.phase === 'training') {
       handleEvent('feedback', null, runtime.latest_feedback);
     }
-    const effective = effectiveTimeState(runtime.effective_time, data.phase);
-    if (effective && ['baseline_open', 'training', 'baseline_after'].includes(data.phase)) {
+    const effective = effectiveTimeState(runtime.effective_time?.[data.phase] ?? runtime.effective_time, data.phase);
+    if (effective && (isAssessmentEegProgress(data.phase, effective)
+        || ['baseline_open', 'training', 'baseline_after'].includes(data.phase))) {
       handleEvent('effective_progress', null, { key: data.phase, effective_time: effective });
     }
     local.awaitingInput = list(pick(runtime, 'awaiting_input', []));
@@ -2099,6 +2266,7 @@ export function render(container, ctx) {
     onOpen: () => {
       if (local.offline) {
         local.offline = false;
+        if (local.demoEligible) syncDemoPause();
         renderStep();
       }
     },

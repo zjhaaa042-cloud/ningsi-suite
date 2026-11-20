@@ -14,18 +14,23 @@ from ningsi.signal.bands import relative_band_powers
 from ningsi.signal.spectrum import welch_psd
 
 
-def describe_fragments(raw, srate, strict_ok=False):
+def describe_fragments(raw, srate, strict_ok=False, *, eligible=None, include_fragment_bands=False):
     data = np.atleast_2d(np.asarray(raw, dtype=float))
     channels = []
     complete = True
     size = round(2 * srate)
     if data.ndim != 2 or size < 2 or data.shape[1] < 2 * size:
         return {"grade": "C", "channels": [], "reason": "insufficient_data"}
+    if eligible is not None and np.shape(eligible) != data.shape:
+        return {"grade": "C", "channels": [], "reason": "fragment_evidence_mismatch"}
     for index, channel in enumerate(data):
         kept = []
         intervals = []
         for start in range(0, len(channel) - size + 1, size):
-            fragment = channel[start:start + size]
+            stop = start + size
+            if eligible is not None and not eligible[index, start:stop].all():
+                continue
+            fragment = channel[start:stop]
             if not np.isfinite(fragment).all():
                 continue
             # Repeated extrema indicate possible clipping; do not interpolate.
@@ -34,12 +39,14 @@ def describe_fragments(raw, srate, strict_ok=False):
             spectrum = welch_psd(fragment, srate)
             if check_channels(fragment, srate, spectra=[spectrum]).ok:
                 kept.append(relative_band_powers(spectrum.freqs, spectrum.psd))
-                intervals.append([(start-len(channel))/srate, (start+size-len(channel))/srate])
+                intervals.append([(start-len(channel))/srate, (stop-len(channel))/srate])
         complete = complete and len(kept) == len(channel) // size
         if kept:
-            channels.append({"channel": index, "fragments": len(kept),
-                             "intervals": intervals,
-                             "relative": {band: median(row[band] for row in kept) for band in kept[0]}})
+            row = {"channel": index, "fragments": len(kept), "intervals": intervals,
+                   "relative": {band: median(powers[band] for powers in kept) for band in kept[0]}}
+            if include_fragment_bands:
+                row["fragment_bands"] = kept
+            channels.append(row)
     return {"grade": "A" if strict_ok and complete and len(channels) == len(data) else "B" if channels else "C",
             "channels": channels, "threshold_status": "not_validated",
             "note": "仅保留通过片段筛查的同通道频带；不能解释为注意力评分"}

@@ -144,6 +144,29 @@ const defaultTexts = all(defaultGauge).map(n => n.textContent);
 for (const text of ['0', '50', '100', '96', '分']) assert.ok(defaultTexts.includes(text));
 ''')
 
+    def test_local_feedback_replaces_only_the_current_display(self):
+        self.run_view(r'''
+mount(); await settle();
+const partial={segment:1,score:null,usable:false,local_eeg_feedback:{
+  kind:'relative_band_power',valid_until_unix_ms:Date.now()+500,
+  channels:[{channel:1,relative:{theta:.25,alpha:.33,beta:.13}}]}};
+emit('feedback',partial);
+assert.ok(card('实时脑电频带'));
+assert.ok(all(card('实时脑电频带')).some(n=>n.textContent==='33.0%'));
+assert.equal(field('当前专注相关指数'),'—');
+const measured={...partial,presentation_mode:'measured_focus',measured_focus_index:{value:.631,source:'lsl',valid_until_unix_ms:Date.now()+2000}};
+emit('feedback',measured);
+assert.ok(all(card('单窗专注相关指数')).some(n=>n.textContent==='0.631'));
+assert.equal(field('用于连续反馈的指数'),'—');
+emit('feedback',{...measured,feedback_mode:'rest'});
+assert.ok(!card('单窗专注相关指数'));
+emit('feedback',{...partial,feedback_mode:'rest'});
+assert.ok(!card('实时脑电频带'));
+partial.local_eeg_feedback.valid_until_unix_ms=Date.now()-1;
+emit('feedback',partial);
+assert.ok(!card('实时脑电频带'));
+''')
+
     def test_terminal_session_preserves_partial_saved_training(self):
         self.run_view(r'''
 session = {status:'cancelled',phase:'cancelled',runs:[]};

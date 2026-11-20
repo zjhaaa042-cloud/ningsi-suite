@@ -9,18 +9,22 @@ from ningsi.signal.baseline import build_baseline, index_values
 from ningsi.signal.graded import FeedbackGate, robust_reference
 from ningsi_studio.domain.results import training_indicator_overview
 from ningsi_studio.domain.training import StudioTraining
+from ningsi_studio.domain.training_feedback import TrainingFeedbackSignal
 from ningsi_studio.core.phases import TEN_DURATIONS
 
 LABELS = {"eeg": "探索性脑电反馈：保持稳定，不代表已验证的注意力水平",
           "quality": "质量反馈：自然呼吸、减少动作；不计注意力奖励",
           "guided": "固定引导：轻松注视前方，分心后回到目标；当前未使用脑电反馈",
+          "local_eeg": "局部脑电频带描述，只显示当前通过筛查的片段",
+          "measured_focus": "已测得个人脑电指数，等待连续稳定后开始奖励",
           "rest": "休息10秒：放松坐姿，保持设备连接"}
 
 
 def run(runtime, auto):
     r = runtime
     r.engine.graded_enabled = True
-    started = time.monotonic()
+    started = r.protocol_now()
+    wall_started = time.monotonic()
     timings = {}
     r.ten_min_result = {"budget_sec": sum(TEN_DURATIONS.values()), "timings": timings,
                         "note": "描述性前后变化不证明训练疗效；三级规则及阈值待验证。"}
@@ -28,15 +32,15 @@ def run(runtime, auto):
     r.training_skipped, r.model_skipped = False, True
 
     def remaining(deadline):
-        return max(0, deadline - time.monotonic())
+        return max(0, deadline - r.protocol_now())
 
     def collect(key, seconds, state="rest"):
-        begin = time.monotonic()
-        reference_start = begin if r.source.kind == "lsl" else r.engine.t
+        begin = r.protocol_now()
+        reference_start = time.monotonic() if r.source.kind == "lsl" else r.engine.t
         deadline = begin + seconds * r.scale
         steps = []
         for i in range(int(seconds / config.STEP_SEC)):
-            if time.monotonic() >= deadline:
+            if r.protocol_now() >= deadline:
                 break
             r._check_cancel()
             step = r.engine.step(state)
@@ -49,9 +53,9 @@ def run(runtime, auto):
                 steps.append(step)
             r._publish_window(step, phase=key, include_signal=i % 5 == 0)
             r._progress(key, (i + 1) * config.STEP_SEC / seconds)
-            r._sleep_real(min(remaining(deadline), max(0, begin + (i+1)*config.STEP_SEC*r.scale-time.monotonic())))
+            r._sleep_real(min(remaining(deadline), max(0, begin + (i+1)*config.STEP_SEC*r.scale-r.protocol_now())))
         r._sleep_real(remaining(deadline))
-        timings[key] = round((time.monotonic()-begin)/r.scale, 3)
+        timings[key] = round((r.protocol_now()-begin)/r.scale, 3)
         return steps
 
     def baseline(steps):
@@ -84,10 +88,10 @@ def run(runtime, auto):
     for key, practice in (("practice", True), ("pvt", False)):
         seconds = TEN_DURATIONS[key]
         with r._phase(key) as ctx:
-            begin = time.monotonic()
+            begin = r.protocol_now()
             result = r._run_pvt(auto, practice=practice)
-            r._sleep_real(max(0, begin + seconds*r.scale-time.monotonic()))
-            timings[key] = round((time.monotonic()-begin)/r.scale, 3)
+            r._sleep_real(max(0, begin + seconds*r.scale-r.protocol_now()))
+            timings[key] = round((r.protocol_now()-begin)/r.scale, 3)
             r._merge_run_payload(ctx["run_id"], {"practice": practice, **result})
             if not practice:
                 pvt = result
@@ -100,18 +104,19 @@ def run(runtime, auto):
     round_sec = segment_sec + trainer.plan["rest_sec"]
     with r._phase("training") as ctx:
         training_run_id = ctx["run_id"]
-        begin = time.monotonic()
+        begin = r.protocol_now()
         r.bus.publish("training_start", {**trainer.describe(), "rationale": LABELS["guided"]})
         for index in range(rounds):
-            round_start = time.monotonic()
+            round_start = r.protocol_now()
             gate = FeedbackGate()
+            signal = TrainingFeedbackSignal(r)
             counts = Counter()
             smooth = None
             for tick in range(int(segment_sec / config.STEP_SEC)):
                 r._check_cancel()
-                if time.monotonic() >= round_start + segment_sec*r.scale:
+                if r.protocol_now() >= round_start + segment_sec*r.scale:
                     break
-                step = r.engine.step("focused")
+                step = signal.read("focused")
                 r._record_diagnostic(step, "training")
                 heatmap_cell = r._record_heatmap(step, "training")
                 mode = gate.update(step.graded["grade"], base.valid)
@@ -121,25 +126,31 @@ def run(runtime, auto):
                 else:
                     smooth = score if smooth is None else .3*score+.7*smooth
                 # Empty windows must not bridge a previous reward hold.
-                sample_time = (time.monotonic() - round_start) / r.scale
+                sample_time = (r.protocol_now() - round_start) / r.scale
                 trainer.feed(smooth, sample_time, usable=smooth is not None)
-                display_start = time.monotonic()
+                display_start = r.protocol_now()
+                presentation = signal.presentation(step, mode, smooth, sample_time, baseline_valid=base.valid)
                 feedback = {"segment": index+1, "feedback_mode": mode,
+                    **presentation,
                     "heatmap_cell": heatmap_cell,
                     "analysis_window": r.latest_analysis_window,
                     "affect_model": r.current_affect(),
                     "attention_model": step.attention_model,
-                    "mode_label": LABELS[mode], "grade": step.graded["grade"],
+                    "mode_label": LABELS[presentation["presentation_mode"]], "grade": step.graded["grade"],
                     "score": smooth, "target": trainer.target if mode == "eeg" else None,
                     "usable": smooth is not None, "on_target": smooth is not None and smooth >= trainer.target,
                     "segment_stats": trainer.segment_stats(sample_time),
                     **trainer.feedback_status()}
                 r.latest_feedback = feedback
                 r.bus.publish("feedback", feedback)
-                r._sleep_real(max(0, round_start+(tick+1)*config.STEP_SEC*r.scale-time.monotonic()))
-                counts[mode] += max(0, min(time.monotonic(), round_start+segment_sec*r.scale)-display_start)/r.scale
+                r._sleep_real(max(0, round_start+(tick+1)*config.STEP_SEC*r.scale-r.protocol_now()))
+                counts[mode] += max(0, min(r.protocol_now(), round_start+segment_sec*r.scale)-display_start)/r.scale
             segment = trainer.close_segment()
+            segment["local_eeg_feedback"] = signal.summary()
+            segment["measured_focus_updates"] = signal.measured_focus_updates
+            segment["measured_focus_only_updates"] = signal.measured_focus_only_updates
             segment["mode_seconds"] = {key: round(value, 3) for key,value in counts.items()}
+            segment["mode_seconds_scope"] = "strict_feedback_gate"
             segment["unobserved_seconds"] = round(max(0, segment_sec-sum(counts.values())), 3)
             if not segment["n"]:
                 segment.update(mean_score=None, on_target_ratio=None, volatility=None)
@@ -147,11 +158,12 @@ def run(runtime, auto):
             segments.append(segment)
             r._persist_training_segment(segment)
             r.bus.publish("segment", segment)
-            r.latest_feedback = {"segment": index+1, "feedback_mode": "rest", "mode_label": LABELS["rest"], "score": None, "usable": False}
+            r.latest_feedback = {"segment": index+1, "feedback_mode": "rest", "mode_label": LABELS["rest"],
+                                 "score": None, "usable": False, "local_eeg_feedback": None, "measured_focus_index": None}
             r.bus.publish("feedback", r.latest_feedback)
-            r._sleep_real(max(0, round_start+round_sec*r.scale-time.monotonic()))
+            r._sleep_real(max(0, round_start+round_sec*r.scale-r.protocol_now()))
             r._progress("training", (index+1)/rounds)
-        timings["training"] = round((time.monotonic()-begin)/r.scale, 3)
+        timings["training"] = round((r.protocol_now()-begin)/r.scale, 3)
         overview = training_indicator_overview(r.diagnostic_windows)
         r.ten_min_result["indicator_overview"] = overview
         r._merge_run_payload(ctx["run_id"], {"segments": segments, "indicator_overview": overview})
@@ -175,7 +187,8 @@ def run(runtime, auto):
     after_ref = robust_reference(s.graded for s in after)
     r.ten_min_result.update({"baseline_before": before_ref, "baseline_after": after_ref,
         "changes": {ch: after_ref[ch]["median"]-v["median"] for ch, v in before_ref.items() if ch in after_ref},
-        "segments": segments, "elapsed_sec": round(time.monotonic()-started, 3),
+        "segments": segments, "elapsed_sec": round(time.monotonic()-wall_started, 3),
+        "protocol_elapsed_seconds": round((r.protocol_now()-started)/r.scale, 3),
         "time_scale": r.scale, "comparison_note": "同设备、同通道描述性log(β/θ)中位数差；质量组成可不同，非疗效，非注意力得分"})
     # No monitor was collected: do not relabel training as assessment EEG.
     monitor = {"steps": [], "quality": r.engine.summarize([]), "summary": {}}

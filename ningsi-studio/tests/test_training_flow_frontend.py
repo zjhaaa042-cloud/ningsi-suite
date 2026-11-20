@@ -53,7 +53,21 @@ assert.ok(text(current).includes('有效时间内达标率 100%'));
 assert.ok(text(current).includes('有效覆盖 20%'));
 assert.ok(text(current).includes('有效反馈 2.0s / 实际 10.0s'));
 assert.ok(text(current).includes('样本不足'));
-assert.ok(text(current).includes('信号待恢复'));
+assert.ok(text(current).includes('专注评分暂停'));
+const local_eeg_feedback={kind:'relative_band_power',valid_until_unix_ms:Date.now()+2000,
+  channels:[{channel:0,relative:{theta:.34,alpha:.40,beta:.14}}]};
+emit('feedback',{...feedback,local_eeg_feedback});
+assert.ok(text(current).includes('实时脑电频带') && text(current).includes('40.0%'));
+const measured={...feedback,effective_time:{...feedback.effective_time,baseline_valid:true},
+  presentation_mode:'measured_focus',measured_focus_index:{value:.631,source:'lsl',valid_until_unix_ms:Date.now()+2000},local_eeg_feedback};
+emit('feedback',measured);
+assert.ok(text(current).includes('单窗专注相关指数') && text(current).includes('0.631'));
+assert.ok(!text(current).includes('40.0%'));
+assert.equal(Number(all(current).find(n=>n.tagName==='PROGRESS').value),0);
+emit('feedback',{...measured,measured_focus_index:{value:.631,valid_until_unix_ms:Date.now()-1}});
+assert.ok(!text(current).includes('0.631'));
+emit('feedback',feedback);
+assert.ok(!text(current).includes('40.0%'));
 assert.equal(Number(all(current).find(n=>n.tagName==='PROGRESS').value),0,'bad window breaks continuous hold');
 const timerBefore=text(card('有效时长训练进度'));assert.ok(timerBefore.includes('质量暂停'));
 session={...session,runtime:{latest_feedback:feedback,effective_time:{key:'training',phase:'training',segment:1,effective_time:progress}}};
@@ -68,6 +82,40 @@ assert.equal(all(primaryTable).filter(n=>n.tagName==='TR').length,2,'SSE replay 
 assert.ok(text(card('训练分段')).includes('100%'));assert.ok(text(card('训练分段')).includes('20%'));
 emit('effective_progress',{key:'training',effective_time:{...progress,completion_reason:'max_duration',elapsed_seconds:100}});
 assert.ok(text(card('有效时长训练进度')).includes('数据不足'));
+
+const baseline={phase:'baseline_open',target_seconds:60,valid_seconds:0,elapsed_seconds:8,
+  max_seconds:180,stable_started:false,quality_paused:true,completion_reason:null,
+  attempted_windows:4,usable_windows:0,valid_ratio:0};
+session={uuid:'test',status:'running',phase:'baseline_open',protocol:'short',phases:[],
+  runs:[{phase:'qc',status:'done'},{phase:'baseline_open',status:'running'}],
+  runtime:{effective_time:{key:'baseline_open',phase:'baseline_open',effective_time:baseline}}};
+mount();await settle();
+let collection=card('睁眼基线采集进度');
+assert.ok(text(collection).includes('等待脑电稳定'));
+assert.ok(text(collection).includes('0.0s / 1:00.0'));
+assert.ok(text(collection).includes('8.0s / 3:00.0'));
+assert.ok(!card('有效基线采集进度'));
+emit('effective_progress',{key:'baseline_open',effective_time:{...baseline,stable_started:true,valid_seconds:6,elapsed_seconds:14}});
+assert.ok(text(card('睁眼基线采集进度')).includes('有效时间暂不累计'));
+emit('effective_progress',{key:'baseline_open',effective_time:{...baseline,stable_started:true,
+  valid_seconds:60,elapsed_seconds:180,status_reason:'low_valid_ratio',completion_reason:'max_duration'}});
+assert.ok(text(card('睁眼基线采集进度')).includes('信号合格比例仍不足'));
+emit('effective_progress',{key:'baseline_open',effective_time:baseline});
+assert.ok(text(card('睁眼基线采集进度')).includes('信号合格比例仍不足'),'stale snapshot cannot restore waiting');
+emit('phase',{key:'baseline_open',state:'done'});
+emit('phase',{key:'monitor',state:'running'});
+emit('effective_progress',{key:'monitor',effective_time:{...baseline,phase:'monitor',stable_started:true,
+  target_seconds:24,valid_seconds:24,elapsed_seconds:40,max_seconds:120,completion_reason:'baseline_invalid'}});
+collection=card('任务态脑电采集进度');
+assert.ok(text(collection).includes('脑电指数留空'));
+assert.ok(all(root).find(n=>n.dataset?.slot==='assessment-eeg-baseline_open').classList.contains('flow-phase-hidden'));
+assert.ok(!all(root).find(n=>n.dataset?.slot==='assessment-eeg-monitor').classList.contains('flow-phase-hidden'));
+
+session={...session,phase:'monitor',runs:[{phase:'monitor',status:'running'}],
+  runtime:{effective_time:{monitor:{...baseline,phase:'monitor',stable_started:true,completed:true,
+    valid_seconds:60,elapsed_seconds:84,completion_reason:'target_reached'}}}};
+mount();await settle();
+assert.ok(text(card('任务态脑电采集进度')).includes('已达到本阶段的有效脑电要求'));
 cleanups.forEach(f=>f());
 '''
         program = program.replace('API_URI', json.dumps((ROOT / 'web/js/api.js').as_uri()))

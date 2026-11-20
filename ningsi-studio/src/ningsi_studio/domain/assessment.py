@@ -19,9 +19,15 @@ def eeg_summary(*, baseline, quality, indicator_summary) -> dict:
     baseline_valid = bool(baseline is not None and baseline.valid)
     scores_valid = all(isinstance(values[name], (int, float)) and math.isfinite(values[name])
                        for name in ("focus", "load"))
+    baseline_collection = (getattr(baseline, "quality", None) or {}).get("assessment_eeg_collection")
+    monitor_collection = (quality or {}).get("assessment_eeg_collection")
     if not baseline_valid:
-        reason = "睁眼基线不可用"
+        reason = (_collection_reason("睁眼基线", baseline_collection) if baseline_collection
+                  else "睁眼基线不可用")
         reason_code = "baseline_invalid"
+    elif monitor_collection and not monitor_collection["completed"]:
+        reason = _collection_reason("独立脑电监测", monitor_collection)
+        reason_code = "monitor_collection_insufficient"
     elif not (quality or {}).get("windows_total") and not indicator_summary:
         reason = "未采集独立监测阶段脑电；训练指数单独展示"
         reason_code = "monitor_not_collected"
@@ -32,7 +38,7 @@ def eeg_summary(*, baseline, quality, indicator_summary) -> dict:
         reason = ""
         reason_code = ""
     return {
-        "available": baseline_valid and scores_valid,
+        "available": not reason_code and scores_valid,
         "unavailable_reason": reason,
         "unavailable_code": reason_code,
         "valid_ratio": (quality or {}).get("valid_ratio", 0.0),
@@ -40,6 +46,16 @@ def eeg_summary(*, baseline, quality, indicator_summary) -> dict:
         "spec": config.INDICATOR_SPEC,
         "baseline_spec": config.BASELINE_SPEC,
     }
+
+
+def _collection_reason(label, status):
+    if status["status_reason"] == "low_valid_ratio":
+        return (f"{label}的合格窗比例为 {status['valid_ratio']:.0%}，"
+                f"低于 {status['min_valid_ratio']:.0%} 的要求")
+    if status["status_reason"] == "insufficient_effective_time":
+        return (f"{label}累计 {status['valid_seconds']:g} 秒合格脑电，"
+                f"目标 {status['target_seconds']:g} 秒")
+    return f"{label}未通过有效性检查"
 
 
 def assess(eeg, scale_objects=None, behavior=None):

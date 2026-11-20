@@ -2,6 +2,9 @@ import { MockAdapter, StreamStore, demoMeta, summarize, sessionExport, sessionCS
 import { drawTrend, drawEEG, populateOrb } from './charts.mjs';
 import { StudioAdapter } from './studio-adapter.mjs';
 import { SessionDirectory, initialSession, progressPercent } from './manager.mjs';
+import { historyArtifactUrl } from '../js/api.js';
+import { sessionSourceLabel } from '../js/session-history.js';
+import { fmtTime, statusText } from '../js/util.js';
 
 const $ = (id) => document.getElementById(id);
 export const store = new StreamStore();
@@ -95,11 +98,21 @@ function renderDirectory(snapshot) {
     button.addEventListener('click', () => selectSession(session.uuid)); return button;
   }) : [element('p', 'manager-empty', '暂无运行中的会话。可在另一个窗口打开凝思 Studio 开始检测；本页会自动等待。')]));
   $('manager-history').replaceChildren(...(snapshot.recent.length ? snapshot.recent.map((session) => {
-    const row = element('div', 'manager-history-row'), link = element('a', '', session.status === 'running' ? '查看监测 ↗' : '查看报告 ↗');
-    link.href = studioURL(`#/${session.status === 'running' ? 'live' : 'report'}?session=${session.uuid}`); link.target = '_blank'; link.rel = 'noopener noreferrer';
-    row.append(element('strong', '', session.participant), element('span', 'muted', `${statusLabels[session.status] || session.status} · ${phaseLabel(session)}`), link); return row;
+    const row = element('div', 'manager-history-row');
+    const link = element('a', '', session.archived && !session.presentation_url && !session.report_url ? '记录详情 ↗'
+      : session.status === 'running' ? '查看监测 ↗' : '查看报告 ↗');
+    link.href = session.archived ? historyArtifactUrl(session.presentation_url || session.report_url || session.evidence_url, accessToken())
+      : studioURL(`#/${session.status === 'running' ? 'live' : 'report'}?session=${session.uuid}`);
+    link.target = '_blank'; link.rel = 'noopener noreferrer';
+    const title = element('strong', '', session.label || session.participant || session.uuid.slice(0, 8));
+    title.title = session.hide_participant ? session.label : session.uuid;
+    const identifiers = session.hide_participant ? [] : [session.label && session.participant, session.uuid.slice(0, 8)];
+    const detail = [...identifiers, statusText(session.status),
+      sessionSourceLabel(session), fmtTime(session.created_at || session.started_at, false)].filter(Boolean);
+    row.append(title, element('span', 'muted', detail.join(' · ')), link); return row;
   }) : [element('p', 'manager-empty', '还没有后台会话记录。')]));
-  const selected = [...snapshot.active, ...snapshot.recent].find((session) => session.uuid === selectedSession);
+  $('manager-all-history').href = studioURL('#/history');
+  const selected = [...snapshot.active, ...snapshot.recent].find((session) => !session.archived && session.uuid === selectedSession);
   if (selected) backendSession = { ...(backendSession?.uuid === selected.uuid ? backendSession : {}), ...selected };
   if (selected && selected.status !== 'running' && store.session?.metadata.backendSessionId === selected.uuid) {
     stop(); notice(`后台会话${statusLabels[selected.status] || '已停止'}，本页监测记录已结束。`);

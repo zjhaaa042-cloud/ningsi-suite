@@ -21,6 +21,8 @@ test('active discovery uses a separate status query and every request is read-on
   assert.equal(updates[0].active[0].uuid, 'active');
   assert.equal(updates[0].recent[0].uuid, 'recent');
   assert.equal(calls.length, 2);
+  assert.ok(calls.some(({ url }) => url.startsWith('/api/sessions?') && url.includes('status=running')));
+  assert.ok(calls.some(({ url }) => url.startsWith('/api/test-history?') && url.includes('limit=8')));
   assert.ok(calls.every(({ options }) => !options.method || options.method === 'GET'));
   assert.ok(calls.every(({ options }) => options.headers['X-API-Token'] === 'test-token'));
 });

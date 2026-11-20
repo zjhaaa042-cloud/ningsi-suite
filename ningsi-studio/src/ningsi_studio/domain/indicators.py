@@ -33,6 +33,9 @@ class WindowStep:
     attention_model: dict = field(default_factory=dict)
     baseline_valid: bool | None = None
     focus_basis: dict = field(default_factory=dict)
+    sample_timing: dict | None = None
+    fragment_artifact_mask: object = None
+    fragment_localized_reasons: tuple = ()
 
     @property
     def usable(self) -> bool:
@@ -107,13 +110,29 @@ class WindowEngine:
 
     # ------------------------------------------------------------------ 推进
     def step(self, state: str = "rest", *, seconds: float | None = None,
-             artifact: bool = False) -> WindowStep:
+             artifact: bool = False, assessment_timing: bool = False,
+             defer_alerts: bool = False, wait_for_signal: bool = True,
+             fragment_masks: bool = False) -> WindowStep:
         self.index += 1
         self.t += config.STEP_SEC
         if hasattr(self.source, "analysis_window"):
-            raw, artifact_record = self.source.analysis_window(state, artifact=artifact)
+            options = {}
+            if hasattr(self.source, "assessment_timing_anchor"):
+                if assessment_timing:
+                    options["assessment_timing"] = True
+                if not wait_for_signal:
+                    options["wait"] = False
+                if fragment_masks:
+                    options["fragment_masks"] = True
+            raw, artifact_record = self.source.analysis_window(state, artifact=artifact, **options)
         else:
             raw, artifact_record = self.source.window(state, artifact=artifact), {}
+        sample_timing, fragment_artifact_mask, fragment_localized_reasons = None, None, ()
+        if assessment_timing or fragment_masks:
+            artifact_record = dict(artifact_record)
+            sample_timing = artifact_record.pop("sample_timing", None)
+            fragment_artifact_mask = artifact_record.pop("fragment_artifact_mask", None)
+            fragment_localized_reasons = tuple(artifact_record.pop("fragment_localized_reasons", ()))
         processed = process_window(raw, self.srate, t_end=self.t,
                                    baseline=self.baseline, artifact_evidence=artifact_record)
         window, indicators = processed.window, processed.indicators
@@ -123,9 +142,6 @@ class WindowEngine:
             if stat is not None:
                 focus_basis = {"window_log_ratio": index_values(window)["focus"],
                                "baseline_log_ratio": stat["mean"]}
-        events = self.alerts.feed(window, indicators)
-        triggered = [event.as_dict() for event in events if event.state == "triggered"]
-        self.fired_alerts.extend(triggered)
         graded = {}
         if getattr(self, "graded_enabled", False):
             from ningsi.signal.graded import describe_fragments
@@ -133,14 +149,26 @@ class WindowEngine:
             if artifact_record.get("reasons"):
                 graded = {"grade": "C", "channels": [], "reason": "|".join(artifact_record["reasons"])}
             graded["t_end"] = window.t_end
-        return WindowStep(
+        step = WindowStep(
             graded=graded, index=self.index, t_end=self.t, state=state, window=window,
             indicators=indicators,
             scores=dict(indicators.scores) if indicators is not None and indicators.available else {},
-            alerts=triggered, raw=raw,
+            raw=raw,
             baseline_valid=self.baseline.valid if self.baseline is not None else None,
             focus_basis=focus_basis,
+            sample_timing=sample_timing,
+            fragment_artifact_mask=fragment_artifact_mask,
+            fragment_localized_reasons=fragment_localized_reasons,
         )
+        if not defer_alerts:
+            self.set_step_alerts(step)
+        return step
+
+    def set_step_alerts(self, step: WindowStep) -> None:
+        """Advance alert state once the caller accepts a deferred assessment window."""
+        events = self.alerts.feed(step.window, step.indicators)
+        step.alerts = [event.as_dict() for event in events if event.state == "triggered"]
+        self.fired_alerts.extend(step.alerts)
 
     def _min_samples(self) -> int:
         """评分窗口须包含完整的 4 秒数据，不能把一个 Welch 分段当成完整窗。"""

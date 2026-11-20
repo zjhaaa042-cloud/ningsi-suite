@@ -93,10 +93,12 @@ class SignalFeed:
                  *, srate: float, channels: int, channel_labels: list[str] | None = None,
                  window_provider: Callable[[], dict | None] | None = None,
                  config: SignalConfig | None = None, device: str = "",
-                 source_kind: str = "sim", spectrum_interval: float = 1.0) -> None:
+                 source_kind: str = "sim", spectrum_interval: float = 1.0,
+                 paused: Callable[[], bool] | None = None) -> None:
         self.session_uuid = session_uuid
         self._samples = samples_provider
         self._window = window_provider
+        self._paused = paused
         self.config = config or SignalConfig()
         self.srate = float(srate)
         self.channels = int(channels)
@@ -247,7 +249,7 @@ class SignalFeed:
         """低频（默认 1 Hz）刷新频谱缓存；与波形推帧互不阻塞。"""
         while not self._stop.is_set():
             try:
-                fresh = self._window() if self._window is not None else None
+                fresh = self._window() if self._window is not None and not (self._paused and self._paused()) else None
                 if fresh:
                     with self._lock:
                         self._spectrum_cache = fresh
@@ -278,6 +280,10 @@ class SignalFeed:
                 interval = 1.0 / max(0.5, rate)
             if not subscribers:
                 break
+            if self._paused and self._paused():
+                self._stop.wait(min(interval, 0.2))
+                next_tick = time.monotonic()
+                continue
             self._frames += 1
             now = time.monotonic()
             frames: dict[tuple, dict | None] = {}

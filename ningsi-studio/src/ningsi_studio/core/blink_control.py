@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import threading
 import time
 import uuid
@@ -9,7 +10,7 @@ import uuid
 import numpy as np
 
 from ningsi.acquisition.eeg import UNIT_FACTORS, _unit
-from ningsi.signal.blinks import BlinkCalibration, calibrate_blinks
+from ningsi.signal.blinks import MIN_EVENTS, BlinkCalibration, calibrate_screened_blinks, screen_blink_observation
 from ningsi.signal.live_artifacts import channel_layout, voltage_scales
 from ningsi_studio.domain import eeg_units
 
@@ -23,6 +24,9 @@ def context(engine, confirmation=None):
     pick, _ = channel_layout(labels, count)
     if len(pick) != 2 or any(i >= len(labels) or not labels[i] for i in pick):
         raise ValueError("眨眼校准需要两路有明确标签的原始 EEG")
+    rate = float(engine.srate)
+    if not math.isfinite(rate) or not 100 <= rate <= 2000:
+        raise ValueError("眨眼校准需要 100–2000 Hz 的原始 EEG")
     units = descriptor.get("declared_units") or []
     if confirmation:
         eeg_units.verify_descriptor(confirmation, descriptor)
@@ -32,7 +36,7 @@ def context(engine, confirmation=None):
     scales = voltage_scales(units, count, engine.research_scale_to_uv, pick, operator)
     identity = {key: descriptor.get(key) for key in ("name", "source_id", "hostname", "stream_type", "uid")}
     identity.update(labels=[labels[i] for i in pick], indices=pick, scales=[scales[i] for i in pick],
-                    rate=float(engine.srate))
+                    rate=rate)
     montage = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return pick, scales, identity["labels"], montage
 
@@ -50,40 +54,68 @@ def verify_binding(binding, engine):
     return calibration, pick, scales, labels, montage
 
 
+class BlinkCalibrationRetry(ValueError):
+    """The current observation failed but earlier accepted observations still apply."""
+
+    def __init__(self, message, count):
+        super().__init__(message)
+        self.detail = {"retryable": True, "accepted_count": count}
+
+
 class BlinkCalibrationService:
-    """Keep <=120s of contiguous raw calibration in memory; profiles expire in 30min."""
+    """Keep screened mark observations in memory for one 120-second collection."""
     def __init__(self):
         self._lock = threading.RLock()
         self._drafts = {}
 
     @staticmethod
-    def _capture(row, snap, engine, pick, scales):
+    def _recent(snap, engine, pick, scales):
         rate = float(engine.srate)
         raw = np.asarray(snap.get("samples"), dtype=float)
         stamps = np.asarray(snap.get("timestamps"), dtype=float)
-        total = snap.get("total_samples", 0)
-        if (snap.get("age") is None or snap["age"] > 1 or raw.ndim != 2 or len(stamps) < round(2.5*rate)
-                or raw.shape[1] != len(stamps)):
-            raise ValueError("请先预览并等到连续、新鲜的至少2.5秒原始 EEG，再开始校准")
-        offset = total-len(stamps)
-        start = row.get("sample_end", total-round(2.5*rate))
-        if start < offset or start > total:
-            raise ValueError("校准期间原始数据不连续，请重新开始并保持本页打开")
-        first = start-offset
-        timing = stamps[max(0, first-1):]
-        if (not np.isfinite(timing).all() or np.any(np.diff(timing) <= 0)
-                or np.any(np.diff(timing) > 1.75/rate)):
-            raise ValueError("校准期间出现时间戳间断，请重新开始")
-        wave = raw[np.array(pick), first:] * np.asarray(scales)[pick, None]
+        size = round(2.5 * rate)
+        if (snap.get("age") is None or snap["age"] > 1 or raw.ndim != 2 or stamps.ndim != 1
+                or len(stamps) < size or raw.shape[1] != len(stamps)):
+            raise ValueError("请等待至少 2.5 秒新鲜的双通道脑电，再记录。")
+        timing = stamps[-size:]
+        differences = np.diff(timing)
+        if (not np.isfinite(timing).all() or np.any(differences <= 0) or np.any(differences > 1.75 / rate)
+                or abs((timing[-1] - timing[0]) * rate / (size - 1) - 1) > .05):
+            raise ValueError("本次记录的时间戳间断或不稳定，请等 EEG 推流稳定后再眨眼。")
+        wave = raw[np.array(pick), -size:] * np.asarray(scales)[pick, None]
         if not np.isfinite(wave).all():
-            raise ValueError("当前原始波形无效，请检查接触并重新开始")
-        if "start_index" not in row:
-            row["start_index"] = start
-        if total-row["start_index"] > round(120*rate):
-            raise ValueError("本次眨眼采集超过120秒，请重新开始，或取消后再评估")
-        if wave.shape[1]:
-            row["chunks"].append(wave)
+            raise ValueError("本次记录含无效波形，请等信号稳定后重新眨眼。")
+        return wave, timing
+
+    def _mark(self, row, snap, engine, pick, scales):
+        rate = float(engine.srate)
+        total = snap.get("total_samples", 0)
+        if row["profile"] is not None:
+            raise ValueError("本次校准已完成。")
+        if total - row["start_index"] > round(120 * rate):
+            raise ValueError("此次 120 秒的标记时段已结束。已有足够标记时可结束校准。")
+        wave, stamps = self._recent(snap, engine, pick, scales)
+        size = wave.shape[1]
+        if row["sample_end"] is not None and total - size < row["sample_end"]:
+            raise ValueError("记录间隔太短，请间隔至少 3 秒再自然短眨一次。")
+        width = max(1, round(.06 * rate))
+        slow = np.stack([np.convolve(ch - np.median(ch), np.ones(width) / width, mode="same") for ch in wave])
+        # The click selects recent data; the candidate peak comes from the measured wave.
+        first, last = size - round(1.6 * rate), size - round(.35 * rate)
+        strength = np.min(np.abs(slow[:, first:last]), axis=0)
+        peak = first + int(np.argmax(strength))
+        if strength[peak - first] < 35:
+            raise ValueError("未找到清楚的双通道短眨眼。请自然短眨一次，等约 0.8 秒再点记录。")
+        observation = screen_blink_observation(wave, rate, peak)
+        if total - size + observation[0] < row["start_index"]:
+            raise ValueError("请在开始本次校准后自然短眨，再点记录。")
+        peak_time = float(stamps[observation[0]])
+        if row["last_peak_time"] is not None and peak_time - row["last_peak_time"] < 1.5:
+            raise ValueError("同一次眨眼不能重复标记，请间隔至少 3 秒再自然短眨一次。")
+        row["last_peak_time"] = peak_time
         row["sample_end"] = total
+        row["chunks"].append(observation)
+        row["count"] += 1
 
     def action(self, payload, preview):
         with self._lock, preview._lock:
@@ -99,23 +131,20 @@ class BlinkCalibrationService:
             if action == "start":
                 if len(self._drafts) >= 32:
                     raise ValueError("眨眼校准草稿过多，请稍后重试")
-                confirmation = eeg_units.confirmation(payload.get("eeg_calibration"))
                 preview.start(device)
                 engine = preview._source.engine
-                if confirmation:
-                    engine.operator_eeg_scale_to_uv = confirmation["scale_to_uv"]
+                confirmation = eeg_units.resolve_calibration(payload.get("eeg_calibration"), engine.descriptor_dict())
                 pick, scales, labels, montage = context(engine, confirmation)
                 token = uuid.uuid4().hex
                 snap = engine.model_snapshot()
+                self._recent(snap, engine, pick, scales)
+                if confirmation:
+                    engine.operator_eeg_scale_to_uv = confirmation["scale_to_uv"]
                 self._drafts[token] = {"created": now, "participant": participant, "device": device,
                     "unit_confirmation": confirmation, "montage_id": montage, "labels": labels,
-                    "chunks": [], "peaks": [], "last_peak_time": None, "profile": None,
+                    "chunks": [], "count": 0, "last_peak_time": None, "profile": None,
+                    "sample_end": None, "start_index": snap["total_samples"],
                     "buffer_id": snap.get("buffer_id"), "connection_generation": snap.get("connection_generation")}
-                try:
-                    self._capture(self._drafts[token], snap, engine, pick, scales)
-                except ValueError:
-                    del self._drafts[token]
-                    raise
             else:
                 token = payload.get("token")
                 if not isinstance(token, str):
@@ -134,49 +163,29 @@ class BlinkCalibrationService:
                 if (montage != row["montage_id"] or snap.get("buffer_id") != row["buffer_id"]
                         or snap.get("connection_generation") != row["connection_generation"]):
                     raise ValueError("数据源已重连或配置已改变，请重新开始眨眼校准")
-                if row["profile"] is None:
-                    self._capture(row, snap, engine, pick, scales)
                 if action == "mark":
-                    if row["profile"] is not None or len(row["peaks"]) >= 20:
-                        raise ValueError("本次标记已完成，请结束校准或重新开始")
-                    rate = float(engine.srate)
-                    size = round(2.5*rate)
-                    raw = np.asarray(snap.get("samples"), dtype=float)
-                    stamps = np.asarray(snap.get("timestamps"), dtype=float)
-                    if (snap.get("age") is None or snap["age"] > 1 or raw.ndim != 2 or raw.shape[1] < size
-                            or len(stamps) < size or not np.isfinite(stamps[-size:]).all()
-                            or np.any(np.diff(stamps[-size:]) <= 0)
-                            or np.any(np.diff(stamps[-size:]) > 1.75/rate)):
-                        raise ValueError("需要连续、新鲜的至少2.5秒原始 EEG；请稍后再标记")
-                    wave = raw[np.array(pick), -size:] * np.asarray(scales)[pick, None]
-                    if not np.isfinite(wave).all():
-                        raise ValueError("当前原始波形无效，请检查接触")
-                    width = max(1, round(.06*rate))
-                    slow = np.stack([np.convolve(ch-np.median(ch), np.ones(width)/width, mode="same") for ch in wave])
-                    # User clicks 0.5–1.3s after the blink. Never label the click as a physiological peak.
-                    first, last = size-round(1.3*rate), size-round(.5*rate)
-                    strength = np.min(np.abs(slow[:, first:last]), axis=0)
-                    peak = first+int(np.argmax(strength))
-                    peak_time = float(stamps[-size+peak])
-                    if row["last_peak_time"] is not None and peak_time-row["last_peak_time"] < 1.5:
-                        raise ValueError("同一次眨眼不能重复标记；请间隔至少3秒再自然短眨眼")
-                    if strength[peak-first] < 35:
-                        raise ValueError("未找到清楚的双通道短眨眼，请眨眼后等约半秒再标记")
-                    row["last_peak_time"] = peak_time
-                    row["peaks"].append(snap["total_samples"]-size+peak-row["start_index"])
+                    try:
+                        self._mark(row, snap, engine, pick, scales)
+                    except ValueError as error:
+                        raise BlinkCalibrationRetry(str(error), row["count"]) from error
                 elif action == "finish":
-                    if len(row["peaks"]) < 15:
-                        raise ValueError("请至少标记15次自然短眨眼（建议15–20次）")
+                    if row["count"] < MIN_EVENTS:
+                        raise BlinkCalibrationRetry(f"至少需要 {MIN_EVENTS} 次通过筛查的短眨眼。", row["count"])
                     if row["profile"] is None:
-                        profile = calibrate_blinks(np.concatenate(row["chunks"], axis=1), engine.srate,
-                            row["peaks"], channel_labels=labels, montage_id=montage)
+                        try:
+                            profile = calibrate_screened_blinks(row["chunks"], engine.srate, channel_labels=labels,
+                                                                montage_id=montage)
+                        except ValueError as error:
+                            raise BlinkCalibrationRetry(str(error), row["count"]) from error
                         row["profile"] = profile.as_dict()
-                        row["chunks"] = []  # raw calibration data is transient, not persisted
+                        row["chunks"] = []
                 elif action != "status":
                     raise ValueError("未知眨眼校准操作")
             row = self._drafts[token]
             return {"token": token, "state": "ready" if row["profile"] else "collecting",
-                    "count": len(row["peaks"]), "participant": participant, "device": device,
+                    "count": row["count"], "minimum_events": MIN_EVENTS,
+                    "template_events": row["profile"]["events"] if row["profile"] else None,
+                    "participant": participant, "device": device,
                     "expires_in_seconds": max(0, round(1800-(now-row["created"])))}
 
     def binding(self, token, participant, device, preview=None):

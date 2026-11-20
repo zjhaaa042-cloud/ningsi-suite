@@ -121,9 +121,9 @@ class ZipConcurrencyTests(unittest.TestCase):
             original = export.build_zip
             targets = []
 
-            def build(target, files, meta):
+            def build(target, files, meta, *, presentation=None):
                 targets.append(target)
-                original(target, files, meta)
+                original(target, files, meta, presentation=presentation)
                 barrier.wait(timeout=5)
                 return target
 

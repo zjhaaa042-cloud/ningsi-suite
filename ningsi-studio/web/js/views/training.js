@@ -14,7 +14,7 @@ import {
   list, pageFrame, pick, statusText, table,
 } from '../util.js';
 import { SERIES_COLORS, drawLineChart, drawGauge } from '../charts.js';
-import { effectiveTimeContent, effectiveTimeOutcome, effectiveTimeState, formatWallRatio, trainingCoverageNote, trainingMetrics } from '../training-metrics.js';
+import { effectiveTimeContent, effectiveTimeOutcome, effectiveTimeState, formatWallRatio, localEegPanel, measuredFocusPanel, trainingCoverageNote, trainingMetrics } from '../training-metrics.js';
 
 const FEEDBACK_LABELS = {
   eeg: '脑电反馈', quality: '信号质量反馈', guided: '固定引导',
@@ -90,6 +90,7 @@ export function render(container, ctx) {
     trainingEnded: false,
     segmentStats: null,
     feedbackMode: null,
+    feedback: null,
     feedbackNote: '',
     effectiveTime: null,
     timeScale: pick(ctx.store.state.currentSession, 'time_scale', 1),
@@ -165,6 +166,16 @@ export function render(container, ctx) {
     gaugeHost.textContent = '';
     const view = finalView();
     const body = el('div');
+    const measured = !view.usingFallback && measuredFocusPanel(local.feedback);
+    if (measured) {
+      gaugeHost.append(card('单窗专注相关指数', measured));
+      return;
+    }
+    const bands = !view.usingFallback && localEegPanel(local.feedback);
+    if (bands) {
+      gaugeHost.append(card('实时脑电频带', bands));
+      return;
+    }
     gaugeHost.append(card('专注相关指数', body, {
       sub: '0.50 对应本次训练前的个人基线，目标线使用相同的 0–1 刻度。',
     }));
@@ -202,7 +213,7 @@ export function render(container, ctx) {
       el('div', { class: 'training-primary' }, [el('p', { class: 'muted', text: '有效时间覆盖率' }), el('p', { class: 'mono kpi__value', text: fmtPercent(metrics?.coverage) })]),
       el('div', {}, [el('p', { class: 'muted', text: local.timeScale !== 1 ? '有效反馈秒数 / 协议时长' : '有效反馈秒数 / 实际时长' }), el('p', { class: 'mono', text: `${fmtDuration(metrics?.validSeconds)} / ${fmtDuration(metrics?.duration)}` })]),
       el('div', {}, [el('p', { class: 'muted', text: '本段达标时间占比' }), el('p', { class: 'mono', text: metrics ? formatWallRatio(metrics) : DASH })]),
-      el('div', {}, [el('p', { class: 'muted', text: view.usingFallback ? '末段平均专注相关指数' : '当前专注相关指数' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.score, 3) })]),
+      el('div', {}, [el('p', { class: 'muted', text: view.usingFallback ? '末段平均专注相关指数' : local.feedback?.presentation_mode === 'measured_focus' ? '用于连续反馈的指数' : '当前专注相关指数' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.score, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '目标线' }), el('p', { class: 'mono kpi__value', text: fmtNum(view.target, 3) })]),
       el('div', {}, [el('p', { class: 'muted', text: '连续保持状态' }), el('p', { class: 'kpi__value', text: achieved })]),
       el('div', {}, [el('p', { class: 'muted', text: '当前段' }), el('p', { class: 'mono', text: fmtInt(view.seq) })]),
@@ -236,6 +247,8 @@ export function render(container, ctx) {
     const chartHost = el('div');
     body.append(table([
       { title: '段', render: (row) => fmtInt(Number(pick(row, 'seq', 0)) + 1) },
+      ...(rows.some(row => Number.isInteger(row.measured_focus_updates)) ? [{ title: '测得指数次数', render: row => fmtInt(row.measured_focus_updates) }] : []),
+      ...(rows.some(row => row.local_eeg_feedback) ? [{ title: '局部频带覆盖', render: row => fmtDuration(row.local_eeg_feedback?.support_seconds) }] : []),
       { title: '有效时间内达标率', align: 'right', render: (row) => fmtPercent(row.__metrics.validRatio) },
       { title: '有效覆盖', align: 'right', render: (row) => fmtPercent(row.__metrics.coverage) },
       { title: local.timeScale !== 1 ? '有效秒数 / 协议时长' : '有效秒数 / 实际时长', render: (row) => `${fmtDuration(row.__metrics.validSeconds)} / ${fmtDuration(row.__metrics.duration)}` },
@@ -324,6 +337,7 @@ export function render(container, ctx) {
         && (!Number.isFinite(nextElapsed) || !Number.isFinite(currentElapsed) || nextElapsed <= currentElapsed))) return;
     }
     if (!fromSnapshot) local.hasLiveFeedback = true;
+    local.feedback = payload;
     const mode = payload.feedback_mode;
     const usable = (!mode || mode === 'eeg') && payload.usable !== false && Number.isFinite(payload.score);
     local.feedbackMode = usable ? 'eeg' : (mode && mode !== 'eeg' ? mode : 'paused');

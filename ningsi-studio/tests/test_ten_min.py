@@ -62,6 +62,8 @@ class TenMinuteSessionTests(StudioTestCase):
         self.assertEqual(overview['quality']['windows_scored'], 0)
         self.assertTrue(overview['reason'])
         for segment in report['extras']['ten_min']['segments']:
+            self.assertEqual(segment['measured_focus_updates'],0)
+            self.assertEqual(segment['measured_focus_only_updates'],0)
             self.assertFalse(segment['achieved'])
             self.assertNotIn('eeg',segment['mode_seconds'])
             self.assertIsNone(segment['mean_score'])
@@ -85,6 +87,9 @@ class TenMinuteSessionTests(StudioTestCase):
         ten = report['extras']['ten_min']
         self.assertEqual(len(ten['segments']),4)
         self.assertEqual(ten['budget_sec'],600)
+        for segment in ten['segments']:
+            self.assertEqual(segment['measured_focus_updates'], segment['stats']['n']+segment['measured_focus_only_updates'])
+        self.assertGreater(sum(segment['measured_focus_only_updates'] for segment in ten['segments']), 0)
         overview = detail['result_overview']
         self.assertTrue(overview['available'])
         self.assertEqual(set(overview['summary']), {'focus', 'relax', 'load'})

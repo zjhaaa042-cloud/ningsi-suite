@@ -253,12 +253,16 @@ class AuditRegressionTests(StudioTestCase):
                                            capture_output=True, text=True, timeout=20, cwd=ROOT)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 links = json.loads(completed.stdout.strip())
-                self.assertEqual(len(links), 2, '应覆盖 ZIP 和文件列表中实际渲染的下载链接')
+                base_path = f'/api/sessions/{uuid}'
+                self.assertCountEqual([link.partition('?')[0] for link in links],
+                                      [base_path + '/presentation', base_path + '/export.zip',
+                                       base_path + '/artifacts/report_json'])
                 for link in links:
                     with self.subTest(source=token_source, link=link):
                         self.assert_status(self.get(link), 200)
                         self.assertEqual('token=' in link, token_source != 'none')
             self.app.settings.api_token = token
             self.assert_error(self.get(f'/api/sessions/{uuid}/export.zip'), 401, 'unauthorized')
+            self.assert_error(self.get(f'/api/sessions/{uuid}/presentation'), 401, 'unauthorized')
         finally:
             self.app.settings.api_token = original_token

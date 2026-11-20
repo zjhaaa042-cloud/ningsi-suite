@@ -45,10 +45,11 @@ export class StudioAdapter {
     return body.data ?? body;
     } finally { clearTimeout(timeout); signal?.removeEventListener('abort', abort); }
   }
-  async list({ status = '', limit = 50, signal } = {}) {
+  async list({ status = '', limit = 50, includeArchived = false, signal } = {}) {
     const query = new URLSearchParams({ limit: String(limit), page: '1' });
     if (status) query.set('status', status);
-    return (await this.request(`/api/sessions?${query}`, signal)).items || [];
+    const endpoint = includeArchived ? '/api/test-history' : '/api/sessions';
+    return (await this.request(`${endpoint}?${query}`, signal)).items || [];
   }
   async prepare(uuid) {
     if (!/^[a-f\d]{32}$/i.test(uuid)) throw new Error('请选择有效的 Studio 会话');

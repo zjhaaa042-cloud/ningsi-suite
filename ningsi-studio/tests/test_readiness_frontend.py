@@ -181,6 +181,41 @@ assert.equal(unitPanel.hidden,false);assert.equal(byText(root,'开始评估').di
 ctx.cleanups.forEach(fn=>fn());
 ''')
 
+    def test_blink_draft_survives_preflight_refresh_and_retryable_error(self):
+        self.node(r'''
+import assert from 'node:assert/strict';
+const {render}=await import(START_URI);const ctx=makeCtx(), root=new StubNode('main');
+const vendor='lsl:BioMulti Lite EEG-Documented';
+api.devices=async()=>({data:{sources:[{key:vendor,device:'BioMulti Lite EEG-Documented',real:true,is_eeg:true}]}});
+api.listSubjects=async()=>({data:{items:[],total:0}});
+api.createSubject=async()=>({data:{public_id:'new-person'}});
+api.config=async()=>({data:{profiles:[{key:'ten_min',total_sec:600}]}});
+api.sessionPreflight=async body=>({data:{device:body.device,ready:true,checks:[],
+  calibration:{source_unit:'uV',scale_to_uv:1,origin:'manufacturer_manual'}}});
+let tokenSeen, attempts=0;
+api.blinkCalibration=async body=>{
+  if(body.action==='start') {
+    assert.equal(body.eeg_calibration,null);
+    await flush();
+    return {data:{token:'draft',state:'collecting',count:0,minimum_events:8}};
+  }
+  tokenSeen=body.token;
+  if(++attempts===1) throw Object.assign(new Error('本次眨眼附近波形出现突变。'),{
+    status:422,detail:{retryable:true,accepted_count:0},
+  });
+  return {data:{token:'draft',state:'collecting',count:1,minimum_events:8}};
+};
+await render(root,ctx);await flush();
+await click(byText(root,'开始个人眨眼校准'));
+const mark=byText(root,'已眨眼，记录这一次');
+assert.equal(mark.disabled,false,'a refreshed manufacturer calibration must not discard the draft');
+await click(mark);
+assert.ok(text(root).includes('已保留 0 次'));assert.equal(mark.disabled,false);
+await click(mark);
+assert.equal(tokenSeen,'draft');assert.ok(text(root).includes('已通过单次筛查 1 次'));
+ctx.cleanups.forEach(fn=>fn());
+''')
+
     def test_rescan_rechecks_configuration_for_same_device_name(self):
         self.node(r'''
 import assert from 'node:assert/strict';

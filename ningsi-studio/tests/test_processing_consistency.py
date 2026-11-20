@@ -71,6 +71,23 @@ class ProcessingConsistencyTests(unittest.TestCase):
         self.assertEqual({event["kind"] for event in cli["alerts"]}, {"poor_signal"})
         self.assertTrue(all(value is None for _, value in cli["series"]))
 
+    def test_deferring_windows_leaves_alert_streak_untouched_until_acceptance(self):
+        rejected = (np.zeros((1, 0)), {})
+        engine = WindowEngine(ReplaySource([rejected] * 21), 250, device="test", baseline=self.baseline)
+        frames = [engine.step(defer_alerts=True) for _ in range(20)]
+        self.assertFalse(engine.fired_alerts)
+        self.assertTrue(all(not frame.alerts for frame in frames))
+        self.assertEqual(engine.alerts.invalid_streak, 0)
+        engine.set_step_alerts(frames[0])
+        self.assertEqual(engine.alerts.invalid_streak, 1)
+        self.assertFalse(frames[0].alerts)
+        for frame in frames[1:]:
+            engine.set_step_alerts(frame)
+        final = engine.step()
+        self.assertEqual(engine.alerts.invalid_streak, 21)
+        self.assertEqual({event["kind"] for event in engine.fired_alerts}, {"poor_signal"})
+        self.assertEqual([event for frame in [*frames, final] for event in frame.alerts], engine.fired_alerts)
+
 
 if __name__ == "__main__":
     unittest.main()

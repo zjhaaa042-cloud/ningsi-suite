@@ -173,7 +173,9 @@ export const api = {
   /* -------------------------------------------------------------- 会话 */
   createSession: (body) => request('POST', '/api/sessions', { body, timeout: 30000 }),
   listSessions: (params) => get('/api/sessions', params),
+  listTestHistory: (params) => get('/api/test-history', params),
   getSession: (uuid) => get(`/api/sessions/${uuid}`),
+  setDemoPaused: (uuid, paused) => post(`/api/sessions/${uuid}/demo-pause`, { paused }, { timeout: 30000 }),
   cancelSession: (uuid) => request('DELETE', `/api/sessions/${uuid}`),
   sessionLive: (uuid) => get(`/api/sessions/${uuid}/live`),
   submitStateCheckin: (uuid, body) => post(`/api/sessions/${uuid}/state-checkins`, body),
@@ -200,6 +202,7 @@ export const api = {
   artifacts: (uuid) => get(`/api/sessions/${uuid}/artifacts`),
   // 原生 <a> 下载不会携带 fetch 的 X-API-Token，需与 SSE 一样把令牌写入查询串。
   artifactUrl: (uuid, kind) => `/api/sessions/${uuid}/artifacts/${encodeURIComponent(kind)}` + buildQuery({ token: apiToken() }),
+  presentationUrl: (uuid) => `/api/sessions/${encodeURIComponent(uuid)}/presentation` + buildQuery({ token: apiToken() }),
   exportZipUrl: (uuid) => `/api/sessions/${uuid}/export.zip` + buildQuery({ token: apiToken() }),
 
   /* ------------------------------------------------------- 模型与趋势 */
@@ -217,6 +220,14 @@ export const api = {
 };
 
 export default api;
+
+export function historyArtifactUrl(path, token = apiToken()) {
+  if (typeof path !== 'string' || !path.startsWith('/api/test-history/')) return null;
+  const url = new URL(path, window.location.origin);
+  if (url.origin !== window.location.origin || !url.pathname.startsWith('/api/test-history/')) return null;
+  if (token) url.searchParams.set('token', token);
+  return url.pathname + url.search;
+}
 
 /** SSE 地址（大屏/实时视图用）。 */
 export function eventsUrl(uuid, lastEventId) {

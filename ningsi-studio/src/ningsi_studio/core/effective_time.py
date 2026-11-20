@@ -18,6 +18,7 @@ from ningsi_studio.core.ten_min import LABELS
 from ningsi_studio.core.control import SessionCancelled
 from ningsi_studio.domain.results import training_indicator_overview
 from ningsi_studio.domain.training import StudioTraining
+from ningsi_studio.domain.training_feedback import TrainingFeedbackSignal
 
 SPEC = EFFECTIVE_POLICY["spec"]
 # Wake before the previous feedback expires, leaving time for the next analysis
@@ -27,7 +28,7 @@ SCHEDULING_MARGIN_WALL_SEC = .05
 SCHEDULING_MARGIN_STEP_FRACTION = .25
 
 
-def progress(*, target, valid, elapsed, maximum, paused=False, reason=None, eligible=True, scale=1):
+def progress(*, target, valid, elapsed, maximum, paused=False, reason=None, eligible=True, scale=1, actual_elapsed=None):
     reached = valid + 1e-6 >= target
     return {"spec": SPEC, "target_seconds": target, "valid_seconds": round(valid, 4),
             "elapsed_seconds": round(elapsed, 4), "max_seconds": maximum,
@@ -35,7 +36,7 @@ def progress(*, target, valid, elapsed, maximum, paused=False, reason=None, elig
             "quality_paused": bool(paused), "completion_reason": reason,
             "target_reached": reached, "completed": bool(reached and eligible and reason == "target_reached"),
             "time_basis": "protocol_seconds", "time_scale": scale,
-            "actual_elapsed_seconds": round(elapsed*scale, 4)}
+            "actual_elapsed_seconds": round(elapsed*scale if actual_elapsed is None else actual_elapsed, 4)}
 
 
 class DisplayClock:
@@ -66,9 +67,10 @@ class DisplayClock:
         self.at, self.usable, self.mode = float(now), bool(usable), mode
         self.until = self.at + config.STEP_SEC
 
-    def snapshot(self, elapsed, reason=None):
+    def snapshot(self, elapsed, reason=None, *, actual_elapsed=None):
         return progress(target=self.target, valid=self.valid, elapsed=elapsed,
-                        maximum=self.maximum, paused=not self.usable, reason=reason, scale=self.scale)
+                        maximum=self.maximum, paused=not self.usable, reason=reason, scale=self.scale,
+                        actual_elapsed=actual_elapsed)
 
 
 def _robust_baseline(r, steps):
@@ -95,18 +97,19 @@ def _emit_progress(r, phase, state, *, segment=None):
 def collect_baseline(r, key, run_id):
     """No bad-window filtering before build_baseline: its denominator is intact."""
     target, maximum = EFFECTIVE_POLICY["baseline_target_seconds"], EFFECTIVE_POLICY["baseline_max_seconds"]
-    begin, steps, intervals = time.monotonic(), [], []
+    begin, steps, intervals = r.protocol_now(), [], []
+    wall_started = time.monotonic()
     base, valid, reason, tick = _robust_baseline(r, []), 0.0, None, 0
     state = progress(target=target, valid=0, elapsed=0, maximum=maximum, paused=True, scale=r.scale)
     try:
         while True:
             r._check_cancel()
-            elapsed = (time.monotonic()-begin)/r.scale
+            elapsed = (r.protocol_now()-begin)/r.scale
             if elapsed >= maximum:
                 reason = "max_duration"
                 break
             step = r.engine.step("rest")
-            elapsed = (time.monotonic()-begin)/r.scale
+            elapsed = (r.protocol_now()-begin)/r.scale
             # Use the phase clock, including simulation, so no future or previous
             # phase samples can create effective baseline seconds.
             step.window = replace(step.window, t_end=elapsed)
@@ -119,7 +122,8 @@ def collect_baseline(r, key, run_id):
                 base = _robust_baseline(r, steps)
             r._publish_window(step, phase=key, include_signal=tick % 5 == 0)
             state = progress(target=target, valid=valid, elapsed=elapsed, maximum=maximum,
-                             paused=not step.usable, eligible=base.valid, scale=r.scale)
+                             paused=not step.usable, eligible=base.valid, scale=r.scale,
+                             actual_elapsed=time.monotonic()-wall_started)
             _emit_progress(r, key, state)
             r._progress(key, min(1.0, valid/target), effective_time=state)
             if valid + 1e-6 >= target and base.valid:
@@ -127,14 +131,15 @@ def collect_baseline(r, key, run_id):
                 break
             tick += 1
             r._sleep_real(max(0, min(begin+maximum*r.scale,
-                                    begin+tick*config.STEP_SEC*r.scale)-time.monotonic()))
+                                    begin+tick*config.STEP_SEC*r.scale)-r.protocol_now()))
     except SessionCancelled:
         reason = "cancelled"
         raise
     finally:
-        elapsed = (time.monotonic()-begin)/r.scale
+        elapsed = (r.protocol_now()-begin)/r.scale
         state = progress(target=target, valid=valid, elapsed=elapsed, maximum=maximum,
-                         paused=state["quality_paused"], reason=reason, eligible=base.valid, scale=r.scale)
+                         paused=state["quality_paused"], reason=reason, eligible=base.valid, scale=r.scale,
+                         actual_elapsed=time.monotonic()-wall_started)
         state.update(candidate_windows=len(steps), usable_windows=sum(s.usable for s in steps),
                      baseline_valid=base.valid, baseline_reasons=list(base.reasons),
                      minimum_baseline_seconds=config.BASELINE_PROTOCOL["min_usable_sec"],
@@ -150,8 +155,10 @@ def training_round(r, trainer, base, index, run_id):
     # GetTickCount64 (time.monotonic on Windows / Python 3.12) can quantize
     # consecutive accelerated updates to one timestamp. QPC is also monotonic,
     # and keeps publication order / interval reconciliation at full precision.
-    now = time.perf_counter
+    now = r.precise_now
     begin, gate, smooth = now(), FeedbackGate(), None
+    wall_started = time.perf_counter()
+    signal = TrainingFeedbackSignal(r)
     clock = DisplayClock(EFFECTIVE_POLICY["segment_target_seconds"], EFFECTIVE_POLICY["segment_max_seconds"], r.scale)
     limit = clock.maximum if base.valid else clock.target
     support_gaps = []
@@ -204,7 +211,7 @@ def training_round(r, trainer, base, index, run_id):
                     reason = "max_duration" if base.valid else "baseline_invalid"
                     break
             analysis_started = now()
-            step = r.engine.step("focused")
+            step = signal.read("focused")
             r._record_diagnostic(step, "training")
             heatmap = r._record_heatmap(step, "training")
             elapsed = (now()-begin)/r.scale
@@ -225,10 +232,12 @@ def training_round(r, trainer, base, index, run_id):
             trainer.feed(smooth, elapsed, usable=smooth is not None)
             clock.display(elapsed, usable=smooth is not None, mode=mode)
             feedback_times.append(elapsed)
-            state = clock.snapshot(elapsed)
+            state = clock.snapshot(elapsed, actual_elapsed=time.perf_counter()-wall_started)
             state["baseline_valid"] = base.valid
             _emit_progress(r, "training", state, segment=index+1)
-            payload = {"segment": index+1, "feedback_mode": mode, "mode_label": LABELS[mode],
+            presentation = signal.presentation(step, mode, smooth, elapsed, baseline_valid=base.valid)
+            payload = {"segment": index+1, "feedback_mode": mode, "mode_label": LABELS[presentation["presentation_mode"]],
+                       **presentation,
                        "heatmap_cell": heatmap, "analysis_window": r.latest_analysis_window,
                        "affect_model": r.current_affect(),
                        "attention_model": step.attention_model, "grade": step.graded["grade"],
@@ -253,9 +262,12 @@ def training_round(r, trainer, base, index, run_id):
     finally:
         elapsed = (now()-begin)/r.scale
         settle(elapsed)
-        state = clock.snapshot(elapsed, reason)
+        state = clock.snapshot(elapsed, reason, actual_elapsed=time.perf_counter()-wall_started)
         state["baseline_valid"] = base.valid
         segment = trainer.close_segment(duration_sec=elapsed)
+        segment["local_eeg_feedback"] = signal.summary()
+        segment["measured_focus_updates"] = signal.measured_focus_updates
+        segment["measured_focus_only_updates"] = signal.measured_focus_only_updates
         # Independently reconcile the live clock with the existing engine's
         # persisted interval accounting; never hide a disagreement by replacing
         # the clock counter with a convenient final number.
@@ -267,6 +279,7 @@ def training_round(r, trainer, base, index, run_id):
         segment.update(effective_time=state,
                        support_gap_count=len(support_gaps), support_gap_interruptions=support_gaps,
                        mode_seconds={k: round(v, 4) for k,v in clock.mode_seconds.items()},
+                       mode_seconds_scope="strict_feedback_gate",
                        unobserved_seconds=round(max(0, elapsed-sum(clock.mode_seconds.values())), 4))
         intervals = [right-left for left, right in zip(feedback_times, feedback_times[1:])]
         segment["feedback_schedule"] = {
@@ -290,42 +303,44 @@ def training_round(r, trainer, base, index, run_id):
 
 def run(r, auto):
     r.engine.graded_enabled = True
-    started = time.monotonic()
+    started = r.protocol_now()
+    wall_started = time.monotonic()
     r.effective_time_result = {**EFFECTIVE_POLICY, "phase_results": {}, "timings": {}, "segments": [],
         "acquisition_complete": False, "collection_status": "in_progress", "time_scale": r.scale,
         "time_basis": "protocol_seconds", "elapsed_sec_basis": "actual_wall_seconds",
         "note": "有效时长不代表注意力或疗效；质量、基线及升级门控保持原规则。连接及报告不计阶段上限。"}
     try:
-        _run(r, auto, started)
+        _run(r, auto, started, wall_started)
     except SessionCancelled:
+        wall_elapsed = round(time.monotonic()-wall_started, 4)
         r.effective_time_result.update(collection_status="cancelled", acquisition_complete=False,
-                                       elapsed_sec=round(time.monotonic()-started, 4),
-                                       actual_elapsed_seconds=round(time.monotonic()-started, 4),
-                                       protocol_elapsed_seconds=round((time.monotonic()-started)/r.scale, 4))
+                                       elapsed_sec=wall_elapsed,
+                                       actual_elapsed_seconds=wall_elapsed,
+                                       protocol_elapsed_seconds=round((r.protocol_now()-started)/r.scale, 4))
         # Partial outcome is also retained when no final report can be generated.
         r.summary = {"protocol": "effective_time", "effective_time": r.effective_time_result}
         raise
 
 
-def _run(r, auto, started):
+def _run(r, auto, started, wall_started):
     result = r.effective_time_result
     r.skipped_phases = ["baseline_closed", "scales", "sart", "monitor", "model"]
     r.training_skipped, r.model_skipped = False, True
     with r._phase("qc") as ctx:
-        begin, steps = time.monotonic(), []
+        begin, steps = r.protocol_now(), []
         for tick in range(int(TEN_DURATIONS["qc"]/config.STEP_SEC)):
             r._check_cancel()
-            if time.monotonic() >= begin+30*r.scale:
+            if r.protocol_now() >= begin+30*r.scale:
                 break
             step = r.engine.step("rest")
             steps.append(step)
             r._publish_window(step, phase="qc", include_signal=tick % 5 == 0)
-            r._sleep_real(max(0, begin+(tick+1)*config.STEP_SEC*r.scale-time.monotonic()))
-        r._sleep_real(max(0, begin+30*r.scale-time.monotonic()))
+            r._sleep_real(max(0, begin+(tick+1)*config.STEP_SEC*r.scale-r.protocol_now()))
+        r._sleep_real(max(0, begin+30*r.scale-r.protocol_now()))
         usable = sum(s.usable for s in steps)
         qc = {"windows": len(steps), "usable": usable,
               "passed": bool(steps and usable/len(steps) >= config.QUALITY["valid_ratio_min"])}
-        result["timings"]["qc"] = (time.monotonic()-begin)/r.scale
+        result["timings"]["qc"] = (r.protocol_now()-begin)/r.scale
         r._merge_run_payload(ctx["run_id"], qc)
         r.bus.publish("quality", qc)
     with r._phase("baseline_open") as ctx:
@@ -335,28 +350,30 @@ def _run(r, auto, started):
                                   "effective_time": result["phase_results"]["baseline_open"]})
     for key, practice in (("practice", True), ("pvt", False)):
         with r._phase(key) as ctx:
-            begin = time.monotonic()
+            begin = r.protocol_now()
             task_result = r._run_pvt(auto, practice=practice)
-            r._sleep_real(max(0, begin+TEN_DURATIONS[key]*r.scale-time.monotonic()))
-            result["timings"][key] = (time.monotonic()-begin)/r.scale
+            r._sleep_real(max(0, begin+TEN_DURATIONS[key]*r.scale-r.protocol_now()))
+            result["timings"][key] = (r.protocol_now()-begin)/r.scale
             r._merge_run_payload(ctx["run_id"], {"practice": practice, **task_result})
             if not practice:
                 pvt = task_result
                 r.bus.publish("behavior", {"task": "pvt", "result": pvt})
     trainer = StudioTraining(r.subject["public_id"], "01", "001", base, mode="ten_min")
     with r._phase("training") as ctx:
-        training_run_id, begin = ctx["run_id"], time.perf_counter()
+        training_run_id, begin = ctx["run_id"], r.precise_now()
+        training_wall_started = time.perf_counter()
         r.bus.publish("training_start", {**trainer.describe(), "mode": "effective_time", "effective_time": dict(EFFECTIVE_POLICY)})
         for index in range(EFFECTIVE_POLICY["segments"]):
             segment = training_round(r, trainer, base, index, training_run_id)
             rest_payload = {"segment": index+1, "feedback_mode": "rest", "mode_label": LABELS["rest"],
-                            "score": None, "usable": False, "effective_time": {**segment["effective_time"], "quality_paused": False},
+                            "score": None, "usable": False, "local_eeg_feedback": None, "measured_focus_index": None,
+                            "effective_time": {**segment["effective_time"], "quality_paused": False},
                             "segment_stats": {**segment["stats"], "duration_sec": segment["duration_sec"]}}
             r.latest_feedback = rest_payload
             r.bus.publish("feedback", rest_payload)
             r._sleep(EFFECTIVE_POLICY["rest_seconds"])
             r._progress("training", (index+1)/EFFECTIVE_POLICY["segments"])
-        elapsed = (time.perf_counter()-begin)/r.scale
+        elapsed = (r.precise_now()-begin)/r.scale
         segments = result["segments"]
         completed = all(s["effective_time"]["completed"] for s in segments)
         completion_reason = ("timing_issue" if any(not s["effective_time"]["timing_consistent"] for s in segments) else
@@ -364,7 +381,7 @@ def _run(r, auto, started):
                              "baseline_invalid" if not base.valid else "max_duration")
         training_state = progress(target=200, valid=sum(s["stats"]["valid_seconds"] for s in segments),
                                   elapsed=elapsed, maximum=440,
-                                  reason=completion_reason, scale=r.scale)
+                                  reason=completion_reason, scale=r.scale, actual_elapsed=time.perf_counter()-training_wall_started)
         training_state["completed"] = completed
         training_state["baseline_valid"] = base.valid
         training_state["extension_seconds"] = round(max(0, elapsed-240), 4)
@@ -382,11 +399,12 @@ def _run(r, auto, started):
     r._merge_run_payload(training_run_id, {"training": training})
     before_ref, after_ref = robust_reference(s.graded for s in before), robust_reference(s.graded for s in after)
     complete = all(s["completed"] for s in result["phase_results"].values())
+    wall_elapsed = round(time.monotonic()-wall_started, 4)
     result.update(baseline_before=before_ref, baseline_after=after_ref,
                   changes={ch: after_ref[ch]["median"]-v["median"] for ch,v in before_ref.items() if ch in after_ref},
-                  elapsed_sec=round(time.monotonic()-started, 4), acquisition_complete=complete,
-                  actual_elapsed_seconds=round(time.monotonic()-started, 4),
-                  protocol_elapsed_seconds=round((time.monotonic()-started)/r.scale, 4),
+                  elapsed_sec=wall_elapsed, acquisition_complete=complete,
+                  actual_elapsed_seconds=wall_elapsed,
+                  protocol_elapsed_seconds=round((r.protocol_now()-started)/r.scale, 4),
                   collection_status="complete" if complete else "insufficient",
                   comparison_note="同设备、同通道描述性log(β/θ)变化；质量组成可不同，不证明疗效或注意力变化")
     monitor = {"steps": [], "quality": r.engine.summarize([]), "summary": {}}

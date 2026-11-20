@@ -290,6 +290,7 @@ table.data td.num, table.data th.num { text-align: right; font-family: var(--mon
    折叠只改显示（display:none），节点仍留在 DOM 里——中途刷新恢复、
    SSE 增量更新与验收脚本对 .scale-item / 阶段留白的断言都不受影响。 */
 .flow-taskbar { display: none; }
+.flow-demo-controls:not([hidden]) { display:flex; align-items:center; gap:8px; margin-left:auto; }
 
 .flow-taskbar--on,
 /* 被测者视图下**必须始终可见**：这时顶栏与导航都被隐藏了，
@@ -1003,7 +1004,19 @@ button.wizard__step--done:hover { border-color:var(--text-2); }
 .training-stats .training-hold { grid-column:1/-1; }
 .training-hold progress { display:block; width:100%; height:9px; margin-top:10px; accent-color:var(--text-2); }
 .training-page .card__sub { max-width:65ch; line-height:1.7; }
-.report-summary h2 { font-size:24px; line-height:1.5; margin:10px 0 14px; }
+.report-summary__hero {
+  padding:clamp(20px,3vw,36px); color:#f6fbfb; border-radius:14px;
+  background:linear-gradient(110deg,#173b46 0%,#245760 72%,#316b70 100%);
+}
+.report-summary__hero h2 { font-size:clamp(24px,3vw,36px); line-height:1.35; margin:6px 0 14px; color:inherit; }
+.report-summary__hero p { margin:4px 0; }
+.report-summary__meta { color:#d0e5e5; font-size:13px; }
+.report-metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(205px,100%),1fr)); gap:12px; margin:14px 0; }
+.report-metric { min-width:0; border:1px solid var(--line); border-radius:12px; padding:16px; background:var(--surface); }
+.report-metric h3 { margin:0 0 5px; font-size:14px; color:#375866; }
+.report-metric strong { display:block; color:#153b45; font-size:clamp(22px,2.5vw,32px); font-variant-numeric:tabular-nums; }
+.report-metric p { margin:6px 0; font-size:13px; color:var(--text-2); }
+.report-metric progress { width:100%; height:6px; accent-color:#287573; }
 .report-summary__evidence { display:grid; grid-template-columns:minmax(0,1.4fr) repeat(2,minmax(0,1fr)); gap:12px; margin:16px 0; }
 .report-summary__evidence > section { min-width:0; padding:10px 12px; border:1px solid var(--line); border-radius:8px; }
 .report-summary__evidence h3 { font-size:16px; margin:0 0 8px; }

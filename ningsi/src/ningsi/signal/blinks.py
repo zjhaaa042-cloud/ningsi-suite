@@ -170,6 +170,91 @@ def _fault(values, rate):
     return None
 
 
+def _marked_shape(data, peak, rate):
+    half = round(_HALF_SEC * rate)
+    segment = np.stack([_detrend(row[peak-half:peak+half+1], rate) for row in data])
+    segment = np.stack([_smooth(row, round(.04 * rate)) for row in segment])
+    amplitude = np.max(np.abs(segment), axis=1)
+    widths = np.sum(np.abs(segment) > amplitude[:, None] * .5, axis=1) / rate
+    if np.any(amplitude < 40.) or np.any(amplitude > 800.) or np.any(widths < .08) or np.any(widths > .40):
+        return None
+    taper = np.ones(2 * half + 1)
+    edge = max(2, round(.08 * rate))
+    taper[:edge] = np.sin(np.linspace(0, np.pi / 2, edge)) ** 2
+    taper[-edge:] = taper[:edge][::-1]
+    return segment / amplitude[:, None] * taper, amplitude
+
+
+def _profile_from_shapes(shapes, noise, rate, labels, montage_id):
+    accepted = [(segment, amplitude) for segment, amplitude in shapes if np.all(amplitude >= 6 * noise)]
+    if len(accepted) < MIN_EVENTS:
+        raise ValueError(f"双通道眨眼相对背景不够清楚，可信事件 {len(accepted)} 次，至少需要 {MIN_EVENTS} 次。")
+    segments, amps = map(np.stack, zip(*accepted))
+    template = np.median(segments, axis=0)
+    if np.any(np.max(np.abs(template), axis=1) < 1e-12):
+        raise ValueError("标记波形的方向或形状不一致，请继续采集自然短眨眼。")
+    template /= np.max(np.abs(template), axis=1)[:, None]
+    similarity = np.sum(segments * template, axis=2) / np.sqrt(
+        np.maximum(np.sum(segments ** 2, axis=2) * np.sum(template ** 2, axis=1), 1e-12))
+    log_ratio = np.log(amps[:, 0] / amps[:, 1])
+    keep = np.all(similarity > .9, axis=1) & (np.abs(log_ratio - np.median(log_ratio)) <= max(.20, 3 * _scale(log_ratio)))
+    if np.sum(keep) < MIN_EVENTS:
+        raise ValueError(f"双通道眨眼形状或幅度关系不稳定，一致事件 {int(np.sum(keep))} 次，至少需要 {MIN_EVENTS} 次。")
+    template = np.median(segments[keep], axis=0)
+    template /= np.max(np.abs(template), axis=1)[:, None]
+    template = _smooth_template(template, rate)
+    center = float(np.median(log_ratio[keep]))
+    spread = max(.25, 4 * _scale(log_ratio[keep]))
+    return BlinkCalibration(rate, labels, montage_id, tuple(map(tuple, template)), tuple(noise),
+                            tuple(np.median(amps[keep], axis=0)),
+                            (math.exp(center-spread), math.exp(center+spread)), int(np.sum(keep)))
+
+
+def screen_blink_observation(values_uv, rate, mark):
+    """Screen one marked, contiguous acquisition independently of other observations."""
+    rate = _rate(rate)
+    data = np.asarray(values_uv, dtype=float)
+    if data.ndim != 2 or data.shape[0] != 2 or not np.isfinite(data).all():
+        raise ValueError("本次记录含无效波形，请等信号稳定后重新眨眼。")
+    margin, pad = round(_HALF_SEC * rate) + round(.1 * rate), round(.1 * rate)
+    if mark < margin or mark + margin >= data.shape[1]:
+        raise ValueError("本次眨眼两侧的数据不完整，稍等片刻再记录。")
+    slow = np.stack([_smooth(row, round(.08 * rate)) for row in data])
+    left, right = mark-pad, mark+pad+1
+    centered = slow[:, left:right] - np.median(slow, axis=1)[:, None]
+    locations = np.argmax(np.abs(centered), axis=1) + left
+    if abs(locations[0] - locations[1]) > round(.08 * rate):
+        raise ValueError("两路波形的候选峰不同步，请自然短眨一次再记录。")
+    peak = round(float(np.mean(locations)))
+    if peak < margin or peak + margin >= data.shape[1]:
+        raise ValueError("本次眨眼两侧的数据不完整，稍等片刻再记录。")
+    fault = _fault(data[:, peak-margin:peak+margin+1], rate)
+    if fault:
+        detail = {"blink_signal_fault": "相对幅值异常", "electrode_step": "波形出现突变",
+                  "contact_dropout": "波形连续同值", "non_finite_signal": "波形含无效采样"}[fault]
+        raise ValueError(f"本次眨眼附近{detail}，请待电极接触稳定后重新眨眼。")
+    shape = _marked_shape(data, peak, rate)
+    if shape is None:
+        raise ValueError("本次波形的幅度或宽度不符合双通道短眨眼，请自然短眨一次。")
+    backgrounds = []
+    for region in (data[:, :peak-margin], data[:, peak+margin+1:]):
+        if region.shape[1] < round(.5 * rate) or _fault(region, rate):
+            continue
+        smooth = np.stack([_smooth(row, round(.08 * rate)) for row in region])
+        backgrounds.append(smooth - np.median(smooth, axis=1, keepdims=True))
+    return peak, shape, tuple(backgrounds)
+
+
+def calibrate_screened_blinks(observations, rate, *, channel_labels, montage_id):
+    """Build the same personal template from accepted, nonoverlapping mark observations."""
+    rate, labels = _rate(rate), _labels(channel_labels)
+    backgrounds = [region for _, _, regions in observations for region in regions]
+    if sum(region.shape[1] for region in backgrounds) < round(4 * rate):
+        raise ValueError("可信背景脑电不足四秒。请保持接触稳定，再补几次自然短眨眼。")
+    noise = np.array([max(1., _scale(row)) for row in np.concatenate(backgrounds, axis=1)])
+    return _profile_from_shapes([shape for _, shape, _ in observations], noise, rate, labels, montage_id)
+
+
 def calibrate_blinks(values_uv, rate, peak_indices, *, channel_labels=("Fp1", "Fp2"), montage_id=""):
     """Fit separate templates from >=8 explicitly marked, well-separated blinks.
 
@@ -198,7 +283,7 @@ def calibrate_blinks(values_uv, rate, peak_indices, *, channel_labels=("Fp1", "F
     if np.sum(background) < round(4 * rate):
         raise ValueError("需至少四秒无眨眼背景数据")
     noise = np.array([max(1., _scale(row[background])) for row in slow])
-    segments, amps = [], []
+    shapes = []
     for mark in peaks:
         # Find each channel's peak in a bounded neighborhood of the actual marker.
         left, right = mark-pad, mark+pad+1
@@ -207,41 +292,10 @@ def calibrate_blinks(values_uv, rate, peak_indices, *, channel_labels=("Fp1", "F
         if abs(locations[0] - locations[1]) > round(.08 * rate):
             continue
         peak = round(float(np.mean(locations)))
-        segment = np.stack([_detrend(row[peak-half:peak+half+1], rate) for row in data])
-        segment = np.stack([_smooth(row, round(.04 * rate)) for row in segment])
-        amplitude = np.max(np.abs(segment), axis=1)
-        if np.any(amplitude < np.maximum(40., 6 * noise)) or np.any(amplitude > 800):
-            continue
-        # Peaks must be short transients, not sustained eye closure/contact drift.
-        widths = np.sum(np.abs(segment) > amplitude[:, None] * .5, axis=1) / rate
-        if np.any(widths < .08) or np.any(widths > .40):
-            continue
-        taper = np.ones(2 * half + 1)
-        edge = max(2, round(.08 * rate))
-        taper[:edge] = np.sin(np.linspace(0, np.pi / 2, edge)) ** 2
-        taper[-edge:] = taper[:edge][::-1]
-        segments.append(segment / amplitude[:, None] * taper)
-        amps.append(amplitude)
-    if len(segments) < MIN_EVENTS:
-        raise ValueError("可信双通道短眨眼不足八次，请重新校准")
-    segments, amps = np.stack(segments), np.stack(amps)
-    template = np.median(segments, axis=0)
-    template /= np.max(np.abs(template), axis=1)[:, None]
-    similarity = np.sum(segments * template, axis=2) / np.sqrt(
-        np.maximum(np.sum(segments ** 2, axis=2) * np.sum(template ** 2, axis=1), 1e-12))
-    ratios = amps[:, 0] / amps[:, 1]
-    log_ratio = np.log(ratios)
-    keep = np.all(similarity > .9, axis=1) & (np.abs(log_ratio - np.median(log_ratio)) <= max(.20, 3 * _scale(log_ratio)))
-    if np.sum(keep) < MIN_EVENTS:
-        raise ValueError("双通道眨眼形状或幅度关系不稳定，可信事件不足八次")
-    template = np.median(segments[keep], axis=0)
-    template /= np.max(np.abs(template), axis=1)[:, None]
-    template = _smooth_template(template, rate)
-    center = float(np.median(log_ratio[keep]))
-    spread = max(.25, 4 * _scale(log_ratio[keep]))
-    return BlinkCalibration(rate, labels, montage_id, tuple(map(tuple, template)), tuple(noise),
-                            tuple(np.median(amps[keep], axis=0)),
-                            (math.exp(center-spread), math.exp(center+spread)), int(np.sum(keep)))
+        shape = _marked_shape(data, peak, rate)
+        if shape is not None:
+            shapes.append(shape)
+    return _profile_from_shapes(shapes, noise, rate, labels, montage_id)
 
 
 def _candidates(data, rate, calibration):

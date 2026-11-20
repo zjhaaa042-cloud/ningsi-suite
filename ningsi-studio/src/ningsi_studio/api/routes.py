@@ -19,7 +19,7 @@ from ningsi.behavior import pvt as pvt_module
 from ningsi.behavior import sart as sart_module
 
 from ningsi_studio import bootstrap
-from ningsi_studio.api import schemas
+from ningsi_studio.api import history_archive, schemas
 from ningsi_studio.core import live_source, paired_ledger, phases as phase_module
 from ningsi_studio.core import signal_feed
 # 注意：**不要**写 `from ningsi_studio.core import runtime`——`core/__init__.py` 用
@@ -58,6 +58,12 @@ def _session_row(conn, uuid: str):
     if row is None:
         raise NotFound(f"会话不存在：{uuid}")
     return row
+
+
+def _demo_pause_state(runtime):
+    clock = getattr(runtime, "demo_clock", None)
+    return clock.state() if clock is not None else {"available": False, "paused": False,
+                                                   "paused_seconds": 0.0, "revision": 0}
 
 
 def _subject_row(conn, public_id: str):
@@ -157,6 +163,7 @@ def session_public(row, *, extra: dict | None = None) -> dict:
         available = {kind for kind, path in paths.items() if path and Path(path).is_file()}
         payload["has_artifacts"] = bool(available)
         payload["has_report"] = "report_json" in available
+        payload["presentation_url"] = f"/api/sessions/{row['uuid']}/presentation" if payload["has_report"] else None
         payload["has_training"] = bool(row["has_saved_training"]) or (
             payload["status"] in ("running", "queued")
             and phase_module.phase_index("training", payload["protocol"]) >= 0)
@@ -221,6 +228,7 @@ def build_router(settings: Settings) -> Router:
     manager = StudioSessionManager(settings)
     human_models = HumanModelService(settings.data_dir)
     db_path = Path(settings.db_path)
+    history_archive.register(router, settings, session_public)
 
     def sweep_signal_feeds() -> int:
         """回收已结束会话遗留的实时信号 feed（幂等，可在任意读接口触发）。
@@ -443,7 +451,7 @@ def build_router(settings: Settings) -> Router:
     # ------------------------------------------------- 无会话的设备实时预览
     @router.post(r"/api/devices/blink-calibration")
     def blink_calibration_action(request: Request) -> Response:
-        from ningsi_studio.core.blink_control import SERVICE
+        from ningsi_studio.core.blink_control import BlinkCalibrationRetry, SERVICE
         payload = schemas.typed(request.json())
         participant = payload.get("participant")
         with store.read_only(db_path) as conn:
@@ -451,6 +459,8 @@ def build_router(settings: Settings) -> Router:
                 raise ValidationError("请先创建或选择本次参与者")
         try:
             result = SERVICE.action(payload, live_source.preview_stream())
+        except BlinkCalibrationRetry as exc:
+            raise ValidationError(str(exc), detail=exc.detail) from exc
         except (ValueError, RuntimeError) as exc:
             raise ValidationError(str(exc)) from exc
         return Response.json(result)
@@ -773,7 +783,8 @@ def build_router(settings: Settings) -> Router:
             "protocol": protocol,
             "protocol_label": phase_module.PROFILES[protocol]["label"],
             "protocol_note": phase_module.PROFILES[protocol]["caveat"],
-            "runtime": {"alive": runtime.alive, "source": runtime.source.key if runtime.source else None},
+            "runtime": {"alive": runtime.alive, "source": runtime.source.key if runtime.source else None,
+                        "demo_pause": _demo_pause_state(runtime)},
         }, status=201)
 
     @router.get(r"/api/sessions")
@@ -828,6 +839,7 @@ def build_router(settings: Settings) -> Router:
             # 保证同一响应里 source 与 runtime.source_kind 同源（不会一个 lsl 一个 sim）。
             payload["source"] = actual_source
         payload["runtime"] = {
+            "demo_pause": _demo_pause_state(runtime),
             "latest_feedback": getattr(runtime, "latest_feedback", None),
             "effective_time": getattr(runtime, "effective_time", None),
             "alive": bool(runtime and runtime.alive),
@@ -840,6 +852,22 @@ def build_router(settings: Settings) -> Router:
                             else _source_kind_from_key(payload.get("source"))),
         }
         return Response.json(payload)
+
+    @router.post(r"/api/sessions/{uuid}/demo-pause")
+    def demo_pause(request: Request) -> Response:
+        uuid = schemas.ensure_uuid(request.params["uuid"])
+        paused = schemas.typed(request.json()).get("paused")
+        if not isinstance(paused, bool):
+            raise ValidationError("paused 需要传入布尔值")
+        with store.read_only(db_path) as conn:
+            _session_row(conn, uuid)
+        runtime = manager.get(uuid)
+        if runtime is None or not runtime.alive or runtime.demo_clock is None:
+            raise Conflict("仅运行中的模拟演示支持暂停或继续")
+        state = runtime.demo_clock.set_paused(paused)
+        if not state["available"]:
+            raise Conflict("模拟演示已结束")
+        return Response.json(state)
 
     @router.delete(r"/api/sessions/{uuid}")
     def cancel_session(request: Request) -> Response:
@@ -955,10 +983,12 @@ def build_router(settings: Settings) -> Router:
             }
 
         def factory() -> signal_feed.SignalFeed:
+            clock = getattr(runtime, "demo_clock", None)
             return signal_feed.SignalFeed(
                 uuid, samples_provider,
                 srate=srate, channels=channels, channel_labels=labels,
                 window_provider=window_provider, device=device, source_kind=kind,
+                paused=(lambda: clock.state()["paused"]) if clock is not None else None,
                 config=signal_feed.SignalConfig(window_sec=window_sec, refresh_hz=hz,
                                                 max_points_per_channel=max_points),
             )
@@ -1003,6 +1033,7 @@ def build_router(settings: Settings) -> Router:
             }
         payload["awaiting_input"] = runtime.awaiting() if runtime else []
         payload["runtime_alive"] = bool(runtime and runtime.alive)
+        payload["demo_pause"] = _demo_pause_state(runtime)
         payload["analysis_window"] = runtime.latest_analysis_window if runtime else None
         payload["attention_model"] = runtime.latest_model_prediction if runtime else None
         payload["affect_model"] = runtime.current_affect() if runtime else None
@@ -1272,7 +1303,8 @@ def build_router(settings: Settings) -> Router:
             markdown_artifact = repo.artifact_for(conn, row["id"], "report_md")
             runs = repo.list_runs(conn, row["id"])
         if artifact is not None and Path(artifact["path"]).exists():
-            payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+            payload = history_archive.contextual_report(json.loads(Path(artifact["path"]).read_text(encoding="utf-8")),
+                                                        dict(row))
             # 同时带上报告原文（Markdown），保证"报告内容"可复算、可直接引用
             if markdown_artifact is not None and Path(markdown_artifact["path"]).exists():
                 payload["report_markdown"] = Path(markdown_artifact["path"]).read_text(
@@ -1289,6 +1321,20 @@ def build_router(settings: Settings) -> Router:
             partial["alerts"] = jsonable(schemas.rows_to_dicts(repo.list_alerts(conn, row["id"])))
             partial["state_observations"] = state_checkins.summary(conn, row["id"])
         return Response.json(partial, status=202 if row["status"] in ("running", "queued") else 200)
+
+    @router.get(r"/api/sessions/{uuid}/presentation")
+    def session_presentation(request: Request) -> Response:
+        uuid = schemas.ensure_uuid(request.params["uuid"])
+        with store.read_only(db_path) as conn:
+            row = _session_row(conn, uuid)
+            artifact = repo.artifact_for(conn, row["id"], "report_json")
+        response = _saved_presentation(row, artifact["path"] if artifact is not None else None)
+        if response is None:
+            raise NotFound("这次会话未保存结构化报告")
+        if request.query.get("download") == "1":
+            response.headers = {**response.headers,
+                "Content-Disposition": f'attachment; filename="ningsi-{uuid[:8]}-presentation.html"'}
+        return response
 
     @router.get(r"/api/sessions/{uuid}/artifacts")
     def session_artifacts(request: Request) -> Response:
@@ -1633,6 +1679,13 @@ def _rebuild_sart(row):
     return SartTask(public_id, "01", "001")
 
 
+def _saved_presentation(row, path):
+    if not path or not Path(path).is_file():
+        return None
+    report = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    return history_archive.presentation_response(history_archive.contextual_report(report, dict(row)))
+
+
 def _build_zip_response(uuid: str, db_path: Path, settings: Settings, manager) -> Response:
     with store.read_only(db_path) as conn:
         row = _session_row(conn, uuid)
@@ -1651,7 +1704,13 @@ def _build_zip_response(uuid: str, db_path: Path, settings: Settings, manager) -
             "engine_versions": json.loads(row["engine_versions"] or "{}")}
     with TemporaryDirectory(prefix="export-", dir=session_dir) as tmp:
         target = Path(tmp) / "export.zip"
-        export_domain.build_zip(target, {kind: Path(path) for kind, path in artifacts.items()}, meta)
+        try:
+            display = _saved_presentation(row, artifacts.get("report_json"))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            # Older/incomplete JSON must not prevent exporting the available original files.
+            LOGGER.warning("会话 %s 的结构化报告无法生成展示版：%s", uuid, exc)
+            display = None
+        export_domain.build_zip(target, artifacts, meta, presentation=display.body if display is not None else None)
         body = target.read_bytes()
     return Response(status=200, body=body, content_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="ningsi-{uuid[:8]}.zip"'})
@@ -1682,7 +1741,13 @@ _PATH_SPECS = [
     ("get", "/api/subjects/{public_id}/sessions", "某被试的会话列表", "page,limit"),
     ("post", "/api/sessions", "创建并启动一次会话", None),
     ("get", "/api/sessions", "会话列表（被试 / 状态过滤）", "participant,status,page,limit"),
+    ("get", "/api/test-history", "按实际日期合并当前会话与本机归档测试", "participant,status,page,limit"),
+    ("get", "/api/test-history/{uuid}/evidence", "归档测试的来源和结果摘要", None),
+    ("get", "/api/test-history/{uuid}/report", "归档测试保存的报告", None),
+    ("get", "/api/test-history/{uuid}/presentation", "展示归档测试结果", None),
+    ("get", "/api/sessions/{uuid}/presentation", "展示或下载本地会话报告", "download"),
     ("get", "/api/sessions/{uuid}", "会话详情（含阶段、预警、产物）", None),
+    ("post", "/api/sessions/{uuid}/demo-pause", "暂停或继续当前模拟演示", None),
     ("delete", "/api/sessions/{uuid}", "取消运行中的会话", None),
     ("get", "/api/sessions/{uuid}/events", "SSE 实时事件流", "last_event_id"),
     ("get", "/api/sessions/{uuid}/live", "轮询式实时快照（SSE 兜底）", None),

@@ -38,6 +38,7 @@ const REASON_LABELS = {
   baseline_pending: '正在采集个体基线，暂不显示评分。',
   no_data: '未收到新鲜脑电数据，请检查设备连接和采集程序。',
   signal_too_short: '脑电样本不足，正在等待缓冲。',
+  assessment_window_not_eligible: '评估阶段正在等待稳定信号或新样本。',
   non_finite_signal: '脑电包含无效数值，请检查采集端。',
   amplitude: '波幅过大，请保持静止并检查电极接触。',
   flat_channel: '通道接近平直，请检查电极接触。',

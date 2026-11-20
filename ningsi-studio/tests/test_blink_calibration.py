@@ -12,10 +12,11 @@ from unittest.mock import patch
 import numpy as np
 
 from ningsi_studio.acquisition.lsl import StreamBuffer, StreamDescriptor
-from ningsi_studio.core.blink_control import BlinkCalibrationService, verify_binding
+from ningsi_studio.core.blink_control import BlinkCalibrationRetry, BlinkCalibrationService, verify_binding
 from ningsi_studio.core.live_source import ManagedLslSource
 from ningsi_studio.db import repository, sqlite_store
 from ningsi.signal.artifacts import check_channels
+from ningsi.signal.blinks import calibrate_blinks
 from ningsi.signal.live_artifacts import with_artifact_evidence
 
 
@@ -86,6 +87,41 @@ class BlinkCalibrationTests(unittest.TestCase):
         self.source._manager._buffers["eeg"] = StreamBuffer(self.buffer.descriptor)
         with self.assertRaises(ValueError):
             self.act("status", token)
+
+    def test_corrupt_mark_is_retryable_and_does_not_poison_other_marks(self):
+        self.raw[:, round(10 * self.rate):round(10.1 * self.rate)] += 2200
+        self.append_to(3)
+        token = self.act("start")["token"]
+        for peak in self.peaks[:9]:
+            self.append_to(peak + .75)
+            if peak == 10:
+                with self.assertRaises(BlinkCalibrationRetry) as rejected:
+                    self.act("mark", token)
+                self.assertIn("相对幅值异常", str(rejected.exception))
+                self.assertEqual(rejected.exception.detail, {"retryable": True, "accepted_count": 2})
+                self.assertEqual(self.act("status", token)["count"], 2)
+            else:
+                self.act("mark", token)
+
+        with self.assertRaisesRegex(ValueError, "校准信号存在"):
+            calibrate_blinks(self.raw[:, :self.end], self.rate, self.peaks[:9],
+                             channel_labels=("Fp1", "Fp2"), montage_id="fixture")
+        result = self.act("finish", token)
+        self.assertEqual((result["state"], result["count"], result["template_events"]), ("ready", 8, 8))
+        np.testing.assert_array_equal(self.buffer.samples_count(self.end), self.raw[:, :self.end])
+
+    def test_mark_with_timestamp_gap_preserves_accepted_observation(self):
+        self.append_to(3)
+        token = self.act("start")["token"]
+        self.append_to(4.75)
+        self.act("mark", token)
+        self.t[round(6.8 * self.rate):] += .1
+        self.append_to(7.75)
+        with self.assertRaisesRegex(BlinkCalibrationRetry, "时间戳间断或不稳定") as rejected:
+            self.act("mark", token)
+        self.assertEqual(rejected.exception.detail["accepted_count"], 1)
+        self.append_to(10.75)
+        self.assertEqual(self.act("mark", token)["count"], 2)
 
     def test_calibrated_correction_precedes_filter_and_unknown_blink_is_vetoed(self):
         _, binding = self.calibrate()
@@ -188,7 +224,12 @@ class BlinkCalibrationApiTests(StudioTestCase):
             for token_value in ([], {}, None, 12, "unknown"):
                 response = self.post("/api/devices/blink-calibration", {**base, "action": "mark", "token": token_value})
                 self.assertEqual(response.status, 422)
-            self.assertEqual(self.post("/api/devices/blink-calibration", {**base, "action": "finish", "token": token}).status, 422)
+                self.assertIsNone(response.json()["error"].get("detail"))
+            finish = self.post("/api/devices/blink-calibration", {**base, "action": "finish", "token": token})
+            self.assertEqual(finish.status, 422)
+            self.assertEqual(finish.json()["error"]["detail"], {"retryable": True, "accepted_count": 0})
+            status = self.post("/api/devices/blink-calibration", {**base, "action": "status", "token": token})
+            self.assertEqual(self.json_body(status, 200, "草稿仍可使用")["token"], token)
             self.assertEqual(self.post("/api/devices/blink-calibration", {**base, "action": "clear", "token": token}).status, 200)
 
 

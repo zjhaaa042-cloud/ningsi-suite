@@ -10,7 +10,7 @@
 
 /** docs/API.md 事件表 + 服务端实际会发的补充事件（started/scales/closed）。 */
 export const EVENT_TYPES = [
-  'started', 'notice', 'phase', 'progress', 'quality', 'baseline', 'window',
+  'started', 'demo_pause', 'notice', 'phase', 'progress', 'quality', 'baseline', 'window',
   'scale_request', 'scale_scored', 'behavior_request', 'trial', 'behavior',
   'monitor', 'training_start', 'feedback', 'effective_progress', 'segment', 'assessment', 'model',
   'model_prediction',

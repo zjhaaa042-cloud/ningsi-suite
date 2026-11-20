@@ -7,7 +7,8 @@
  * - GET /api/reports/trend?participant=&field=&period=
  */
 
-import { api } from '../api.js';
+import { api, historyArtifactUrl } from '../api.js';
+import { sessionPresentationUrl, sessionSourceLabel } from '../session-history.js';
 import { describeError, toast } from '../store.js';
 import {
   DASH, button, card, el, empty, fmtInt, fmtNum, fmtPercent, fmtTime,
@@ -65,18 +66,6 @@ function disclosure(label, children, className = '') {
   ]);
 }
 
-function sourceLabel(session) {
-  const key = String(session?.device || '').toLowerCase();
-  const kind = session?.source_kind || session?.runtime?.source_kind;
-  const note = session?.source_note || session?.runtime?.source_note || '';
-  if (session?.simulated === true || kind === 'sim' || kind === 'simulation'
-      || key === 'sim' || key.startsWith('sim-')
-      || /(^|[^a-z])(sim|simulation|synthetic|demo)([^a-z]|$)/i.test(key)
-      || /模拟|仿真/i.test(note)) return '模拟数据';
-  if (key.startsWith('lsl:')) return 'LSL 数据';
-  return '来源未记录';
-}
-
 export async function render(container, ctx) {
   container.textContent = '';
   container.append(el('p', { class: 'muted', text: '正在加载仪表盘…' }));
@@ -84,6 +73,8 @@ export async function render(container, ctx) {
   let overview;
   let configResponse = null;
   let recent = [];
+  let historyTotal = null;
+  let historyError = null;
   try {
     // config 与仪表盘同时取：质检门槛（config.quality.valid_ratio_min）必须来自接口，
     // 不能写死；config 失败不拖垮整个仪表盘
@@ -99,19 +90,18 @@ export async function render(container, ctx) {
   if (ctx.signal.aborted) return;
   if (configResponse) ctx.store.setState({ config: configResponse.data });
 
-  // 最近会话表格改用 GET /api/sessions：只有这个列表口径带 alert_count，
-  // 用 /api/overview 的 latest_detail 会让"预警"整列都显示 —（实测）
   try {
-    const response = await api.listSessions({ limit: 6, page: 1 });
+    const response = await api.listTestHistory({ limit: 6, page: 1 });
     recent = list(pick(response.data, 'items', []));
+    historyTotal = response.data.total;
   } catch (error) {
-    console.warn('[dashboard] 会话列表加载失败，回退到 /api/overview 的 latest_detail', error);
+    historyError = describeError(error);
   }
   if (ctx.signal.aborted) return;
 
   ctx.store.setState({ health: health.data, overview: overview.data });
   const stats = overview.data || {};
-  const latest = (recent.length ? recent : list(pick(stats, 'latest_detail', []))).slice(0, 6);
+  const latest = list(stats.latest_detail);
   const newest = latest[0] || null;
   // KPI / 质检 / 预警的口径必须取"最近一条【已完成】会话"：latest[0] 可能正在运行，
   // 运行中的会话还没有 indicator_summary、qc 也未必落库，整排 KPI 会一起变成 —
@@ -166,26 +156,27 @@ export async function render(container, ctx) {
   ]));
 
   /* ------------------------------------------------------ 最近会话表格 */
-  const TERMINAL = new Set(['done', 'failed', 'cancelled', 'canceled', 'error']);
+  const TERMINAL = new Set(['done', 'failed', 'cancelled', 'canceled', 'error', 'unfinished']);
   const isTerminal = (row) => TERMINAL.has(String(row.status || '').toLowerCase());
-  const sessionRows = latest.map((row) => ({
-    ...row,
-    onOpen: () => ctx.navigate(row.status === 'done'
-      ? `#/report?session=${row.uuid}` : `#/flow?session=${row.uuid}`),
-  }));
+  const sessionRows = historyError ? latest.slice(0, 6) : recent;
   const sessionsCard = card('最近会话', [
+    historyError ? el('p', { class: 'muted', text: `历史测试加载失败：${historyError}` }) : null,
     sessionRows.length ? table([
       {
-        title: '参与者 / 会话',
-        render: (row) => el('button', {
-          class: 'overview-session-link', type: 'button',
-          title: row.status === 'done' ? '查看本次评估报告' : '查看会话流程与状态',
-          attrs: { 'aria-label': `打开会话 ${row.uuid}${row.status === 'done' ? ' 的报告' : ' 的流程'}` },
-          onClick: row.onOpen,
-        }, [
-          el('strong', { text: row.participant || DASH }),
-          el('small', { text: `${shortUuid(row)} · ${sourceLabel(row)}` }),
-        ]),
+        title: '会话 / 来源',
+        render: (row) => {
+          const documentUrl = sessionPresentationUrl(row) || (row.archived && historyArtifactUrl(row.report_url || row.evidence_url));
+          const href = documentUrl || `#/${row.status === 'done' ? 'report' : 'flow'}?session=${row.uuid}`;
+          return el('a', {
+            class: 'overview-session-link', href,
+            target: documentUrl ? '_blank' : null, rel: documentUrl ? 'noopener noreferrer' : null,
+            title: row.hide_participant ? row.label : row.uuid,
+          }, [
+            el('strong', { text: row.label || row.participant || shortUuid(row) }),
+            el('small', { text: row.hide_participant ? sessionSourceLabel(row)
+              : [row.label && row.participant, shortUuid(row), sessionSourceLabel(row)].filter(Boolean).join(' · ') }),
+          ]);
+        },
       },
       {
         title: '状态',
@@ -197,11 +188,16 @@ export async function render(container, ctx) {
       {
         title: '进度 / 结束原因',
         render: (row) => {
+          const presentation = sessionPresentationUrl(row);
+          if (presentation && row.status === 'done') return el('a', {
+            href: presentation, text: '展示报告', target: '_blank', rel: 'noopener noreferrer',
+          });
+          if (row.archived) return row.error || phaseText(row.phase, row.phase_label) || DASH;
           const duplicated = String(row.phase || '') === String(row.status || '');
           if (isTerminal(row) && duplicated) {
             return row.error
               ? el('span', { class: 'cell-reason', text: String(row.error), title: String(row.error) })
-              : el('span', { class: 'muted', text: row.status === 'done' ? '报告已生成' : DASH });
+              : el('span', { class: 'muted', text: DASH });
           }
           return el('span', {}, [
             el('span', { text: phaseText(row.phase, row.phase_label) }),
@@ -209,19 +205,19 @@ export async function render(container, ctx) {
           ]);
         },
       },
-      { title: '开始时间', render: (row) => fmtTime(row.started_at, false) },
+      { title: '记录时间', render: (row) => fmtTime(row.created_at || row.started_at, false) },
     ], sessionRows) : el('div', { class: 'overview-empty' }, [
       el('span', { class: 'overview-empty__symbol', 'aria-hidden': 'true', text: '◎' }),
       el('strong', { text: '从第一次评估开始' }),
       el('p', { text: '连接设备并完成一次评估，结果会自动保存在这里。' }),
       button('进入评估', () => ctx.navigate('#/start')),
     ]),
-  ], { class: 'overview-sessions', sub: '已完成会话可直接打开报告',
+  ], { class: 'overview-sessions', sub: historyTotal == null ? '' : `共 ${fmtInt(historyTotal)} 条记录，按记录时间排列`,
     actions: button('全部记录 →', () => ctx.navigate('#/history'), { small: true }) });
 
   /* ---------------------------------------------------------- 最近结果 */
   const snapshotBody = el('div', { class: 'overview-snapshot' });
-  const metricSource = sourceLabel({ ...metricRow, runtime: detail?.runtime });
+  const metricSource = sessionSourceLabel({ ...metricRow, runtime: detail?.runtime });
   if (metricRow) {
     snapshotBody.append(el('div', { class: 'overview-snapshot__meta' }, [
       el('strong', { text: metricRow.participant || DASH }),
@@ -266,8 +262,12 @@ export async function render(container, ctx) {
     snapshotBody.append(qualityDetails);
   }
   snapshotBody.append(el('p', { class: 'overview-note', text: '指数描述相对基线的变化，不能解释为专注概率。缺失值不表示低专注。' }));
-  if (metricRow?.status === 'done') snapshotBody.append(button('查看完整报告 →',
-    () => ctx.navigate(`#/report?session=${metricRow.uuid}`)));
+  if (metricRow?.status === 'done') {
+    const presentation = sessionPresentationUrl(metricRow);
+    snapshotBody.append(presentation ? el('a', {
+      href: presentation, text: '展示报告', target: '_blank', rel: 'noopener noreferrer',
+    }) : button('查看阶段记录', () => ctx.navigate(`#/report?session=${metricRow.uuid}`)));
+  }
   const snapshotCard = card('最近一次结果', snapshotBody, { class: 'overview-result', sub: metricNote });
   page.append(el('div', { class: 'overview-main' }, [sessionsCard, snapshotCard]));
 

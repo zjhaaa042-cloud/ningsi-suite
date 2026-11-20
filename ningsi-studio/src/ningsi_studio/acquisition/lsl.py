@@ -246,6 +246,13 @@ class StreamBuffer:
         with self._lock:
             return len(self._samples)
 
+    def assessment_timing_anchor(self) -> dict:
+        """Read the live sample cursor without copying signal amplitudes."""
+        with self._lock:
+            return {"buffer_id": self.buffer_id, "connection_generation": self._connection_generation,
+                    "sample_end": self._count, "latest_sample_end": self._count,
+                    "received_at": self._last_monotonic}
+
     def samples_array(self, seconds: float) -> np.ndarray:
         """返回 (通道, 采样点) 的数组；无数据时返回空数组（不阻塞、不抛错）。"""
         _, rows, _, _ = self.slice(seconds)
@@ -280,6 +287,7 @@ class StreamBuffer:
         samples = np.asarray(rows, dtype=float).reshape(-1, self.descriptor.channel_count).T
         return {"timestamps": stamps, "samples": samples,
                 "total_samples": total, "age": None if last is None else time.monotonic() - last,
+                "received_at": last,
                 "buffer_id": self.buffer_id, "connection_generation": generation,
                 "descriptor": self.descriptor.as_dict()}
 

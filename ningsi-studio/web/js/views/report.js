@@ -13,7 +13,7 @@ import { api } from '../api.js';
 import { renderDiagnostics } from './report-diagnostics.js';
 import { describeError, toast } from '../store.js';
 import {
-  DASH, button, card, el, empty, fmtBytes, fmtInt, fmtNum, fmtPercent, fmtTime,
+  DASH, button, card, el, empty, fmtBytes, fmtDuration, fmtInt, fmtNum, fmtPercent, fmtTime,
   list, pageFrame, pick, renderMarkdown, statusText, table,
 } from '../util.js';
 
@@ -34,6 +34,105 @@ function evidenceLine(entries) {
 function windowCount(count, total) {
   if (!Number.isFinite(count)) return DASH;
   return `${fmtInt(count)}${Number.isFinite(total) ? `/${fmtInt(total)}` : ''} 窗`;
+}
+
+function overviewMetrics(report, training, trainingOnly) {
+  const cards = [];
+  function add(label, value, note, ratio) {
+    cards.push(el('div', { class: 'report-metric' }, [
+      el('h3', { text: label }), el('strong', { text: value }),
+      el('p', { text: note }),
+      Number.isFinite(ratio) && ratio >= 0 && ratio <= 1
+        ? el('progress', { value: ratio, max: 1, 'aria-label': label + '比例' }) : null,
+    ]));
+  }
+  const quality = trainingOnly ? training?.indicator_overview?.quality : { ...report.indicators?.quality, ...report.quality };
+  if (Number.isInteger(quality?.windows_usable) && Number.isInteger(quality.windows_total) && quality.windows_total > 0) {
+    const { windows_usable: used, windows_total: total } = quality;
+    const focus = trainingOnly ? training?.indicator_overview?.summary?.focus : report.indicators?.summary?.focus;
+    const index = Number.isFinite(focus?.mean) && focus.n > 0 ? `专注相关指数基于 ${focus.n} 窗计算，平均 ${fmtNum(focus.mean, 2)}（0–1）。` : '';
+    add('可用脑电', fmtPercent(used / total), `${trainingOnly ? '训练' : '监测'}期间，${total} 个窗口中有 ${used} 个信号合格。${index}`, used / total);
+  }
+  const rounds = list(training?.segments);
+  if (rounds.length && rounds.every(r => Number.isInteger(r?.measured_focus_updates))) {
+    const updates = rounds.reduce((n, r) => n + r.measured_focus_updates, 0);
+    const seconds = rounds.every(r => Number.isFinite(r.stats?.valid_seconds))
+      ? rounds.reduce((n, r) => n + r.stats.valid_seconds, 0) : null;
+    add('训练反馈', `${updates} 次`, `${rounds.length} 段训练中显示专注指数的次数。${seconds === null ? '' : `累计有效反馈 ${fmtNum(seconds, 1)} 秒。`}`);
+  }
+  const scales = Object.values(report.scales || {}).map(row => row?.result || row)
+    .filter(row => Number.isInteger(row?.answered));
+  if (scales.length) {
+    add('问卷作答', `${scales.reduce((sum, row) => sum + row.answered, 0)} 题`,
+      scales.map(row => `${row.name || row.code || '问卷'} ${row.answered} 题`).join(' · '));
+  }
+  const sart = report.behavior?.sart;
+  if (Number.isInteger(sart?.trials)) {
+    const errors = Number.isInteger(sart.commission_errors) && Number.isInteger(sart.omission_errors)
+      ? `误按 ${sart.commission_errors} 次，漏按 ${sart.omission_errors} 次。` : '已记录的正式试次数。';
+    add('按键抑制任务', `${sart.trials} 次`, errors);
+  }
+  const pvt = report.behavior?.pvt;
+  if (Number.isInteger(pvt?.trials)) {
+    const answered = Number.isInteger(pvt.responded) ? `，应答 ${pvt.responded} 次` : '';
+    const median = pvt.valid !== false && (pvt.rate_denominators?.lapse_rate ?? pvt.responded) !== 0 && Number.isFinite(pvt.rt_median);
+    add('光点反应任务', median ? `${fmtInt(pvt.rt_median * 1000)} ms` : `${pvt.trials} 次`,
+      `${median ? '反应时中位数。' : ''}正式刺激 ${pvt.trials} 次${answered}。`);
+  }
+  const fullTraining = report.extras?.training;
+  if (!trainingOnly && Number.isFinite(fullTraining?.valid_seconds)) {
+    const ratio = fullTraining.valid_time_ratio;
+    add('训练有效反馈', `${fmtNum(fullTraining.valid_seconds, 1)} 秒`,
+      Number.isFinite(ratio) ? `占本次训练协议时长的 ${fmtPercent(ratio)}。` : '本次训练中可用于反馈的协议时长。', ratio);
+  }
+  return cards.length ? el('div', { class: 'report-metrics' }, cards) : null;
+}
+
+function deferredDetails(label, build) {
+  let rendered = false;
+  const details = el('details', { class: 'result-details', onToggle: () => {
+    if (!details.open || rendered) return;
+    details.append(build());
+    rendered = true;
+  } }, [el('summary', { text: label })]);
+  return details;
+}
+
+function assessmentCollectionCard(collection) {
+  const phases = [
+    ['睁眼基线', collection?.baseline_open],
+    ['任务态脑电', collection?.monitor],
+  ].filter(([, row]) => row && typeof row === 'object');
+  if (!phases.length) return null;
+  const sections = phases.map(([label, p]) => {
+    const shortfall = p.shortfall_seconds ?? (Number.isFinite(p.target_seconds) && Number.isFinite(p.valid_seconds)
+      ? Math.max(0, p.target_seconds - p.valid_seconds) : null);
+    const ratio = p.attempted_windows !== 0 && Number.isFinite(p.valid_ratio) ? fmtPercent(p.valid_ratio, 1) : DASH;
+    const minimum = Number.isFinite(p.min_valid_ratio) ? fmtPercent(p.min_valid_ratio, 1) : DASH;
+    let outcome;
+    if (p.completed === true) {
+      outcome = '达到本阶段的有效脑电要求。';
+    } else if (p.completion_reason === 'cancelled') {
+      outcome = '采集取消。';
+    } else if (p.completion_reason === 'baseline_invalid' || p.status_reason === 'baseline_invalid') {
+      outcome = '睁眼基线未通过，任务态脑电指数不可用。';
+    } else if (p.status_reason === 'low_valid_ratio') {
+      outcome = '已到采集上限，信号合格比例仍不足。';
+    } else if (p.completion_reason === 'max_duration') {
+      outcome = '已到采集上限，有效脑电仍不足。';
+    } else {
+      outcome = '未达到本阶段的有效脑电要求。';
+    }
+    return el('section', {}, [
+      el('h3', { text: label }),
+      el('p', { text: `有效脑电 ${fmtDuration(p.valid_seconds)} / 目标 ${fmtDuration(p.target_seconds)} · 用时 ${fmtDuration(p.elapsed_seconds)} / 采集上限 ${fmtDuration(p.max_seconds)}` }),
+      ratio !== DASH ? el('p', { class: 'muted', text: `稳定后信号合格比例 ${ratio}${minimum !== DASH ? ` / 要求 ${minimum}` : ''}` }) : null,
+      p.startup_windows > 0 ? el('p', { class: 'muted', text: `启动阶段有 ${fmtInt(p.startup_windows)} 窗未纳入合格比例。` }) : null,
+      el('p', { text: shortfall > 0 && p.completed !== true
+        ? `${outcome}还差 ${fmtDuration(shortfall)} 有效脑电。` : outcome }),
+    ]);
+  });
+  return card('评估脑电采集结果', el('div', { class: 'stack' }, sections));
 }
 
 function eegEvidence(report, extras, trainingOnly) {
@@ -68,7 +167,24 @@ function eegEvidence(report, extras, trainingOnly) {
   ]);
 }
 
-function behaviorEvidence(report, task, skipped) {
+function feedbackCoverage(training) {
+  const rounds = list(training?.segments);
+  if (!rounds.length) return null;
+  const haveCounts = rounds.every(r => Number.isInteger(r?.measured_focus_updates) && r.measured_focus_updates >= 0);
+  const measured = haveCounts ? rounds.reduce((n, r) => n + r.measured_focus_updates, 0) : null;
+  const total = training.indicator_overview?.quality?.windows_total;
+  const haveSeconds = rounds.every(r => Number.isFinite(r?.stats?.valid_seconds));
+  return el('section', {}, [
+    el('h3', { text: '训练反馈' }),
+    el('p', { text: measured === null ? '逐次指数的显示次数未记录。'
+      : Number.isInteger(total) && total > 0 && total >= measured
+        ? `${fmtInt(total)} 次训练更新中，${fmtInt(measured)} 次显示专注指数。`
+        : `训练中共 ${fmtInt(measured)} 次显示专注指数。` }),
+    haveSeconds ? el('p', { text: `纳入奖励反馈的时长 ${fmtDuration(rounds.reduce((n, r) => n + r.stats.valid_seconds, 0))}` }) : null,
+  ]);
+}
+
+function behaviorEvidence(report, task, skipped, automated = false) {
   const result = report.behavior?.[task];
   const sart = task === 'sart';
   const evidence = list(report.assessment?.evidence).find(item => item?.code?.startsWith(`${task}_`));
@@ -86,7 +202,8 @@ function behaviorEvidence(report, task, skipped) {
   ]));
   return el('section', {}, [
     el('h3', { text: task.toUpperCase() }),
-    status ? el('p', { class: 'muted', text: status }) : null,
+    automated ? el('p', { class: 'muted', text: '由程序自动作答，反应时用于核对任务流程。' })
+      : status ? el('p', { class: 'muted', text: status }) : null,
     metrics || el('p', { text: skipped ? '未采集' : '暂无可用结果' }),
   ]);
 }
@@ -153,7 +270,7 @@ function composeMarkdown(report) {
     if (baseline?.quality) lines.push(`- ${label}基线：去重有效时长 ${cell(fmtNum(baseline.quality.usable_seconds, 1))} 秒；可用比例 ${cell(fmtPercent(baseline.quality.valid_ratio))}；前后半段对数比值均值差 ${cell(JSON.stringify(baseline.quality.half_mean_difference))}；原因 ${cell((baseline.reasons || []).join('、') || '无')}；稳定性尚未验证。`);
   }
   if (String(pick(extras, 'source_kind')) === 'lsl' && Number(pick(extras, 'time_scale') || 1) < 0.2) {
-    lines.push('- 采集口径提醒：真实设备 + 快速演示模式（time_scale < 0.2）下相邻 4 秒窗读到的是几乎同一段缓冲数据，上面的可用窗计数是**高重叠样本**，只能用于链路自检；真实节奏采集请用 time_scale = 1.0（此时量表与按键任务由本人操作）。');
+    lines.push('- LSL 快速演示中，相邻 4 秒窗可能反复读到同一段缓冲数据。该模式的窗口计数用于链路检查。');
   }
 
   /* 三、量表 */
@@ -277,7 +394,7 @@ function renderPartial(host, data, ctx) {
 
 export async function render(container, ctx) {
   const uuid = ctx.params.get('session') || pick(ctx.store.state.currentSession, 'uuid', null);
-  const exportAction = el('span');
+  const exportAction = el('span', { class: 'row' });
   const actions = uuid ? [
     button('流程视图', () => ctx.navigate(`#/flow?session=${uuid}`)),
     button('实时监测', () => ctx.navigate(`#/live?session=${uuid}`)),
@@ -322,26 +439,60 @@ export async function render(container, ctx) {
       host.append(card('评估报告', renderMarkdown(data)));
     } else {
       const report = data || {};
-      const markdown = typeof report.report_markdown === 'string' && report.report_markdown.trim()
-        ? report.report_markdown : composeMarkdown(report);
       const extras = report.extras || {};
-      const simulated = extras.source_kind === 'sim';
+      const context = extras.report_context || {};
+      const simulated = context.signal_origin === 'generated' || ['sim', 'simulation'].includes(extras.source_kind) ||
+        extras.device === 'ningsi-sim-eeg' || String(extras.source_note || '').includes('source_id=ningsi-sim-outlet-v1');
       const replay = extras.replay;
-      const trainingOnly = ['ten_min', 'effective_time'].includes(extras.protocol) || Boolean(extras.ten_min || extras.effective_time);
+      const recorded = context.signal_origin === 'local_replay' || context.signal_origin === 'public_replay' || Boolean(replay);
+      const automated = context.response_mode === 'automated';
+      const training = extras.effective_time || extras.ten_min;
+      const trainingOnly = ['ten_min', 'effective_time'].includes(extras.protocol) || Boolean(training);
+      const source = context.source_label || (simulated ? '生成信号' : replay ? '公开脑电回放'
+        : extras.source_kind === 'lsl' ? 'LSL 输入' : null);
       const replaySource = replay && ['PhysioNet', replay.participant, list(replay.channel_labels).join(' / '),
         Number.isFinite(replay.sample_rate_hz) ? `${replay.sample_rate_hz} Hz` : null].filter(Boolean).join(' · ');
-      const summary = el('div', { class: 'report-summary' }, [
-        el('h2', { text: replay ? '公开真人脑电回放报告' : simulated ? '模拟演示结果' : report.assessment?.conclusion || '暂无可用结论' }),
-        el('p', { class: 'muted', text: `参与者 ${report.participant ?? DASH} · ${extras.protocol_label || '检测协议未记录'}` }),
+      const title = context.title || (replay ? '公开真人脑电回放报告' : simulated ? '生成信号测试报告'
+          : trainingOnly ? '训练反馈报告' : automated || recorded ? '会话报告' : report.assessment?.conclusion || '评估报告');
+      const metadata = [!context.hide_participant && report.participant && `记录编号 sub-${report.participant}`,
+        context.started_at && fmtTime(context.started_at), extras.protocol_label].filter(Boolean).join(' · ');
+      const hero = el('header', { class: 'report-summary__hero' }, [
+        metadata ? el('p', { class: 'report-summary__meta', text: metadata }) : null,
+        el('h2', { text: title }),
+        source ? el('p', { text: `数据来源　${source}` }) : null,
+        context.recording_ref ? el('p', { text: `回放录波　${context.recording_ref}` }) : null,
+        simulated || automated ? el('p', { text: '本页汇总本次测试的信号和任务记录，供核对流程。' })
+          : !recorded && !trainingOnly && context.title && report.assessment?.conclusion
+            ? el('p', { text: report.assessment.conclusion }) : null,
+      ]);
+      const technical = el('details', { class: 'result-details' }, [
+        el('summary', { text: '查看各项指标与采集条件' }),
         replaySource ? el('p', { text: replaySource }) : null,
         el('div', { class: 'report-summary__evidence' }, [
           eegEvidence(report, extras, trainingOnly),
-          behaviorEvidence(report, 'sart', Boolean(replay || trainingOnly)),
-          behaviorEvidence(report, 'pvt', Boolean(replay)),
+          feedbackCoverage(training) || behaviorEvidence(report, 'sart', Boolean(replay || trainingOnly)),
+          behaviorEvidence(report, 'pvt', Boolean(replay), automated),
         ]),
         replay?.scope || replay?.missing ? el('p', { class: 'summary-note', text: [replay.scope, replay.missing].filter(Boolean).join(' ') }) : null,
       ]);
-      host.append(card(null, summary));
+      const metrics = overviewMetrics(report, training, trainingOnly);
+      const unavailable = !trainingOnly && list(report.assessment?.evidence).find(item => item?.code === 'eeg_unavailable');
+      const summary = el('div', { class: 'report-summary' }, [hero, metrics,
+        unavailable ? el('p', { class: 'summary-note', text: unavailable.summary || '本次采集未取得任务态脑电评分。' })
+          : !metrics ? el('p', { class: 'summary-note', text: '此记录包含的汇总项目较少，可展开查看已保存的结果。' }) : null,
+        technical]);
+      host.append(summary);
+      const collection = assessmentCollectionCard(extras.assessment_eeg_collection ?? report.assessment_eeg_collection);
+      if (collection) technical.append(collection);
+      const trainingSegments = list((extras.effective_time || extras.ten_min || extras.training)?.segments);
+      if (trainingSegments.some(row => row.local_eeg_feedback)) {
+        technical.append(card('训练期间的脑电反馈', table([
+          { title: '训练段', render: row => fmtInt(row.index ?? row.seq + 1) },
+          ...(trainingSegments.some(row => Number.isInteger(row.measured_focus_updates)) ? [{ title: '测得指数次数', render: row => fmtInt(row.measured_focus_updates) }] : []),
+          { title: '专注评分有效时长', render: row => fmtDuration(row.stats?.valid_seconds) },
+          { title: '局部频带覆盖时长', render: row => fmtDuration(row.local_eeg_feedback?.support_seconds) },
+        ], trainingSegments), { sub: '频带覆盖按实际样本去重，表示能观察到脑电节律的时长。' }));
+      }
       if (extras.effective_time) {
         const timing = extras.effective_time;
         host.append(card('有效时长采集结果', el('div', {}, [
@@ -354,7 +505,7 @@ export async function render(container, ctx) {
       }
       const boundary = pick(report, 'assessment.boundary', null) || pick(config, 'privacy.boundary', null);
       const advice = list(pick(report, 'assessment.advice', [])).filter(item => item !== boundary);
-      if (!simulated && !replay && advice.length) {
+      if (!simulated && !recorded && !automated && advice.length) {
         host.append(card('改善建议', el('ul', {}, advice.map(item => el('li', { text: String(item) })))));
       }
       const observations = extras.state_observations;
@@ -365,14 +516,12 @@ export async function render(container, ctx) {
           ...observationLines.map(text => el('p', { text })),
         ]));
       }
-      host.append(el('details', { class: 'result-details' }, [
-        el('summary', { text: '查看采集质量与行为分析' }), renderDiagnostics(report),
-      ]));
-      const details = el('details', { class: 'result-details' }, [
-        el('summary', { text: '查看完整报告与评估证据' }),
-        renderMarkdown(markdown),
-      ]);
-      host.append(card(null, details));
+      host.append(deferredDetails('查看采集质量与行为分析', () => renderDiagnostics(report)));
+      host.append(deferredDetails('查看完整报告与评估证据', () => {
+        const markdown = typeof report.report_markdown === 'string' && report.report_markdown.trim()
+          ? report.report_markdown : composeMarkdown(report);
+        return renderMarkdown(markdown);
+      }));
     }
   } catch (error) {
     if (error && error.name === 'ApiError' && (error.status === 404 || error.status === 409)) {
@@ -390,6 +539,10 @@ export async function render(container, ctx) {
     const response = await api.artifacts(uuid);
     if (ctx.signal.aborted) return;
     const items = list(pick(response.data, 'items', []));
+    if (items.some(item => item.kind === 'report_json' && item.exists)) {
+      exportAction.append(el('a', { href: api.presentationUrl(uuid), text: '打开展示报告',
+        target: '_blank', rel: 'noopener noreferrer' }));
+    }
     if (items.some(item => item.exists)) {
       exportAction.append(el('a', { href: api.exportZipUrl(uuid), text: '导出 zip' }));
     }

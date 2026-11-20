@@ -11,7 +11,7 @@ import numpy as np
 from ningsi import config
 from ningsi.signal.baseline import build_baseline
 from ningsi.signal.window import analyze_window
-from ningsi_studio.core import phases
+from ningsi_studio.core import phases, ten_min
 from ningsi_studio.core.effective_time import DisplayClock, collect_baseline, run, training_round
 from ningsi_studio.core.runtime import SessionCancelled, SessionRuntime
 from ningsi_studio.domain.indicators import WindowStep
@@ -47,6 +47,7 @@ class FakeRuntime:
 
     def __init__(self, clock, good, bad, pattern=None, cancel_at=None, latency=0):
         self.clock, self.scale = clock, 1
+        self.paused_seconds = 0.0
         self.source = SimpleNamespace(kind="sim", device="fixture", srate=250)
         self.subject = {"public_id": "p01"}
         self.bus, self.payloads, self.persisted = Bus(), {}, []
@@ -56,6 +57,10 @@ class FakeRuntime:
         self.engine = SimpleNamespace(step=self.step, t=0, baseline=None, summarize=lambda _: {})
         self.artifacts, self.summary = {}, {}
         self.effective_time_result = {"phase_results": {}, "timings": {}, "segments": []}
+    def protocol_now(self):
+        return time.monotonic() - self.paused_seconds
+    def precise_now(self):
+        return time.perf_counter() - self.paused_seconds
     def step(self, state):
         self.clock.sleep(self.latency)
         self.index += 1
@@ -166,6 +171,11 @@ class EffectiveTimeTests(unittest.TestCase):
         self.assertTrue(segment["effective_time"]["completed"])
         feedback = [p for name,p in r.bus.events if name == "feedback"]
         self.assertEqual([p["feedback_mode"] for p in feedback[:3]], ["guided", "guided", "eeg"])
+        self.assertEqual([p["presentation_mode"] for p in feedback[:3]], ["measured_focus", "measured_focus", "eeg"])
+        self.assertEqual([p["measured_focus_index"]["value"] for p in feedback[:3]], [.75]*3)
+        self.assertTrue(all(p["score"] is None and p["target"] is None and not p["usable"] for p in feedback[:2]))
+        self.assertEqual(segment["measured_focus_updates"], len(feedback))
+        self.assertEqual(segment["measured_focus_only_updates"], 2)
         self.assertEqual(feedback[2]["effective_time"]["valid_seconds"], 0)
         self.assertEqual(feedback[-1]["effective_time"]["valid_seconds"], 48)
         self.assertEqual(segment["stats"]["on_target_valid_ratio"], 1)
@@ -193,6 +203,31 @@ class EffectiveTimeTests(unittest.TestCase):
         self.assertEqual(feedback[5]["current_hold_sec"], 0)
         self.assertEqual(feedback[9]["score"], .35, "Bad windows must reset smoothing before feedback resumes")
         self.assertLess(segment["stats"]["on_target_ratio"], segment["stats"]["on_target_valid_ratio"])
+
+    def test_descriptive_bands_persist_without_focus_rewards_or_effective_time(self):
+        clock = VirtualClock()
+        r = self.runtime(clock, pattern=lambda *_: False)
+        original = r.engine.step
+        ts = np.arange(1000) / 250
+        lead = 15 * np.sin(2 * np.pi * 10 * ts) + 8 * np.sin(2 * np.pi * 6 * ts)
+
+        def partially_clean(state):
+            step = original(state)
+            step.raw = np.stack((np.zeros_like(lead), lead))
+            return step
+
+        r.engine.step = partially_clean
+        trainer = StudioTraining("p01", "01", "001", self.base, "ten_min")
+        with patched_clock(clock):
+            segment = training_round(r, trainer, self.base, 0, "t")
+        feedback = [p for name, p in r.bus.events if name == "feedback"]
+        self.assertTrue(all(p["presentation_mode"] == "local_eeg" for p in feedback))
+        self.assertTrue(all(p["score"] is None and p["target"] is None and not p["on_target"] for p in feedback))
+        self.assertEqual(segment["stats"]["valid_seconds"], 0.)
+        self.assertEqual(segment["target_after"], segment["target"])
+        self.assertFalse(segment["effective_time"]["completed"])
+        self.assertGreater(segment["local_eeg_feedback"]["observations_count"], 0)
+        self.assertEqual(set(segment["local_eeg_feedback"]["support_seconds_by_channel"]), {"1"})
 
     def test_all_bad_finishes_bounded_insufficient_and_pvt_stays_fixed(self):
         clock = VirtualClock()
@@ -228,6 +263,47 @@ class EffectiveTimeTests(unittest.TestCase):
         self.assertEqual(phases.profile_dict("short")["pvt_duration_sec"], 120)
         self.assertEqual(phases.profile_dict("effective_time")["pvt_duration_sec"], 180)
         self.assertEqual(r.training_report["effective_time"]["valid_seconds"], 200)
+
+    def test_demo_pauses_do_not_consume_phase_budgets_or_credit_feedback(self):
+        for protocol in ("ten_min", "effective_time"):
+            with self.subTest(protocol=protocol):
+                clock = VirtualClock()
+                r = self.runtime(clock)
+                r.scale = .5
+                original_sleep = r._sleep_real
+                paused_phases = set()
+                def sleep_with_presentation_pause(seconds):
+                    if r.phase not in paused_phases and seconds > 0:
+                        # An extended presenter pause spans more than a whole round.
+                        clock.sleep(120)
+                        r.paused_seconds += 120
+                        paused_phases.add(r.phase)
+                    original_sleep(seconds)
+                r._sleep_real = sleep_with_presentation_pause
+                r._sleep = lambda seconds: r._sleep_real(seconds * r.scale)
+                with patched_clock(clock):
+                    if protocol == "ten_min":
+                        ten_min.run(r, True)
+                        result = r.ten_min_result
+                        self.assertEqual(result["timings"], {k: v for k, v in phases.TEN_DURATIONS.items() if v})
+                        for segment in result["segments"]:
+                            self.assertEqual(segment["mode_seconds"], {"guided": 4, "eeg": 46})
+                    else:
+                        run(r, True)
+                        result = r.summary["effective_time"]
+                        self.assertTrue(result["acquisition_complete"])
+                        for phase in ("baseline_open", "baseline_after", "training"):
+                            state = result["phase_results"][phase]
+                            self.assertEqual(state["actual_elapsed_seconds"], state["elapsed_seconds"] * r.scale + 120)
+                        for segment in result["segments"]:
+                            self.assertEqual(segment["stats"]["valid_seconds"], 50)
+                            self.assertEqual(segment["duration_sec"], 54)
+                        self.assertEqual(result["actual_elapsed_seconds"], clock.now)
+                self.assertEqual(paused_phases, {"qc", "baseline_open", "practice", "pvt", "training", "baseline_after"})
+                self.assertEqual(result["elapsed_sec"], clock.now)
+                expected_protocol = 600 if protocol == "ten_min" else 616
+                self.assertEqual(result["protocol_elapsed_seconds"], expected_protocol)
+                self.assertEqual(clock.now, expected_protocol * r.scale + r.paused_seconds)
 
     def test_cancel_keeps_partial_training_and_never_completes_target(self):
         clock = VirtualClock()

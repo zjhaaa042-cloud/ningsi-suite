@@ -5,6 +5,7 @@ import json
 import math
 
 from ningsi import config
+from ningsi.assessment.report_presentation import assessment_presentation, report_header, training_presentation
 
 REASONS = {
     'electrode_step': '电极突跳或接触移动', 'ocular_transient': '显著慢瞬态（眼动或漂移代理）',
@@ -14,6 +15,13 @@ REASONS = {
     'amplitude': '幅值超限', 'flat_channel': '平直通道', 'channel_span': '通道差异过大',
     'emg': '高频占比偏高（肌电代理）', 'eog': '低频占比偏高（眼电/漂移代理）',
     'no_data': '无样本', 'signal_too_short': '未满4秒', 'non_finite_signal': '非有限值',
+    'assessment_window_not_eligible': '评估阶段预热或窗未含新样本',
+    'nonmonotonic_timestamps': '采样时间重复或倒退',
+    'sample_gap_in_filter_history': '滤波所需的连续采样有间断',
+    'training_window_not_fresh': '训练窗口缺少足够的新样本',
+    'blink_uncalibrated': '眨眼样波形缺少个人校准',
+    'blink_boundary': '眨眼样波形跨越窗口边界',
+    'blink_dense': '短时间内眨眼样波形密集',
 }
 
 
@@ -68,10 +76,22 @@ def render_html(report):
     def bar(label, value, maximum, color='#246b73'):
         width = max(0, min(100, 100*value/maximum)) if maximum else 0
         return f'<div class="bar"><span>{esc(label)}</span><div class="track"><div style="width:{width:.2f}%;background:{color}"></div></div><b>{value:g}</b></div>'
-    parts = ['<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>脑电采集与行为分析报告</title>',
-             '<style>body{font:16px/1.65 system-ui,sans-serif;background:#f2f5f4;color:#18383c;margin:auto;max-width:1100px;padding:32px}section{background:white;padding:24px;margin:20px 0;border-radius:14px}h1,h2{line-height:1.3}.muted{color:#52686c}.bar{display:grid;grid-template-columns:240px 1fr 60px;gap:12px;align-items:center;margin:10px 0}.track{background:#e8eeee;height:18px}.track>div{height:100%}.timeline{display:flex;flex-wrap:wrap;gap:3px}.window{width:12px;height:28px;background:#b35b45}.good{background:#246b73}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%}td,th{padding:9px;border-bottom:1px solid #ddd;text-align:left}@media(max-width:600px){body{padding:12px}.bar{grid-template-columns:140px 1fr 45px}}@media print{section{break-inside:avoid}body{background:white}}</style>',
-             '<h1>脑电采集与行为分析报告</h1>',
-             '<p>描述性分析与个体评分分开呈现 · 工程阈值待验证 · 不作诊断</p>']
+    context = extras.get('report_context') or {}
+    automated = context.get('response_mode') == 'automated'
+    generated = context.get('signal_origin') == 'generated' or extras.get('source_kind') in ('sim', 'simulation')
+    parts = [report_header(report)]
+    effective = extras.get('effective_time')
+    if extras.get('ten_min') and not effective:
+        parts.append(training_presentation(report, REASONS))
+    elif effective:
+        parts.append('<section class="overview"><h2>有效时长反馈训练</h2>')
+        if effective.get('acquisition_complete') is not None:
+            parts.append('<p class="annotation">' + ('本次有效采集目标已完成。' if effective['acquisition_complete'] else '本次有效采集目标尚未全部完成。') + '</p>')
+        parts.extend('<p>' + esc(line) + '</p>' for line in _effective_summary_lines(effective))
+        parts.append('</section>')
+    else:
+        parts.append(assessment_presentation(report))
+    parts.append('<details class="appendix"><summary>查看技术明细、逐窗标记与频带统计</summary>')
     if replay:
         parts.append('<section><h2>公开真人脑电回放</h2>')
         parts.extend('<p>' + esc(line) + '</p>' for line in replay_source_lines(replay))
@@ -84,7 +104,7 @@ def render_html(report):
             parts.append('<p>当前没有可评分的任务窗。可继续查看基线、质量和频带组成。</p>')
         parts.append('</section>')
     parts.extend([
-             f'<section><h2>1. 数据可用性</h2><p>严格合格窗 <b>{accepted}/{total}</b>。' + ('本次没有可用个体脑电评分；仍可查看采集质量和行为表现。' if not indicators else '个体指标见完整证据。') + '</p>',
+             f'<section><h2>采集窗口质量</h2><p>严格合格窗 <b>{accepted}/{total}</b>。' + ('独立评估没有可用个体脑电评分。' if not indicators else '个体指标见完整证据。') + '</p>',
              f'<p>{esc(d.get("scope", ""))}</p><p class="muted">{esc(d.get("note", "旧版未保存完整逐窗数据，以下仅展示已有汇总，不能重建频谱或重新判定质量。"))}</p>',
              bar('严格合格', accepted, total), bar('排除', max(0,total-accepted),total,'#b35b45')])
     for key, label in [('baseline_eyes_open', '睁眼'), ('baseline_eyes_closed', '闭眼')]:
@@ -97,7 +117,6 @@ def render_html(report):
         parts.append('<section><h2>当下压力与情绪</h2>')
         parts.extend('<p>' + esc(line) + '</p>' for line in observations['summary_lines'])
         parts.append('</section>')
-    effective = extras.get('effective_time')
     ten = effective or extras.get('ten_min')
     if ten:
         parts.append('<section><h2>' + ('有效时长反馈训练' if effective else '十分钟测试＋训练') + '</h2><p>' + esc(ten.get('note') or '描述性训练记录，不代表已验证的训练效果。') + '</p>')
@@ -144,19 +163,19 @@ def render_html(report):
                     + '；结束原因 ' + esc(_completion_label(timing.get('completion_reason'))) + '</p>')
             parts.append('<p>训练轮 ' + esc(segment['index']) + '（协议秒）：' + esc(segment.get('mode_seconds', {})) + '；未反馈协议秒数 ' + esc(segment.get('unobserved_seconds', '未知')) + '</p>')
         parts.append('<p>实际采集耗时 ' + esc(ten.get('elapsed_sec')) + ' 秒；倍率 ' + esc(ten.get('time_scale')) + '</p></section>')
-    parts.append('<section><h2>2. 窗口与排除原因</h2><p>绿色合格，橙色排除；悬停查看阶段及原因。各原因可重叠，计数之和可能超过窗数。</p><div class="timeline">')
+    parts.append('<section><h2>窗口与排除原因</h2><p>绿色表示合格，橙色表示排除。悬停可查看阶段及标记，同一窗可有多个标记。</p><div class="timeline">')
     for row in d.get('windows',[]):
         label = f"{row.get('phase','')} / {row.get('index','')} / " + ', '.join(REASONS.get(r,r) for r in row.get('reasons',row.get('unusable_reasons',[])))
         parts.append(f'<span class="window {"good" if row.get("usable") else ""}" title="{esc(label)}"></span>')
     parts.append('</div>')
     for reason,count in (d.get('reason_counts', {}) if d else q.get('unusable_reasons', {})).items():
         parts.append(bar(REASONS.get(reason,reason),count,total,'#b35b45'))
-    parts.append('<p class="muted">幅值150 µV、通道差100 µV、低频占比55%、高频占比35%为当前工程筛查门槛，尚未按设备验证。低频占比高不能单独证明眼电。</p>')
+    parts.append('<p class="muted">这些质量标记用于工程筛查。低频占比升高也可能来自漂移，具体干扰来源需要独立证据。</p>')
     if d.get('amplitude_sensitivity'):
         parts.append('<h3>阈值敏感性：只改变幅值门槛会怎样？</h3><p>其余条件保持不变。此表用于解释拒绝原因，不改变原判定、不证明更宽门槛科学有效。</p>')
         for item in d['amplitude_sensitivity']:
             parts.append(bar(f"幅值≤{item['amp_max_uv']}µV时合格窗",item['accepted'],total))
-    parts.append('</section><section><h2>3. 频带组成（描述性）</h2>')
+    parts.append('</section><section><h2>频带组成（描述性）</h2>')
     if not d.get('bands'):
         parts.append('<p>此旧版会话未保存逐窗频带数据，无法事后重建。请使用新版采集。</p>')
     for group,label in [('accepted','严格合格窗'),('rejected','排除窗：仅用于污染诊断')]:
@@ -164,7 +183,7 @@ def render_html(report):
         for band,stat in d.get('bands',{}).get(group,{}).items():
             if stat.get('mean') is not None:
                 parts.append(bar(f'{band} %（n={stat["n"]}）',round(stat['mean']*100,1),100,'#246b73' if group=='accepted' else '#b35b45'))
-    parts.append('</section><section><h2>4. 行为表现（独立于脑电）</h2>')
+    parts.append('</section><section><h2>行为表现（独立于脑电）</h2>')
     pvt = report.get('behavior',{}).get('pvt') or {}
     if pvt:
         for name,key in [('有效反应','responded'),('抢答（排除RT）','false_starts'),('漏答','missed'),('慢反应 >500ms','lapses')]:
@@ -175,9 +194,16 @@ def render_html(report):
         parts.append(f'<p>SART：正式 {esc(sart.get("trials"))} 试次；Go正确率 {esc(sart.get("go_accuracy"))}（不是全任务正确率）；No-Go误按 {esc(sart.get("commission_errors"))}/{esc(sart.get("nogo_trials"))}；漏按 {esc(sart.get("omission_errors"))}。</p>')
     if replay and not pvt and not sart:
         parts.append('<p>SART、PVT-B 和 SAS/SDS 量表均未采集。</p>')
-    parts.append('</section><section><h2>5. 结论与下一步</h2>')
-    parts.append(f'<p>{esc((report.get("assessment") or {}).get("conclusion", "尚无联合结论"))}</p>')
-    for advice in (report.get('assessment') or {}).get('advice',[]):
-        parts.append(f'<p>{esc(advice)}</p>')
-    parts.append('<p>有波形不等于有可用脑电，有描述性频带结果不等于注意力评分有效。量表与行为任务不能代替脑电基线。</p></section><details><summary>完整结构化证据</summary><pre>'+esc(json.dumps(report,ensure_ascii=False,indent=2))+'</pre></details></html>')
+    parts.append('</section><section><h2>结果解释</h2>')
+    if automated:
+        parts.append('<p>反应时任务为程序自动应答。行为统计用于核验软件流程，本次记录无法评定参与者的注意力或压力。</p>')
+    elif generated:
+        parts.append('<p>本次脑电输入为生成信号，脑电指标用于检查软件的计算与反馈流程。</p>')
+    else:
+        parts.append(f'<p>{esc((report.get("assessment") or {}).get("conclusion", "尚无联合结论"))}</p>')
+        for advice in (report.get('assessment') or {}).get('advice',[]):
+            parts.append(f'<p>{esc(advice)}</p>')
+    parts.append('<p>训练指数是相对个人基线的描述性指标。工程阈值的适用范围仍需验证。</p></section>')
+    parts.append('</details>')
+    parts.append('<details class="raw"><summary>完整结构化证据</summary><pre>'+esc(json.dumps(report,ensure_ascii=False,indent=2))+'</pre></details></main></body></html>')
     return ''.join(parts)

@@ -122,22 +122,33 @@ def _correct_eyes(eeg, raw_eeg, eog, rate, count):
     return result, changed
 
 
-def _muscle_burst(row, rate, *, reference=False):
+def _muscle_bursts(row, rate, *, reference=False):
     size = round(rate / 2)
     if size < 8 or len(row) < size or rate < 100 or not np.isfinite(row).all():
-        return False
-    blocks = np.lib.stride_tricks.sliding_window_view(row, size)[::max(1, size // 2)]
+        return []
+    hop = max(1, size // 2)
+    blocks = np.lib.stride_tricks.sliding_window_view(row, size)[::hop]
     taper = np.hanning(size)
     power = np.abs(np.fft.rfft((blocks - blocks.mean(axis=1, keepdims=True)) * taper)) ** 2
     freq = np.fft.rfftfreq(size, 1 / rate)
     band = power[:, (freq >= 30) & (freq <= (90 if reference else 45))].sum(axis=1)
     total = power[:, (freq >= 3) & (freq <= (90 if reference else 45))].sum(axis=1)
     rms = np.sqrt(2 * band / (size * np.sum(taper*taper)))
-    return bool(np.any((rms > (20 if reference else 8)) & (band > .55 * total)))
+    hits = np.flatnonzero((rms > (20 if reference else 8)) & (band > .55 * total))
+    return [(int(i * hop), int(i * hop + size)) for i in hits]
+
+
+def _guard_samples(mask, margin):
+    """Keep neighboring filter transients outside the descriptive band estimate."""
+    edges = np.diff(np.r_[False, mask, False].astype(np.int8))
+    guarded = np.zeros(len(mask), dtype=bool)
+    for start, stop in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        guarded[max(0, start-margin):stop+margin] = True
+    return guarded
 
 
 def process_live_artifacts(filtered, source, rate, expected, labels=(), units=(), fallback_scale=1.,
-                           operator_eeg_scale=None, *, blink_evidence=None):
+                           operator_eeg_scale=None, *, blink_evidence=None, fragment_masks=False, blink_mask=None):
     """Return EEG-only window and per-window evidence. References share the EEG sample clock.
 
     filtered contains DC-removed, filtered source channels in µV for voltage channels.
@@ -162,6 +173,12 @@ def process_live_artifacts(filtered, source, rate, expected, labels=(), units=()
             eog.append((uv[a] - uv[b], filtered[a] - filtered[b]))
     eeg, corrected = _correct_eyes(filtered[pick], uv[pick], eog, rate, count)
     reasons = list((blink_evidence or {}).get("reasons", ()))
+    if fragment_masks:
+        from .conditioning import EYE, MUSCLE
+        exclusions = np.zeros(count, dtype=np.uint8)
+        margin = round(.5 * rate)
+        if blink_mask is not None:
+            exclusions[_guard_samples(blink_mask, margin)[-count:]] |= EYE
     if not np.isfinite(eeg).all():
         reasons.append("non_finite_signal")
     else:
@@ -174,14 +191,21 @@ def process_live_artifacts(filtered, source, rate, expected, labels=(), units=()
                     reasons.append("electrode_step")
             slow = _smooth(row, round(.12 * rate))
             centered = np.abs(slow - np.median(slow))
-            if np.max(centered) > max(60., 5 * 1.4826 * np.median(centered)):
+            ocular = centered > max(60., 5 * 1.4826 * np.median(centered))
+            if np.any(ocular):
                 reasons.append("ocular_transient")
-            if _muscle_burst(row, rate):
+                if fragment_masks:
+                    exclusions[_guard_samples(ocular, margin)] |= EYE
+            bursts = _muscle_bursts(row, rate)
+            if bursts:
                 reasons.append("muscle_burst")
+                if fragment_masks:
+                    for start, stop in bursts:
+                        exclusions[max(0, start-margin):stop+margin] |= MUSCLE
     for i, key in enumerate(keys):
         row = np.asarray(source[i, -count:])
         if key.startswith("emg") and i in known_voltage:
-            if _muscle_burst(row * UNIT_FACTORS[_unit(units[i])], rate, reference=True):
+            if _muscle_bursts(row * UNIT_FACTORS[_unit(units[i])], rate, reference=True):
                 reasons.append("emg_reference_burst")
         if key in ("accx", "accy", "accz", "accelx", "accely", "accelz") and i < len(units):
             unit = accel_unit(units[i])
@@ -193,4 +217,10 @@ def process_live_artifacts(filtered, source, rate, expected, labels=(), units=()
             "eeg_source_indices": pick, "reasons": list(dict.fromkeys(reasons))}
     if blink_evidence:
         info["blink_control"] = blink_evidence
+    if fragment_masks:
+        info["fragment_artifact_mask"] = exclusions
+        info["fragment_localized_reasons"] = sorted({
+            event["reason"] for event in (blink_evidence or {}).get("events", [])
+            if blink_mask is not None and event["state"] == "masked" and event.get("reason")
+        })
     return eeg, info

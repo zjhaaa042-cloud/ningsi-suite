@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from ningsi import config
+from ningsi_studio.core.assessment_eeg import (
+    ASSESSMENT_BASELINE_MAX_SEC, ASSESSMENT_BASELINE_TARGET_SEC,
+    ASSESSMENT_MONITOR_MAX_SEC, ASSESSMENT_MONITOR_TARGET_SEC,
+)
 
 # 推进方式：与参考工程 Step.advance 的 timed / operator / form 对应
 ADVANCE_AUTO = "auto"          # 后端按时间自动推进（被试只需保持状态）
@@ -336,7 +340,21 @@ def as_list(profile: object = PROFILE_FULL, training_mode="quick") -> list[dict]
     rows = []
     for phase in phases_for(profile):
         row = phase.as_dict()
-        if phase.key == "sart":
+        if item["key"] in (PROFILE_FULL, PROFILE_SHORT) and phase.key == "baseline_open":
+            row.update(headline="保持睁眼看向前方，安静坐好",
+                       description=f"累计 {ASSESSMENT_BASELINE_TARGET_SEC:g} 秒合格脑电，最多采集 {ASSESSMENT_BASELINE_MAX_SEC:g} 秒",
+                       details=["等待信号稳定后累计合格时间，质量暂时下降时会自动补采",
+                                "保持自然呼吸和眨眼，尽量避免说话、咀嚼或转头",
+                                "超时仍不足时会继续量表和行为任务"],
+                       auto_note="由服务端根据合格时长自动推进",
+                       max_duration_sec=ASSESSMENT_BASELINE_MAX_SEC)
+        elif item["key"] in (PROFILE_FULL, PROFILE_SHORT) and phase.key == "monitor":
+            row.update(headline="保持自然坐姿，正在采集脑电",
+                       description=f"累计 {ASSESSMENT_MONITOR_TARGET_SEC:g} 秒合格脑电，最多采集 {ASSESSMENT_MONITOR_MAX_SEC:g} 秒",
+                       details=["等待信号稳定后累计合格时间", "采集结束后报告会注明脑电是否达到评估要求"],
+                       next_hint="接下来汇总评估结果" if item["key"] == PROFILE_SHORT else "随后进入神经反馈训练",
+                       max_duration_sec=ASSESSMENT_MONITOR_MAX_SEC)
+        elif phase.key == "sart":
             row["duration_sec"] = round(float(item.get("sart_sec_estimate") or row["duration_sec"]), 1)
             row["description"] = f"{item['sart_practice_trials']}练习＋{item['sart_trials']}正式试次，{item['sart_nogo_trials']}个No-Go"
             row["next_hint"] = f"随后进行{item['pvt_duration_sec']:g}秒PVT任务"

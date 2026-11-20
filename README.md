@@ -1,260 +1,93 @@
 # 凝思（Ningsi）
 
-**A09 赛题**「AI+便携脑电设备的专注力强化训练系统」。项目包含算法引擎、Studio 评估平台和独立实验采集器。
+凝思是一套在本地运行的便携脑电评估与反馈训练系统。参与者戴好设备后，跟随屏幕完成静息、反应时任务或反馈训练。系统把任务表现、实际可分析的脑电时长和训练反馈放进同一份报告。操作者可以直接展示本次结果，也可以沿着报告回看每个数字的依据。
 
-当前源码版本为引擎 0.1.2、Studio 0.1.15、Capture 0.4.2，以各包 `pyproject.toml` 为准。Capture 提供连续原始采集、因果调理与伪迹标记；Studio 提供联合评估、反馈、历史趋势及真人模型训练与部署。Windows 包以各自的构建记录为准。
+## 从哪个入口开始
 
-Studio 按「评估与训练」「记录与结果」组织日常操作；设备连接、参与者和模型管理集中在默认折叠的「设置与管理」。赛事展示页已退出产品导航与路由，保留的开发分析模块与接口见[开发说明](ningsi-studio/docs/SHOWCASE.md)。
+| 你的目的 | 使用入口 | 可以得到什么 |
+| --- | --- | --- |
+| 做一次评估或训练，向参与者解释结果 | **Studio 评估平台** | 从设备连接、任务引导到报告的完整流程，以及按参与者查看的历史记录与趋势 |
+| 留下每个原始样本，事后与动作、刺激或按键对照 | **Capture 实验采集器** | 连续波形、时间戳、实验事件、作答及可重复分析的导出目录 |
+| 在脚本中复用脑电分析 | **Ningsi 算法引擎** | 以同一套质量检查、频带特征和个人基线方法处理输入信号 |
 
-开始评估前可检查单位、采样率和模型适配，连接后执行采集质检与个人基线。Capture 0.4.1 可选发布不含答案的 LSL 事件，供 LabRecorder 独立同步记录。原始信号复核、成熟工具依据和现场步骤见[现场验证说明](docs/EXISTING_SOLUTIONS_AND_FIELD_VALIDATION.md)及[验收清单](docs/FIELD_ACCEPTANCE_CHECKLIST.txt)。
-
-Studio 0.1.12 新增“有效时长训练”：坏窗暂停累计、信号恢复后有限补采，前后基线各累计 60 秒、4 轮训练各累计 50 秒可用反馈；PVT 仍按固定时长运行。训练主要展示有效时间内达标率，并同时报告覆盖、有效秒数和用时；达到补采上限仍不足会明确标记。质量门槛保持原规则，原固定十分钟方案继续保留。
-
-BSense-R 按用户提供的手册内置为 2 路 EEG、250 Hz、µV、换算倍率 1；连接后直接预览与采集，不再重复填写设备档案、采样率或单位。设备页只保留连接、波形、质量和必要参数，真实流参数冲突会明确报错；详见[设备接入说明](docs/BSENSE_R_DEVICE_GUIDE.md)。
-
-Studio 0.1.14 增加双通道个人眨眼校准、可信事件的逐通道局部校正及残留质量门控。校准绑定参与者和当前设备配置，原始信号保留；未校准或校正不可信的瞬态仍暂停评分。冻结分类模型沿用训练时的特征处理，并额外拒绝受眨眼污染的实时窗口。使用方法与验证边界见[眨眼控制说明](docs/BLINK_CONTROL.md)。
-
-Capture 当前源码在真人双通道 LSL 的每次研究采集前提供约 5 分钟个人伪迹校准。两段 60 秒静坐之间，随机交错提示眨眼、只动眼球、轻咬牙、轻碰耳夹、轻碰前额电极和转头，每类 5 次。导出时生成 `artifact_calibration.json` 和 `artifact_detections.csv`，用于回看和本场动作特征相似的录波片段。描述性频带可另行使用通过检查的局部片段，正式基线、探针与训练仍按严格四秒窗判定。[使用方法](ningsi-capture/README.md#任务前个人伪迹校准)
-
-项目按“采集 → 预处理 → 特征 → 状态估计 → 联合评估 → 反馈”组织。开发先看[系统架构](docs/ARCHITECTURE.md)，技术验收看[验证计划](docs/VALIDATION_PLAN.md)。A09 没有给出准确率或毫秒时延门槛；公开数据研究尚未证实三类状态在目标设备上的稳定识别。
-
-Studio 和 Capture 分别使用同一仓库的算法引擎。Capture 通过研究数据导出与 Studio 训练入口衔接。
-
-```
-ningsi-studio/ ──┐  评估、监测、反馈、训练与持久化
-                ├──▶ ningsi/  共用算法引擎与逐窗应用服务
-ningsi-capture/ ─┘  原始记录、研究任务、探针与导出
-
-Capture ──带版本与校验值的导出文件──▶ Studio 真人模型训练
-```
-
-| 目录 | 包名 / 命令 | 职责 | 独立运行 |
-|---|---|---|---|
-| [`ningsi-capture/`](ningsi-capture/README.md) | `ningsi-capture` | 连续 LSL 原始采集、任务事件、走神探针、质量筛查与训练数据导出 | 随 Windows 程序包含所需引擎 |
-| [`ningsi/`](ningsi/README.md) | `ningsi` / `ningsi` | 算法引擎 + CLI + Tkinter 桌面版。输入便携脑电（LSL 真机或仿真源），输出专注/放松/负荷三指标、量表 + 行为 + 脑电联合评估、神经反馈训练、报告 / 热力图 / 趋势、逻辑回归基线模型 | ✅ 仅依赖 NumPy |
-| [`ningsi-studio/`](ningsi-studio/README.md) | `ningsi-studio` / `ningsi-studio` | Web 产品层：HTTP/SSE、会话状态机、SQLite/JSONL、NeuroFocus、模型训练与报告 | 需要引擎；便携包包含所需运行资源 |
+Studio 和 Capture 可以独立启动。日常体验从 Studio 开始。如果实验需要逐个样本核实某次突变，采集时就用 Capture 保留原始波形和时钟。
 
 ## 发行版下载与使用（Windows x64）
 
-当前正式版为 **v0.1.15**，包含 Studio 0.1.15、Capture 0.4.2 和引擎 0.1.2，无需安装 Python。两个程序均从发行标签对应的干净源码构建。
+Windows 便携包按版本发布。要使用当前主分支的报告展示与演示暂停功能，也可以从源码启动 Studio。[源码运行方法](#数据保存与源码入口)
 
-任务前个人伪迹校准目前通过本仓库源码使用。下方下载对应 v0.1.15 标签的构建。
+1. 下载 Windows 便携套件，完整解压到可写目录，保留其中的 `_internal` 文件夹。双击 `01-Start-Studio.bat`，在打开的浏览器中进入平台。[下载便携套件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases)
+2. **体验流程**时，打开「开始评估」，选择方案后点「运行模拟演示」。在这个演示流程页，可点「暂停演示」讲解当前阶段，再点「继续演示」从该阶段接着运行。此入口适合熟悉界面、任务顺序和报告。
+3. **使用设备**时，先戴好电极和参考耳夹，在厂商软件中确认波形并打开 LSL 推流。在 Studio 选择参与者和对应的 EEG 流，预览波形、核对采样率和单位，再点「开始评估」。BSense-R 的预设为双通道、250 Hz、µV。换用其他流时按其实际标定设置。[设备接入与标定](docs/BSENSE_R_DEVICE_GUIDE.md)
+4. 参与者按当前阶段提示静坐、作答或训练。结束后从「最近会话」打开「展示报告」。「历史与趋势」可按参与者找回会话，查看原始报告或阶段记录。[Studio 中文使用说明](ningsi-studio/使用说明.md)
 
-- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.15)
-- [下载 Windows x64 完整便携套件（约 50 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/ningsi-product-0.1.15-20261118.zip)
-- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/ningsi-product-0.1.15-20261118.zip.sha256)
-- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/README.zh-CN.txt) · [构建记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/BUILD.json) · [EXE 验收记录](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.15/FROZEN_VERIFICATION.json)
+模拟输入用于演练流程，本地录波回放用于在相同波形上复核算法，现场 LSL 输入用于记录当次佩戴。解读反应时或量表时，也要看是参与者亲自作答还是程序自动作答。自动作答产生的反应时间反映演示程序的行为。
 
-完整解压到可写目录，保留整个 `_internal`。双击 `01-Start-Studio.bat`，选择「运行模拟演示」即可离线展示。常规采集使用 `02-Start-Capture.bat`，试用 BioMulti 输入恢复使用 `03-Start-Capture-TCN.bat` 并选择 BioMulti 分包时钟估计。升级请使用新目录。需要原会话时先备份数据，再按包内说明指定旧数据目录。
+## Studio 的四种方案
 
-Studio 实时页显示数据接收、信号质控、个人基线和评分暂停原因。最近 4 秒窗的频带比值与阶段均值分别显示。报告首屏展示有效脑电覆盖、SART 和 PVT 证据。Capture 的 TCN 模型在符合质控的正式研究探针上后台评分，并将结果写入研究导出。
+| 方案 | 适合场景 | 参与者会做什么 |
+| --- | --- | --- |
+| 十分钟测试与训练 | 时间固定的短体验 | 30 秒设备质检、60 秒睁眼静息、30 秒反应练习、3 分钟正式反应任务、4 轮各 50 秒训练和 10 秒休息、60 秒训练后静息 |
+| 有效时长训练 | 希望在信号断续时多留一些采集时间 | 任务顺序与十分钟方案相同。前后静息各以 60 秒有效数据为目标，每段最多 180 秒。每轮训练以 50 秒有效反馈为目标，最多采集 100 秒 |
+| 专注力综合评估 | 希望同时了解主观感受和实际任务表现 | 填写 SAS、SDS 自评量表，完成数字抑制任务（SART）、警觉反应时任务（PVT）和脑电监测 |
+| 评估与反馈训练 | 希望在同一场会话中完成综合评估和训练 | 完成量表和较长的行为任务，再进入反馈训练，报告按阶段汇总结果 |
 
-源码全量回归共 730 项，727 项通过、3 项跳过。55 项冻结程序和浏览器检查通过，包含短协议模拟采集与导出。最终 ZIP 也通过完整解压、逐文件校验及启动检查。程序未签名，现场设备、真人识别与训练效果仍待独立验证。下载包附逐文件校验清单与构建记录。
+反应时任务要求看到信号后尽快按键，系统记录反应时间、抢答和漏答。数字抑制任务要求对常见数字按键，遇到指定数字停手，可观察漏按和错按。练习阶段用于熟悉操作，正式表现单独统计。十分钟方案的时长指采集安排，设备连接与报告生成另计。
 
-[v0.1.14 历史发行版](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.14)
+## 从脑电波形到训练反馈
 
-### v0.1.2 历史发行版
+1. **先建立个人参照。** 静息时记录同一人、同一次佩戴下的脑电。训练中的个人指数使用本次基线解释频带变化。双通道设备还可在 Studio 做个人眨眼校准，采集自然眨眼样本，供程序定位并校正符合模板的干扰。[眨眼校准与适用条件](docs/BLINK_CONTROL.md)
+2. **分别检查整窗和局部。** 常规训练每两秒检查最近四秒的双通道数据。满足整窗、局部质量和基线条件时，可以给出本次个人指数。若只有某个通道的连续两秒仍可分析，屏幕可以显示该通道的 θ、α、β 相对功率，让操作者看到这段信号还保留了什么。
+3. **按实际取得的证据累计反馈。** 一次有效指数、连续提供反馈的秒数、达到训练目标的秒数分别记录。信号中断或数据过期时，当前读数留空并显示原因。四秒窗彼此重叠，统计覆盖时取实际时间区间的并集。[训练选段与计分规则](ningsi-studio/docs/TRAINING_SCORE_SELECTION.md)
 
-以下为 **v0.1.2** 历史发行版的使用说明。该版无需安装 Python，源码见 [v0.1.2 标签](https://github.com/zjhaaa042-cloud/ningsi-suite/tree/v0.1.2)，构建提交见其发行附件 `BUILD.json`。
+## 怎样读评估报告
 
-- [发行说明与更新内容](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.2)
-- [下载 Windows x64 便携版 ZIP（约 22 MB）](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.2/ningsi-studio-0.1.2-win-x64.zip)
-- [下载 SHA-256 校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.2/ningsi-studio-0.1.2-win-x64.zip.sha256)
-- [中文使用说明](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.2/README.zh-CN.txt) · [构建环境与版本清单](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.2/BUILD.json)
+展示时先看本场完成了哪些任务、获得多少证据，再看表现。报告随所选方案和实际记录显示内容。需要复核时可展开专业指标，或从会话记录进入原始报告。
 
-### v0.1.2 更新
+| 想知道什么 | 阅读方式 |
+| --- | --- |
+| 这次反应快不快、稳不稳？ | 一起看正式试次、反应时间、漏答和抢答。少数很快的反应不能概括整场任务 |
+| 有多少脑电可以解释？ | 看有效时长、覆盖率与缺失阶段。脑电缺失表示该段证据不足，该场已完成的行为任务仍可单独解读 |
+| 训练目标完成得怎样？ | 对照各轮的有效反馈时间和达标时间。同样的达标率，来自几秒或几十秒反馈，能支持的判断不同 |
+| 能和另一次会话比较吗？ | 先核对参与者、协议、设备、作答方式与覆盖时长。个人脑电指数相对于当次静息基线，适合结合任务表现解读 |
 
-- 新增独立「十分钟测试＋训练」协议：30秒质检、60秒睁眼基线、30秒PVT练习、180秒正式PVT、四轮50秒训练＋10秒休息、60秒训练后采集。报告生成另计，设备阻塞时记录实际超时。
-- A/B/C分级：A用于探索性脑电反馈；B仅保留可计算的同通道片段用于描述与质量反馈；C使用固定引导。严格评分门槛未放宽，不保证所有低质量数据可以恢复。
-- 十分钟协议基线采用中位数/MAD，原有完整和短协议保持原口径；练习不计分，PVT练习/正式作答阶段隔离。
-- 报告增加分级统计、同通道描述性前后变化及各轮实际反馈时长。工程阈值和新分级规则待设备验证，不作诊断或疗效证明。
-- 本版验收使用仿真数据和打包程序；尚未完成v0.1.2的真人真机十分钟全流程。发行包不含私人脑电或量表数据。
+系统用于专注任务研究与训练展示。量表反映自述，按键反映特定任务表现，脑电频带描述这段记录的信号变化。关于指数的解释范围、设备验证与个体差异，见[测量与有效性说明](ningsi/docs/MEASUREMENT_VALIDITY.md)。
 
-### v0.1.1 历史更新
+## 用 Capture 保存研究数据
 
-- 修复真实 LSL 启动时半窗即返回、质检连续重复读取缓冲的问题；真机质检按2秒步长取完整4秒窗。
-- 新增质量窗口序列、排除原因、基线覆盖、分组频带、幅值阈值敏感性和 PVT 可视化；新增离线 HTML 报告，随会话 ZIP 导出。
-- 个体脑电评分不可用时仍提供采集诊断与独立行为分析；修正无效基线下的训练建议，并保留阈值待验证说明。
-- 诊断窗与任务态评分窗区分展示；旧会话缺失逐窗频带时明确提示，不事后补造。训练诊断不改变原有指标序列。
+双击 `02-Start-Capture.bat`，填写参与者匿名编号、到访编号和组别，选择协议、信号源及保存目录。先点「开始连续采集」，再进入受试者任务窗口。按计划完成静息、数字任务和随机注意探针后，点「停止并保存本次采集」，再点「导出本次采集」。复测时沿用同一参与者编号，更换到访编号。[Capture 操作与研究协议](ningsi-capture/README.md)
 
-### 解压与运行
-
-1. 下载 ZIP 和同名 `.sha256` 文件，按下方方法校验。
-2. 将 ZIP **完整解压**到可写目录；进入解压后的文件夹，保留 EXE 旁的 `_internal` 文件夹。
-3. 双击 `ningsi-studio-0.1.2.exe`，程序会启动本机服务并打开浏览器。默认地址为 `http://127.0.0.1:8765`；端口被占用时可能顺延，以控制台显示地址为准。若提示来源校验失败，请在浏览器地址栏手动输入该地址并回车。
-4. 在「检测目的」选择「十分钟测试＋训练」，或选择原有评估／完整训练流程。
-5. 无设备时可点击「运行模拟演示」；真实脑电设备需通过其采集软件发布 LSL EEG 流。
-5. 使用结束后关闭控制台程序以停止服务。数据默认保存在程序旁的 `var/studio`；目录不可写时使用用户本地应用数据目录。
-
-如需诊断，在解压后的程序目录打开 PowerShell，运行：
-
-```powershell
-.\ningsi-studio-0.1.2.exe doctor
-```
-
-该发行包已验证 EXE 启动、完整仿真会话、可视化/HTML 报告与导出、本机服务接口及打包页面。曾用 v0.1.0 完成真机流程并发现启动质检问题，本版据此修复；**v0.1.2 尚未重新完成真实硬件全流程验证，程序未做代码签名。** 脑电指数不是专注概率，评分与判定阈值仍待验证，详见[测量有效性说明](ningsi/docs/MEASUREMENT_VALIDITY.md)。
-
-升级时解压到新目录，先保留旧程序及其 `var/studio` 数据；需要迁移时先停止旧程序并备份数据，再将 `var/studio` 复制到新程序旁，或通过 `NINGSI_STUDIO_DATA` 指定数据目录。不要把旧的 `_internal` 混入新目录。
-
-### SHA-256 校验
-
-在 ZIP 和 `.sha256` 文件所在目录打开 PowerShell，执行：
-
-```powershell
-$archive = 'ningsi-studio-0.1.2-win-x64.zip'
-$expected = ((Get-Content -LiteralPath "$archive.sha256" -Raw).Trim() -split '\s+')[0]
-$actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
-if ($actual -ne $expected) { throw 'SHA-256 不一致，请重新下载并核对文件。' }
-'SHA-256 校验通过'
-```
-
-预期 SHA-256 以本版本同名 `.sha256` 附件为准；包内 `FILES.sha256` 提供逐文件校验。发行包不包含真实脑电、量表作答或测试数据库。
-
-## 从源码运行
-
-### 1. Web 应用（主界面，推荐）
-
-```powershell
-cd ningsi-studio
-.\run.bat            # 双击亦可：建环境 → 启动服务 → 打开浏览器
-# 或最省事、不经过 PowerShell：
-start.bat
-```
-
-引擎源码就在同级 `..\ningsi`，启动脚本会自动定位（`..\ningsi\src`），**无需单独安装引擎**。
-服务默认监听 `http://127.0.0.1:8765`。
-
-无浏览器跑一次完整会话：
-
-```powershell
-.\run.ps1 -Action demo
-```
-
-### 2. 算法引擎（CLI / 桌面版 / 单独使用）
-
-```powershell
-# 不安装，直接指向 src 运行
-$env:PYTHONPATH="ningsi\src"
-python -m ningsi.app.cli demo --root var/demo --participant p01
-
-# 或安装后使用命令名
-pip install -e ningsi
-ningsi demo --root var/demo --participant p01
-ningsi ui                 # Tkinter 桌面界面（离线兜底）
-ningsi self-test          # 运行引擎全部测试
-```
-
-依赖：Python 3.11+ 与 NumPy；接真实设备时可选 `pylsl==1.18.2`。
-
-## 目录结构
-
-```
-ningsi-suite/
-├── README.md                 本文件：整体说明与快速开始
-├── LICENSE                   MIT（自研代码）
-├── docs/                     当前系统架构与技术验证计划
-├── scripts/                  整仓验证与架构依赖检查
-├── ningsi/                   算法引擎包
-│   ├── src/ningsi/           signal / scales / behavior / assessment / training /
-│   │                         monitoring / models / acquisition / processing / adapters / app
-│   ├── tests/                算法、共享逐窗服务与端到端测试
-│   ├── examples/sample_run/  一次完整会话的示例产物（免运行查看）
-│   ├── docs/                 产品使用说明、赛题覆盖对照、文档口径修订清单
-│   ├── tools/                PPT / docx / 演示视频等交付物生成脚本
-│   └── scripts/verify.ps1    一键验证：跑测试 + 端到端演示
-├── ningsi-studio/            Web 应用包
-│   ├── src/ningsi_studio/    http / api / core / domain / db / acquisition / settings
-│   ├── web/                  原生 ES Module 前端（含 neurofocus/ 独立监测台）
-│   ├── tests/                API、会话、数据库、协议、跨端一致性与前端契约测试
-│   ├── docs/                 接口契约与 NeuroFocus 说明
-│   └── run.bat / start.bat   启动器（另有 run.ps1 / run.sh）
-└── ningsi-capture/           独立研究采集器
-    ├── src/ningsi_capture/   acquisition / storage / protocol / export / gui
-    └── tests/               采集、时标、质控、探针预测与导出测试
-```
-
-## 关系与口径
-
-- **单向依赖**：Studio 和 Capture 分别通过 `bootstrap.py` 定位引擎，产品包之间不互相导入；引擎可独立安装与运行。
-- **按用途固定口径**：相对指数参数在 `ningsi/src/ningsi/config.py`，调理和研究特征另有版本契约；模型核对训练时的来源与实现指纹。CLI 任务监测与 Studio 共用 `ningsi.processing.process_window`，相同输入、基线和质量证据得到相同逐窗指标。
-- **分开解释输出**：相对基线指数、模型估计、自评和信号质量各自保存。无效信号保持缺失，不作为低专注分数。
-- **数据一致**：SQLite 为权威库，另以与引擎同格式的 JSONL 台账双写（`history/sessions.jsonl`、`scales/*.jsonl`），可用 `python -m ningsi_studio export-ledger` 从库重放。
-- **上游**：`bsense-lsl` / `bsense-dataset-studio` 保持只读，本仓库不复制其代码，只通过公开接口读取其数据产物。
-
-## 测试
-
-三个包使用标准库 `unittest`。在根目录运行整仓验证（Python 3.11+，优先使用工作区 `.venv`；部分测试需要本机回环 HTTP）：
-
-```powershell
-.\scripts\verify.ps1
-.\scripts\verify.ps1 -ArchitectureOnly
-```
-
-也可分别运行：
-
-```powershell
-# 可选：安装三个包（也可不装，用 PYTHONPATH 指向 src）
-pip install -e ningsi -e ningsi-studio -e ningsi-capture
-
-cd ningsi
-python -m unittest discover -s tests -t .
-
-cd ..\ningsi-studio
-python -m unittest discover -s tests -t .
-
-cd ..\ningsi-capture
-python -m unittest discover -s tests -t .
-```
-
-未安装时可在各包目录下 `$env:PYTHONPATH="src"` 后再执行同一条命令；
-`ningsi-studio` 的测试会通过 `bootstrap.py` 自动从同级 `..\ningsi\src` 找到引擎。
-
-各包自带的启动器也可用：`ningsi\scripts\verify.ps1`（测试 + 端到端演示）、
-`ningsi-studio\run.bat test`、`ningsi-studio\run.ps1 -Action check`（静态自检）。
+真人双通道 LSL 研究采集在任务前提供约五分钟个人动作校准。参与者先自然静坐 60 秒，再按提示分别眨眼、只动眼球、轻咬牙、轻碰耳夹、轻碰前额电极和转头，每类五次，最后再静坐 60 秒。导出文件记录每个动作的提示和后续相似波形，可与原始信号对照。动作提示时间只说明屏幕何时给出提示。
 
 ### Capture 四秒窗数据回放
 
-同一套 Capture 质控按 4 秒窗、2 秒步长运行。「严格通过」要求整窗满足质量标准，「可看频带」包括合格整窗及通过片段检查的描述性结果。公开数据以连续归档时标回放，语料的采样率、导联和实验条件与 BioMulti 有差异。
+| 导出文件 | 可以复核的问题 |
+| --- | --- |
+| `raw_samples.npy`、`timestamps.npy` | 原始数值在哪个通道发生变化？对应的采样时刻、校正时刻和接收时刻是什么？ |
+| `events.csv`、`trials.csv`、`probes.csv` | 当时处于哪个阶段、呈现了什么刺激、如何作答？ |
+| `windows.csv`、`baseline.json` | 四秒窗因何保留或排除，哪些数据构成了本次个人基线？ |
+| `artifact_calibration.json`、`artifact_detections.csv` | 进行了个人动作校准时，哪些时段出现与校准动作相似的波形？ |
+| `manifest.json`、`SHA256.json` | 这份导出记录对应哪次会话，导出文件能否通过完整性校验？ |
 
-| 回放数据 | 严格通过 | 可看频带 |
-| --- | ---: | ---: |
-| EEGMMIDB 前额 Fp1/Fp2，睁眼静息 | 45 / 896 | 125 / 896 |
-| EEGMMIDB 顶区 P3/P4，同一批睁眼静息 | 161 / 896 | 315 / 896 |
-| EEGMMIDB 前额，闭眼静息 / 实际握拳 / 想象握拳 | 49 / 224 · 3 / 475 · 37 / 475 | 86 / 224 · 23 / 475 · 114 / 475 |
-| ATTLAPSE 前额，28 人、420 段探针前波形 | 223 / 2100 | 567 / 2100 |
-| PhysioNet 控制运动样例，静止 / 运动操作区间 | 133 / 136 · 98 / 108 | 136 / 136 · 107 / 108 |
-| 5 份本地历史 Capture 录波，4 份原生双录、1 份独立 LSL | 15 / 257 | 92 / 257（含仅单导联） |
-| 1 份本地仅保存 BioMulti 原生 REC 的录波 | 0 / 62 | 0 / 62 |
+例如，要检查一次眨眼附近的突变，可以在事件表找到提示时刻，通过时间戳定位两路原始波形，再查当时的逐窗质量原因。这样可以同时看到异常实际持续了多久，以及它影响了哪些重叠窗口。若要训练模型，Studio 可导入合适的 Capture 导出，按参与者隔离开发和独立测试数据，同一人的多次到访归入同一组。[真人模型训练与独立评估](ningsi-studio/docs/HUMAN_MODEL_TRAINING.md)
 
-EEGMMIDB 使用 56 份原始 EDF，160 Hz 重采样至 250 Hz。ATTLAPSE 使用 512 Hz 原始前额信号重采样至 250 Hz。另取独立记录的垂直和水平眼电作参照，低眼电活动组严格通过 38/39 窗，高眼电活动组为 101/1961 窗。两组由眼电振幅规则划定，提供工程对照。[EEGMMIDB 数据](https://physionet.org/content/eegmmidb/1.0.0/) · [ATTLAPSE v2.0.1 数据](https://doi.org/10.5281/zenodo.23592484)
+## 数据保存与源码入口
 
-控制运动样例使用 `eeg_1` 的双通道前额信号，重采样后分别汇总有区间标记的静止与间歇运动操作。后一组仍有大量窗通过，说明单靠 EEG 四秒窗质控无法判定参与者是否移动。区间标签覆盖整个操作时段，实际运动只出现在部分时刻。[PhysioNet 控制运动数据](https://physionet.org/content/motion-artifact/1.0.0/)
+Studio 使用本地 SQLite 保存会话索引，报告等文件位于数据目录下的 `runs/<会话 ID>/`。可通过环境变量 `NINGSI_STUDIO_DATA` 指定数据目录。迁移记录时一并备份数据库和对应的会话目录。Capture 按采集时选择的位置保存连续录波与导出文件，便于分别管理参与者资料、波形与对外展示的报告。
 
-本地只读回放核对了原始文件哈希及旧格式导出。另用更新前后源码复算其中一份原生双录和一份独立 LSL，逐窗严格判定、基线和训练特征一致。完整 30 提示协议的端到端验收使用模拟录波，覆盖校准、任务、导出和 Studio 导入。六类动作的真人识别准确率仍需用完整校准和独立动作标注验证。
+源码使用 Python 3.11 或更高版本。在仓库根目录的 PowerShell 中安装三个本地包并启动 Studio。
 
-#### 发布后复验
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .\ningsi -e .\ningsi-studio -e .\ningsi-capture
+.\.venv\Scripts\python.exe -m ningsi_studio serve --open
+```
 
-从 `42948dc` 单独解包运行架构检查、Capture 全量测试和 Studio 真人模型导入测试，共 209 项通过、3 项可选测试跳过。Windows 安装版重新生成的短协议模拟中，15 个正式探针均有可分析脑电，开发与测试资格均为零，18 个导出文件的 SHA-256 校验通过。
+启动 Capture 或运行仓库的自动检查时，分别使用以下命令。
 
-另用新随机种子执行完整 30 提示和短协议，加入可重复的眨眼样与咬牙样波形、未见过的突变、样本缺口和校正时标缺失。安装版在 565 个诊断窗中标记 4 个动作样窗、2 个不确定窗和 7 个不可评估窗，覆盖注入的两类动作、未见突变和缺口。原 Studio 成功导入，16 条含练习的探针全部排除在真人训练与测试之外，20 个导出文件校验通过。
+```powershell
+.\.venv\Scripts\python.exe -m ningsi_capture gui
+.\scripts\verify.ps1
+```
 
-一份完成的历史真人短协议按原处理严格通过 63/573 窗。对同一录波使用 `--reprocess` 后，严格通过 3/573 窗，13/573 窗可查看频带，15 个正式探针均无可用训练特征。由合格转为拒绝的 60 窗中，57 窗触发肌电样规则，56 窗触发波形突变规则，两项可以重叠。该录波采集于个人校准加入之前，这次差异来自处理版本切换。触发计数记录算法判定，动作来源仍需独立标注。
-
-另外四份真人历史录波覆盖独立 LSL、已结束的失败记录和旧版原生双录。旧双录 1610 窗中有 1580 窗无法建立可信的原生时标对应，整场严格通过 0 窗。六次真实录波导出的文件校验通过，原始文件哈希一致。本地未找到完整 30 提示的新版真人录波。
-
-#### 局部质量标记与探针前频带
-
-Capture 为双通道因果预处理导出增加局部失效范围、逐窗质量和分阶段频带。已知采样失效按样点或时间边界标记。分阶段频带在静息及每次探针前分别选择合格的双通道连续两秒片段，导出实际采用的区间和去重有效秒数。[导出字段说明](ningsi-capture/README.md#按时间记录失效和可分析片段)
-
-一份 25 分钟的历史真机录波复算后，15 个探针前均可查看描述性频带，其中覆盖至少 6 秒的探针从按四秒窗汇总的 4 个增加到 8 个。录波中 747/753 窗的时标和采样值通过完整性检查，正式评分资格为 0 个探针。完整性只反映采样是否有效，频带和正式评分分别经过各自检查。
-
-## 文档
-
-- 当前开发：[系统架构](docs/ARCHITECTURE.md) · [技术验证计划](docs/VALIDATION_PLAN.md) · [真人模型训练](ningsi-studio/docs/HUMAN_MODEL_TRAINING.md) · [Capture 说明](ningsi-capture/README.md)
-- 历史与研究：[产品使用说明初版](ningsi/docs/PRODUCT_GUIDE.md) · [赛题要求覆盖快照](ningsi/docs/REQUIREMENT_COVERAGE.md) · [文档口径修订清单](ningsi/docs/DOC_ALIGNMENT.md) · [新队列验证](ningsi/docs/NEW_COHORT_VALIDATION.md)
-- Web：[使用说明（零基础）](ningsi-studio/使用说明.md) · [STUDIO-GUIDE](ningsi-studio/STUDIO-GUIDE.md) · [接入真实脑电数据](ningsi-studio/接入真实脑电数据.md) · [接口契约](ningsi-studio/docs/API.md)
-
-## 许可证
-
-MIT，见 [LICENSE](LICENSE)。仅覆盖代码本身，不构成对任何评估结论的医学背书；
-系统用于研究、竞赛与自我调节训练，不提供医疗诊断。
+开发者可以阅读三个组件之间的数据流、算法接口和 Studio 服务接口。仓库代码采用 MIT 许可证。[系统架构](docs/ARCHITECTURE.md) · [算法引擎](ningsi/README.md) · [Studio API](ningsi-studio/docs/API.md) · [许可证](LICENSE)
