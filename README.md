@@ -14,7 +14,7 @@ Studio 和 Capture 可以独立启动。日常体验从 Studio 开始。如果�
 
 ## 发行版下载与使用（Windows x64）
 
-Windows x64 便携版 **v0.1.16** 包含 Studio 0.1.16、Capture 0.4.3 和脑电分析引擎 0.1.3，也可以从源码启动。[源码运行方法](#数据保存与源码入口)
+Windows x64 便携版 **v0.1.16** 包含 Studio 0.1.16、Capture 0.4.3 和脑电分析引擎 0.1.2，也可以从源码启动。[源码运行方法](#数据保存与源码入口)
 
 1. 下载 Windows 便携套件，完整解压到新的可写目录，保留其中的 `_internal` 文件夹。双击 `01-Start-Studio.bat`，在打开的浏览器中进入平台。[下载 Windows x64 便携包](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.16/ningsi-product-0.1.16-20261120.zip) · [发行说明与校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.16)
 2. **体验流程**时，打开「开始评估」，选择方案后点「运行模拟演示」。在这个演示流程页，可点「暂停演示」讲解当前阶段，再点「继续演示」从该阶段接着运行。此入口适合熟悉界面、任务顺序和报告。
