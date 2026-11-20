@@ -810,6 +810,12 @@ class CaptureApp:
                 for channel in spectrum["single_channel"]["channels"]:
                     spectrum_text += (f"\n仅单侧可看 · {channel['channel_label']} {channel['windows']} 窗，"
                                       f"有效 {channel['support_seconds']:.1f} 秒（已去重）。")
+            review = result.get("local_quality_review")
+            if review and review.get("periods_file"):
+                spectrum_text += (f"\n探针前可查看双侧频带 "
+                                  f"{review['formal_probes_with_descriptive_spectrum']}/"
+                                  f"{review['formal_probes_total']} 个（描述性）。"
+                                  f"\n所用片段和有效秒数见 {review['periods_file']}。")
             artifact = result.get("artifact_calibration")
             artifact_text = ""
             if artifact:

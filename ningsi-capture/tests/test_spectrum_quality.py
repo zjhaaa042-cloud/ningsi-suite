@@ -8,8 +8,8 @@ from ningsi.signal.spectrum import welch_psd
 from ningsi_capture.acquisition import synthetic_samples
 from ningsi_capture.export import _analyze_samples
 from ningsi_capture.native_motion import NativeMotion
-from ningsi_capture.spectrum_quality import (describe_motion_assisted_spectrum, describe_single_channels,
-                                              describe_spectrum)
+from ningsi_capture.spectrum_quality import (describe_interval_spectrum, describe_motion_assisted_spectrum,
+                                              describe_single_channels, describe_spectrum)
 
 
 class DescriptiveSpectrumTests(unittest.TestCase):
@@ -42,6 +42,46 @@ class DescriptiveSpectrumTests(unittest.TestCase):
         spectra = [welch_psd(channel, self.rate) for channel in independently_filtered]
         self.assertEqual(descriptive["relative_bands"], relative_band_powers(
             spectra[0].freqs, np.mean([spectrum.psd for spectrum in spectra], axis=0)))
+
+    def test_interval_pools_distinct_full_segments_after_reporting_boundary(self):
+        indices = np.arange(11 * self.rate)
+        raw, stamps = synthetic_samples(indices).T, indices / self.rate
+        first = 3 * self.rate
+        spectrum = describe_interval_spectrum(raw, stamps, self.rate, 1., first=first)
+        self.assertEqual(spectrum["status"], "partial")
+        self.assertEqual(spectrum["support_sec"], 8.)
+        self.assertEqual(spectrum["segment_lengths_sec"], [2.] * 4)
+        np.testing.assert_allclose(spectrum["intervals"], [(3., 5.), (5., 7.), (7., 9.), (9., 11.)])
+        wave = conditioning.filter_uv(raw[:, first - 2 * self.rate:], self.rate)
+        spectra = [welch_psd(channel, self.rate) for segment in np.split(wave, 4, axis=1)
+                   for channel in segment]
+        expected = relative_band_powers(spectra[0].freqs, np.mean([row.psd for row in spectra], axis=0))
+        for band, value in expected.items():
+            self.assertAlmostEqual(spectrum["relative_bands"][band], value, places=12)
+
+    def test_interval_restarts_filter_history_after_clock_gap(self):
+        indices = np.arange(14 * self.rate)
+        raw, stamps = synthetic_samples(indices).T, indices / self.rate
+        stamps[int(7 * self.rate):int(7.5 * self.rate)] = np.nan
+        result = describe_interval_spectrum(raw, stamps, self.rate, 1., first=3 * self.rate)
+        self.assertEqual(result["support_sec"], 8.)
+        np.testing.assert_allclose(result["intervals"], [(3., 5.), (5., 7.), (9.5, 11.5), (11.5, 13.5)])
+
+    def test_interval_uses_nonoverlapping_boundaries_when_clock_runs_slightly_fast(self):
+        stamps = self.stamps * 0.999
+        result = describe_interval_spectrum(self.clean, stamps, self.rate, 1., first=2 * self.rate)
+        first, second = result["intervals"]
+        self.assertEqual(result["segments"], 2)
+        self.assertEqual(first[1], second[0])
+
+    def test_interval_does_not_replace_two_second_segments_with_short_fragments(self):
+        raw = self.clean.copy()
+        raw[0, 950:955] += 200.
+        _, window = self.evaluate(raw)
+        self.assertEqual(window["method"], "short_fragments")
+        interval = describe_interval_spectrum(raw, self.stamps, self.rate, 1., first=2 * self.rate)
+        self.assertEqual(interval["status"], "unavailable")
+        self.assertEqual(interval["intervals"], [])
 
     def test_short_fragments_exclude_transient_and_its_mask(self):
         noisy = self.clean.copy()
@@ -112,6 +152,16 @@ class DescriptiveSpectrumTests(unittest.TestCase):
         descriptive = describe_spectrum(self.clean, self.stamps, self.rate, 1., strict, motion=trace)
         self.assertEqual(descriptive["status"], "unavailable")
         self.assertEqual(descriptive["intervals"], [])
+
+    def test_interval_retains_existing_scale_and_motion_guards(self):
+        trace = self.gyro_trace()
+        trace.gyro_xyz[25:79:9, 0] = 2.
+        for scale, motion in ((None, None), (1., trace)):
+            with self.subTest(scale=scale):
+                result = describe_interval_spectrum(self.clean, self.stamps, self.rate, scale,
+                                                    first=2 * self.rate, motion=motion)
+                self.assertEqual(result["status"], "unavailable")
+                self.assertFalse(result["band_powers"])
 
     def test_capture_keeps_independent_lead_without_creating_strict_features(self):
         raw = self.clean.copy()

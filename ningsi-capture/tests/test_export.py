@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from .test_support import FakeClock
 import numpy as np
+from ningsi.acquisition.timing import PACKET_TIMING
 from ningsi_capture.acquisition import simulation_source
 from ningsi_capture.demo import create_demo
 from ningsi_capture.export import FEATURES, PROBE_FIELDS, build_dataset, csv_write, export_session, recent_window_quality
@@ -88,6 +89,49 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(self.summary["train_eligible"], 0)
         self.assertTrue(all(r["train_eligible"] == r["test_eligible"] == "False" for r in rows))
         self.assertTrue(all(r["window_end_lsl"] == str(float(r["onset_lsl"]) - 2) for r in rows))
+
+    def test_local_quality_review_keeps_timed_descriptive_probes_in_a_separate_hashed_file(self):
+        review = self.summary["local_quality_review"]
+        self.assertEqual(review["windows_total"], self.summary["windows_total"])
+        self.assertEqual(review["windows_strict"], self.summary["windows_usable"])
+        self.assertEqual(review["formal_probes_with_descriptive_spectrum"], 3)
+        self.assertEqual(review["formal_probes_with_at_least_6_sec"], 3)
+        features = {row["probe_id"]: row for row in read_csv(self.output / "features.csv")}
+        periods = read_csv(self.output / review["periods_file"])
+        self.assertIn("baseline", {row["kind"] for row in periods})
+        for row in (period for period in periods if period["kind"] == "probe"):
+            formal = features[row["probe_id"]]
+            lower, upper = float(formal["onset_lsl"]) - 12, float(formal["onset_lsl"]) - 2
+            cursor = lower
+            intervals = json.loads(row["intervals_lsl"])
+            for start, stop in intervals:
+                self.assertLessEqual(cursor, start)
+                self.assertLessEqual(stop, upper + 1e-9)
+                cursor = stop
+            self.assertAlmostEqual(float(row["support_sec"]), sum(stop - start for start, stop in intervals), places=5)
+            self.assertTrue(float(row["rel_alpha"]) > 0)
+            self.assertEqual(formal["train_eligible"], "False")
+        hashes = json.loads((self.output / "SHA256.json").read_text(encoding="utf-8"))
+        for key in ("spans_file", "windows_file", "periods_file"):
+            self.assertIn(review[key], hashes)
+
+    def test_local_quality_review_does_not_use_per_window_clock_fit_as_a_continuous_axis(self):
+        import shutil
+        source = self.root / "per_window_clock"
+        shutil.copytree(self.session, source)
+        with sqlite3.connect(source / "recording.sqlite3") as connection:
+            metadata = json.loads(connection.execute("SELECT value FROM meta WHERE key='session'").fetchone()[0])
+            metadata["source"]["timestamp_policy"] = PACKET_TIMING
+            connection.execute("UPDATE meta SET value=? WHERE key='session'", (json.dumps(metadata),))
+        output = self.root / "per_window_clock_export"
+        summary = export_session(source, output)
+        review = summary["local_quality_review"]
+        self.assertEqual(review["clock_axis"], "corrected_before_per_window_fit")
+        self.assertEqual(review["formal_probes_with_descriptive_spectrum"], 0)
+        rows = read_csv(output / review["periods_file"])
+        self.assertTrue(rows)
+        self.assertEqual({row["reason"] for row in rows}, {"continuous_analysis_clock_unavailable"})
+        self.assertEqual(summary["feature_rows_usable"], 3)
 
     def test_formal_export_readiness_counts_both_classes_and_respects_preassignment(self):
         import shutil

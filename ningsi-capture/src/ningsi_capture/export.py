@@ -328,6 +328,38 @@ def _motion_assisted_table(output, windows):
             "support_seconds": round(union_seconds(intervals), 6)}
 
 
+def _export_quality_review(connection, source, output, analysis_times, windows, phase_starts, phase_ends, probes, motion):
+    from . import quality_review
+
+    values = np.load(output / "raw_samples.npy", allow_pickle=False).T
+    timing = source.get("timestamp_policy") or STRICT_TIMING
+    sample_stop = connection.execute("SELECT COALESCE(MAX(sample_index)+1,0) FROM samples").fetchone()[0]
+    unavailable = {"policy": quality_review.POLICY, "status": "unavailable",
+                   "reason": "sample_index_axis_mismatch", "clock_policy": timing}
+    if sample_stop != values.shape[1]:
+        return unavailable
+    if analysis_times is None:
+        if timing == BIOMULTI_REC_TIMING:
+            analysis_times = np.full(values.shape[1], np.nan)
+        elif timing == BIOMULTI_LSL_RECOVERY_TIMING:
+            _, analysis_times = packet_axis(connection, 0, None, policy=timing)
+        else:
+            analysis_times = np.load(output / "timestamps.npy", allow_pickle=False)[:, 1]
+    if analysis_times.shape != (sample_stop,):
+        return unavailable
+    scale = None if unit_conflict(source) or source_type_conflict(source) else source.get("scale_to_uv")
+    summary, spans, reviewed_windows, periods = quality_review.build_review(
+        values, analysis_times, float(source["srate"]), scale, windows, phase_starts, phase_ends, probes,
+        motion=motion, continuous_clock=timing != PACKET_TIMING)
+    summary.update(status="evaluated", clock_policy=timing, spans_file="signal_quality_spans.csv",
+                   windows_file="signal_quality_windows.csv", periods_file="period_spectra.csv",
+                   clock_axis="corrected_before_per_window_fit" if timing == PACKET_TIMING else "analysis")
+    csv_write(output / summary["spans_file"], quality_review.SPAN_FIELDS, spans)
+    csv_write(output / summary["windows_file"], quality_review.WINDOW_FIELDS, reviewed_windows)
+    csv_write(output / summary["periods_file"], quality_review.PERIOD_FIELDS, periods)
+    return summary
+
+
 def feature_tables(connection, metadata, events, output, engine_changed=False, analysis_times=None, *, motion=None,
                    motion_assisted=False):
     from .comparison_export import comparison_table
@@ -481,6 +513,10 @@ def feature_tables(connection, metadata, events, output, engine_changed=False, a
     }} if measures else {}
     if motion_assisted and motion is not None:
         spectral_summary["motion_assisted_spectrum"] = _motion_assisted_table(output, windows)
+    source = metadata["source"]
+    if source.get("preprocessing_policy") == conditioning.POLICY and source["channels"] == 2:
+        spectral_summary["local_quality_review"] = _export_quality_review(
+            connection, source, output, analysis_times, windows, phase_starts, phase_ends, probe_rows, motion)
     return {"probe_predictions": prediction_table(connection, metadata, events, probe_rows, output, results=predictions),
             "probe_comparison": comparison_table(metadata, events, predictions, output, csv_write),
             "baseline_valid": baseline.valid, "unit_conflict": conflict, "source_type_conflict": type_conflict,

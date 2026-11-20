@@ -70,15 +70,16 @@ def _motion_quiet(motion, start, end):
         threshold=MOTION_QUIET_CUTOFF)["status"] == "quiet"
 
 
-def _screened_segments(raw, stamps, rate, lengths, *, near_full=False, disjoint=True, motion=None, channel=None):
+def _screened_segments(raw, stamps, rate, lengths, *, near_full=False, disjoint=True, motion=None, channel=None,
+                       first_sample=None):
     window_size = round(config.WINDOW_SEC * rate)
     min_size = round(MOTION_MIN_CLEAN_SEC * rate) if near_full else min(lengths)
     history = round(6 * rate) - window_size
-    window_start = max(0, len(stamps) - window_size)
+    report_start = max(0, len(stamps) - window_size) if first_sample is None else first_sample
     search_step = max(1, round(rate * .1))
 
     for start, stop in _continuous_runs(raw, stamps, rate):
-        first = max(window_start, start + history)
+        first = max(report_start, start + history)
         if first > stop - min_size:
             continue
         run = raw[:, start:stop]
@@ -121,9 +122,10 @@ def _screened_segments(raw, stamps, rate, lengths, *, near_full=False, disjoint=
                 next_sample = right
 
 
-def _clean_segments(raw, stamps, rate, *, near_full=False, motion=None, channel=None):
+def _clean_segments(raw, stamps, rate, *, near_full=False, motion=None, channel=None, first_sample=None):
     length = round(config.WELCH["segment_sec"] * rate)
-    return _screened_segments(raw, stamps, rate, (length,), near_full=near_full, motion=motion, channel=channel)
+    return _screened_segments(raw, stamps, rate, (length,), near_full=near_full, motion=motion, channel=channel,
+                              first_sample=first_sample)
 
 
 def _fragmented_segments(raw, stamps, rate, motion):
@@ -156,37 +158,49 @@ def _fragment_powers(kept):
     return powers, {band: power / total if total > 0 else 0. for band, power in powers.items()}
 
 
-def _estimate_segments(values, stamps, rate, scale_to_uv, *, near_full=False, motion=None, channel=None):
-    unavailable = {"status": "unavailable", "support_sec": 0., "segments": 0,
-                   "band_powers": {}, "relative_bands": {}, "intervals": [], "method": "unavailable"}
+def _unavailable_spectrum():
+    return {"status": "unavailable", "support_sec": 0., "segments": 0,
+            "band_powers": {}, "relative_bands": {}, "intervals": [], "method": "unavailable"}
+
+
+def _estimate_segments(values, stamps, rate, scale_to_uv, *, near_full=False, motion=None, channel=None,
+                       first_sample=None):
     if scale_to_uv is None or not np.isfinite(scale_to_uv) or scale_to_uv <= 0 or rate < 100:
-        return unavailable
+        return _unavailable_spectrum()
     if np.any(np.diff(stamps[np.isfinite(stamps)]) <= 0):
-        return unavailable
+        return _unavailable_spectrum()
     with np.errstate(over="ignore", invalid="ignore"):
         raw = values * scale_to_uv
-    kept = list(_clean_segments(raw, stamps, rate, near_full=near_full, motion=motion, channel=channel))
+    kept = list(_clean_segments(raw, stamps, rate, near_full=near_full, motion=motion, channel=channel,
+                                first_sample=first_sample))
     fragmented = False
-    if not kept and not near_full and channel is None:
+    if not kept and not near_full and channel is None and first_sample is None:
         kept = _fragmented_segments(raw, stamps, rate, motion)
         fragmented = bool(kept)
     if not kept:
-        return unavailable
+        return _unavailable_spectrum()
     if fragmented:
         powers, relative = _fragment_powers(kept)
         method = "short_fragments"
     else:
         freqs = kept[0][2][0].freqs
         spectra_psd = [spectrum.psd for _, _, spectra in kept for spectrum in spectra]
-        weights = [right - left for left, right, spectra in kept for _ in spectra] if near_full else None
+        weights = ([right - left for left, right, spectra in kept for _ in spectra]
+                   if near_full or first_sample is not None else None)
         psd = np.average(spectra_psd, axis=0, weights=weights)
         powers, relative = band_powers(freqs, psd), relative_band_powers(freqs, psd)
         method = "near_full_gyro" if near_full else "continuous_segments"
+    intervals = []
+    for left, right, _ in kept:
+        end = stamps[right - 1] + 1 / rate
+        if first_sample is not None and right < len(stamps) and np.isfinite(stamps[right]):
+            if stamps[right] > stamps[right - 1]:
+                end = min(end, stamps[right])
+        intervals.append((float(stamps[left]), float(end)))
     return {"status": "partial", "support_sec": sum(right - left for left, right, _ in kept) / rate,
             "segments": len(kept), "band_powers": powers, "relative_bands": relative, "method": method,
             "segment_lengths_sec": [(right - left) / rate for left, right, _ in kept],
-            "intervals": [(float(stamps[left]), float(stamps[right - 1] + 1 / rate))
-                          for left, right, _ in kept]}
+            "intervals": intervals}
 
 
 def describe_spectrum(values, stamps, rate, scale_to_uv, full_window, *, motion=None):
@@ -198,6 +212,21 @@ def describe_spectrum(values, stamps, rate, scale_to_uv, full_window, *, motion=
                 "relative_bands": full_window.rel, "method": "full_window",
                 "intervals": [(float(stamps[-width]), full_window.t_end)]}
     return _estimate_segments(values, stamps, rate, scale_to_uv, motion=motion)
+
+
+def describe_interval_spectrum(values, stamps, rate, scale_to_uv, *, first, motion=None):
+    """Pool nonoverlapping clean two-second EEG segments in the requested interval.
+
+    Samples before `first` provide filtering history. The caller sets the end by
+    slicing the input. After a gap, each continuous run needs its own history.
+    """
+    values = np.asarray(values, dtype=float)
+    stamps = np.asarray(stamps, dtype=float)
+    if (stamps.ndim != 1 or values.shape != (2, len(stamps))
+            or not isinstance(first, (int, np.integer)) or not 0 <= first < len(stamps)
+            or not np.isfinite(rate)):
+        return _unavailable_spectrum()
+    return _estimate_segments(values, stamps, rate, scale_to_uv, motion=motion, first_sample=first)
 
 
 def describe_single_channels(values, stamps, rate, scale_to_uv, dual_spectrum, motion, labels):
