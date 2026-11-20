@@ -348,6 +348,10 @@ LSL 会话要求 `time_scale=1`。可省略 `eeg_calibration` 以使用流声明
 ### `DELETE /api/sessions/{uuid}`
 取消运行中的会话，返回 `{"cancelled": true, "uuid": "..."}`；不在运行中返回 `409`。
 
+### `POST /api/sessions/{uuid}/demo-pause`
+
+快速模拟演示接受 `{"paused": true}` 暂停或 `{"paused": false}` 继续。响应带有 `available`、`paused`、累计暂停秒数 `paused_seconds` 和状态版本 `revision`。重复提交同一状态可安全重试。会话详情的 `runtime.demo_pause` 和实时快照的 `demo_pause` 可用于刷新页面后恢复按钮状态。现场采集及已结束会话返回 `409`。
+
 ### `GET /api/sessions/{uuid}/events`（SSE）
 `Content-Type: text/event-stream`。每条事件形如：
 
@@ -363,6 +367,7 @@ data: {"id":12,"type":"window","session":"<uuid>","data":{"index":7,"t_end":14.0
 | event | data 关键字段 |
 |---|---|
 | `started` | `uuid, participant, device, source_kind, source_note, time_scale, auto, phases[], engine_versions` |
+| `demo_pause` | `available, paused, paused_seconds, revision`，模拟演示暂停或继续时推送 |
 | `notice` | `level, message`；PVT 抢答结算另带 `task: "pvt", index, false_start: true`，前端据此取消同一试次的刺激和漏答计时 |
 | `phase` | `key, label, state(running/done), progress` |
 | `progress` | `key, progress, windows_done?, windows_total?, trials_done?, trials_total?, segments_done?, segments_total?` |
@@ -569,7 +574,15 @@ lapse_rate, false_starts, valid`。
   model/history/zip` 的子集），默认一页即可取全，`total` 为登记到 `artifacts` 表的产物总数。
 - `GET /api/sessions/{uuid}/artifacts/{kind}` → 文件下载（`report_md/report_json/report_html/heatmap_svg/
   trend_svg/model/history/zip`），带 `Content-Disposition`。
-- `GET /api/sessions/{uuid}/export.zip` → 打包全部产物 + `manifest.json`（含 sha256）。
+- `GET /api/sessions/{uuid}/presentation` 根据已保存的结构化报告生成 HTML 展示页，添加 `?download=1` 可下载相同内容。缺少结构化报告时返回 `404`。
+- `GET /api/sessions/{uuid}/export.zip` 打包会话产物和含 SHA-256 的 `manifest.json`。可生成展示页时，压缩包根目录另含 `展示报告.html`。
+
+## 历史记录
+
+- `GET /api/test-history` 按日期列出当前数据库和本机归档中的记录，支持 `participant`、`status`、`page` 和 `limit`。同一 UUID 优先使用当前数据库中的记录。客户端可使用列表返回的 `presentation_url` 打开展示页。
+- `GET /api/test-history/{uuid}/presentation` 从归档的结构化数据生成 HTML 展示页。
+- `GET /api/test-history/{uuid}/report` 返回归档保存的原始报告文件。
+- `GET /api/test-history/{uuid}/evidence` 展示归档来源、时间、状态及已有记录摘要。只有采集记录的条目也可查看。
 
 ## 模型与趋势
 

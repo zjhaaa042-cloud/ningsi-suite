@@ -48,8 +48,24 @@ def check_syntax() -> list[str]:
 
 
 def route_patterns() -> list[str]:
-    text = (PACKAGE / "api" / "routes.py").read_text(encoding="utf-8")
-    return re.findall(r'@router\.(?:get|post|patch|delete)\(r"([^"]+)"\)', text)
+    patterns = []
+    for path in sorted((PACKAGE / "api").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except SyntaxError:
+            continue  # check_syntax reports the file and line.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call) or not decorator.args:
+                    continue
+                method, route = decorator.func, decorator.args[0]
+                if (isinstance(method, ast.Attribute) and isinstance(method.value, ast.Name)
+                        and method.value.id == "router" and method.attr in {"get", "post", "patch", "delete"}
+                        and isinstance(route, ast.Constant) and isinstance(route.value, str)):
+                    patterns.append(route.value)
+    return patterns
 
 
 def doc_paths() -> set[str]:
