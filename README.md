@@ -14,9 +14,9 @@ Studio 和 Capture 可以独立启动。日常体验从 Studio 开始。如果�
 
 ## 发行版下载与使用（Windows x64）
 
-Windows 便携包按版本发布。要使用当前主分支的报告展示与演示暂停功能，也可以从源码启动 Studio。[源码运行方法](#数据保存与源码入口)
+Windows x64 便携版 **v0.1.16** 包含 Studio 0.1.16、Capture 0.4.3 和脑电分析引擎 0.1.3，也可以从源码启动。[源码运行方法](#数据保存与源码入口)
 
-1. 下载 Windows 便携套件，完整解压到可写目录，保留其中的 `_internal` 文件夹。双击 `01-Start-Studio.bat`，在打开的浏览器中进入平台。[下载便携套件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases)
+1. 下载 Windows 便携套件，完整解压到新的可写目录，保留其中的 `_internal` 文件夹。双击 `01-Start-Studio.bat`，在打开的浏览器中进入平台。[下载 Windows x64 便携包](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/download/v0.1.16/ningsi-product-0.1.16-20261120.zip) · [发行说明与校验文件](https://github.com/zjhaaa042-cloud/ningsi-suite/releases/tag/v0.1.16)
 2. **体验流程**时，打开「开始评估」，选择方案后点「运行模拟演示」。在这个演示流程页，可点「暂停演示」讲解当前阶段，再点「继续演示」从该阶段接着运行。此入口适合熟悉界面、任务顺序和报告。
 3. **使用设备**时，先戴好电极和参考耳夹，在厂商软件中确认波形并打开 LSL 推流。在 Studio 选择参与者和对应的 EEG 流，预览波形、核对采样率和单位，再点「开始评估」。BSense-R 的预设为双通道、250 Hz、µV。换用其他流时按其实际标定设置。[设备接入与标定](docs/BSENSE_R_DEVICE_GUIDE.md)
 4. 参与者按当前阶段提示静坐、作答或训练。结束后从「最近会话」打开「展示报告」。「历史与趋势」可按参与者找回会话，查看原始报告或阶段记录。[Studio 中文使用说明](ningsi-studio/使用说明.md)
